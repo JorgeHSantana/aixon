@@ -7,6 +7,9 @@ from __future__ import annotations
 from typing import Optional
 
 from aixon.exceptions import AgentNotFoundError, RegistrationError
+from aixon.logging import Logger
+
+_log = Logger("aixon.registry")
 
 
 class Registry:
@@ -32,6 +35,8 @@ class Registry:
         self._order.append(name)
         for alias in agent.aliases:
             self._aliases[alias] = name
+        hidden = " (hidden)" if agent.hidden else ""
+        _log.info(f"registered agent '{name}'{hidden} aliases={agent.aliases}")
 
     def resolve(self, name: str) -> object:
         if name in self._agents:
