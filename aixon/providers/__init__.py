@@ -13,19 +13,9 @@ from aixon.providers.base import (
 
 # Trigger self-registration. Each module's top-level register_provider() call
 # fires when the module is imported. SDK imports stay inside build().
-# Concrete provider modules may not exist yet (during early task development).
-try:
-    from aixon.providers import anthropic as _anthropic  # noqa: E402,F401
-except ImportError:
-    pass
-try:
-    from aixon.providers import google as _google  # noqa: E402,F401
-except ImportError:
-    pass
-try:
-    from aixon.providers import openai as _openai  # noqa: E402,F401
-except ImportError:
-    pass
+from aixon.providers import anthropic as _anthropic  # noqa: E402,F401
+from aixon.providers import google as _google  # noqa: E402,F401
+from aixon.providers import openai as _openai  # noqa: E402,F401
 
 __all__ = [
     "Provider",
