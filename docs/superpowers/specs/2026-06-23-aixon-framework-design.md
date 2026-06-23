@@ -7,7 +7,7 @@
 
 `aixon` é um framework de agentes de IA extraído do **olympus-ai-server**, seguindo o mesmo padrão que produziu o **restmcp** a partir do **mcp-financial-server** (e que depois foi usado para construir o mcp-diagnosis-server). O olympus continuará existindo como *consumidor* do `aixon`, assim como o mcp-diagnosis-server consome o restmcp.
 
-O framework generaliza a camada reutilizável do olympus: servidor OpenAI-compatible, agentes declarativos, orquestração multi-agente, RAG/busca, embeddings e clientes de microserviços.
+O framework generaliza a camada reutilizável do olympus: servidor com protocolo desacoplado via `ProtocolAdapter` (OpenAI-compatible é apenas o primeiro adapter, não algo hardwired), agentes declarativos, orquestração multi-agente, RAG/busca, embeddings e clientes de microserviços.
 
 ### Objetivos declarados (requisitos)
 
