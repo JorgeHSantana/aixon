@@ -37,6 +37,8 @@ class Agent(ABC):
     _suffix: str = "Agent"
     # Set True on a class to mark it an abstract subtype (no validation/registration).
     _abstract: bool = True  # the base itself is abstract
+    # Set True after first successful registration; prevents RegistrationError on re-instantiation.
+    _registered: bool = False
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -67,9 +69,12 @@ class Agent(ABC):
         cls()
 
     def __init__(self) -> None:
+        if type(self)._registered:
+            return
         if not self.name:
             self.name = type(self).__name__.lower()
         get_registry().register(self)
+        type(self)._registered = True
 
     @abstractmethod
     def invoke(self, messages: list[Message]) -> Message:

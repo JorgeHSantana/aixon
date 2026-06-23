@@ -24,13 +24,13 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Operating System :: OS Independent",
 ]
-dependencies = [
-    "pydantic>=2.0",
-    "click>=8.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
+server = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "pydantic>=2.0"]
+cli = ["click>=8.0"]
+all = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "pydantic>=2.0", "click>=8.0"]
 
 [project.urls]
 Homepage = "https://github.com/JorgeHSantana/aixon"

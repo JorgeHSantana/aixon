@@ -11,6 +11,7 @@ from aixon.exceptions import (
 )
 from aixon.logging import Logger
 from aixon.message import Chunk, Message, Role
+from aixon.registry import Registry, get_registry, reset_registry
 
 __all__ = [
     "Agent",
@@ -25,4 +26,7 @@ __all__ = [
     "Message",
     "Chunk",
     "Role",
+    "Registry",
+    "get_registry",
+    "reset_registry",
 ]
