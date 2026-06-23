@@ -7,11 +7,22 @@ subclasses self-register at definition time; abstract subtypes
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterator
+from dataclasses import dataclass
+from typing import Callable, Iterator
 
 from aixon.exceptions import NamingError
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry
+
+
+@dataclass
+class AgentTool:
+    """Neutral descriptor of an Agent exposed as a callable tool. Later plans
+    adapt this to a LangChain StructuredTool for tool-calling agents."""
+
+    name: str
+    description: str
+    func: Callable[[str], str]
 
 
 class Agent(ABC):
@@ -67,3 +78,19 @@ class Agent(ABC):
     @abstractmethod
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         """Run the agent, yielding neutral Chunks as they are produced."""
+
+    def as_tool(
+        self, name: str | None = None, description: str | None = None
+    ) -> "AgentTool":
+        """Expose this agent as a tool. Each call runs with a fresh message
+        list, so the wrapped agent's state never leaks across invocations."""
+
+        def _run(text: str) -> str:
+            result = self.invoke([Message(role="user", content=text)])
+            return result.content
+
+        return AgentTool(
+            name=name or self.name,
+            description=description or self.description,
+            func=_run,
+        )

@@ -1,6 +1,6 @@
 """aixon — declarative AI-agent framework."""
 
-from aixon.agent import Agent
+from aixon.agent import Agent, AgentTool
 from aixon.exceptions import (
     AixonError,
     AgentNotFoundError,
@@ -12,6 +12,7 @@ from aixon.message import Chunk, Message, Role
 
 __all__ = [
     "Agent",
+    "AgentTool",
     "AixonError",
     "AgentNotFoundError",
     "CompositionCycleError",
