@@ -7,6 +7,7 @@ from aixon.exceptions import (
     NamingError,
     RegistrationError,
 )
+from aixon.message import Chunk, Message, Role
 
 __all__ = [
     "AixonError",
@@ -14,4 +15,7 @@ __all__ = [
     "CompositionCycleError",
     "NamingError",
     "RegistrationError",
+    "Message",
+    "Chunk",
+    "Role",
 ]
