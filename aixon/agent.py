@@ -33,6 +33,8 @@ class Agent(ABC):
             cls._abstract = True
             return
         cls._abstract = False
+        if "aliases" not in vars(cls):
+            cls.aliases = []
         if not cls.__name__.endswith(cls._suffix):
             raise NamingError(
                 f"Agent subclass '{cls.__name__}' must end with '{cls._suffix}' "
