@@ -1,7 +1,10 @@
 import pytest
 
+from aixon.registry import reset_registry
+
 
 @pytest.fixture(autouse=True)
-def reset_registry():
-    # Replaced in Task 3 with a real registry reset. No-op for now.
+def _reset_registry():
+    reset_registry()
     yield
+    reset_registry()
