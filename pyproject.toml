@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aixon"
+version = "0.0.1"
+description = "Declarative AI-agent framework — composable agents, multi-agent orchestration, and a protocol-decoupled server"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Jorge Henrique Moreira Santana", email = "jorge.henrique.moreira.santana@gmail.com" },
+]
+license = { text = "MIT" }
+keywords = ["ai", "llm", "agents", "langgraph", "framework", "orchestration", "openai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.urls]
+Homepage = "https://github.com/JorgeHSantana/aixon"
+Repository = "https://github.com/JorgeHSantana/aixon"
+"Bug Tracker" = "https://github.com/JorgeHSantana/aixon/issues"
+
+[project.scripts]
+aixon = "aixon.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aixon"]
