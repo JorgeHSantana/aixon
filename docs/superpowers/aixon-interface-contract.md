@@ -111,7 +111,7 @@ NamingError, RegistrationError, AgentNotFoundError, CompositionCycleError  # all
 - **Neutral boundary:** `Agent.invoke`/`stream` and the public API speak ONLY
   `Message`/`Chunk`. LangChain/LangGraph/provider objects may be used
   INTERNALLY but must be converted at the boundary. Conversion helpers live in
-  `aixon/_langchain.py` (see §1.4).
+  the private `aixon/_adapters/` package (see §1.4).
 - **Dependencies:** core `dependencies = []`. Each plan adds what it needs to
   the relevant extra in `pyproject.toml`. Extras so far: `dev`, `server`,
   `cli`, `all`. New extras introduced below: `llm` (providers), `retrieval`.
@@ -188,7 +188,12 @@ class LLM:
         deltas and a final Chunk(done=True)."""
 ```
 
-### 1.4 `aixon/_langchain.py` (internal conversion helpers)
+### 1.4 `aixon/_adapters/messages.py` (internal conversion helpers)
+
+Import from the exact submodule: `from aixon._adapters.messages import
+to_langchain, from_langchain`. The `aixon/_adapters/__init__.py` deliberately
+does NOT re-export these (an eager re-export would import `langchain_core` at
+`import aixon` time and break the neutral boundary).
 
 ```python
 def to_langchain(messages: list[Message]) -> list["BaseMessage"]:
@@ -326,8 +331,9 @@ mapping and pass what it accepts (do not invent a parameter).
 
 ### 2.3 Tool coercion
 
-A helper `aixon/_tools.py::coerce_tools(tools: list) -> list[BaseTool]` that
-converts each entry to a LangChain `BaseTool`:
+A helper `aixon/_adapters/tools.py::coerce_tools(tools: list) -> list[BaseTool]`
+(import via `from aixon._adapters.tools import coerce_tools`) that converts each
+entry to a LangChain `BaseTool`:
 - `AgentTool` (from `Agent.as_tool()` / `Retriever.as_tool()`) →
   `StructuredTool.from_function(func=tool.func, name=tool.name, description=tool.description)`
 - a LangChain `BaseTool` / `@tool`-decorated function → passed through
@@ -653,8 +659,10 @@ aixon/
 │   ├── openai.py       # (P2)
 │   ├── anthropic.py    # (P2)
 │   └── google.py       # (P2)
-├── _langchain.py       # (P2) neutral<->langchain message conversion
-├── _tools.py           # (P3) coerce_tools
+├── _adapters/          # private LangChain-boundary package
+│   ├── __init__.py     # namespace only — no eager re-export (keeps boundary)
+│   ├── messages.py     # (P2) neutral<->langchain message conversion
+│   └── tools.py        # (P3) coerce_tools
 ├── reasoning.py        # (P3)
 ├── state.py            # (P4) GraphState, END
 ├── retriever.py        # (P6)

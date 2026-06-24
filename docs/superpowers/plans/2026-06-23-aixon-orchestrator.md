@@ -4,7 +4,7 @@
 
 **Goal:** Build the `Orchestrator` subtype of `Agent` — a declarative, three-tier multi-agent coordinator backed by **LangGraph 1.x** — plus the default `GraphState` and the two recursion guards. The three tiers (Tier 1 supervisor, Tier 2 explicit graph, Tier 3 `build_graph` escape hatch) all share the same `Agent` interface (`invoke`/`stream`/`as_tool`), so the server, registry, and protocol layer never need to know which tier an orchestrator uses.
 
-**Architecture:** `Orchestrator(Agent, abstract=True)` sets `_suffix = "Orchestrator"`. Concrete subclasses are suffix-validated and auto-registered by Plan 1's `Agent.__init_subclass__`. Tier detection and Tier-2 structural validation run in `Orchestrator.__init_subclass__` (after `super().__init_subclass__()` so the base's suffix check + registration still fire). The compiled LangGraph graph is built lazily on first `invoke`/`stream` and cached. Nodes are `Agent` instances; each node wraps an agent's neutral `invoke` into a LangGraph node function that reads `state["messages"]`, runs the agent, and appends the result via the `add_messages_neutral` reducer. The neutral boundary holds: `Orchestrator.invoke`/`stream` speak only `Message`/`Chunk`; LangGraph/LangChain types live strictly inside `orchestrator.py` and `state.py`.
+**Architecture:** `Orchestrator(Agent, abstract=True)` sets `_suffix = "Orchestrator"`. Concrete subclasses are suffix-validated and auto-registered by Plan 1's `Agent.__init_subclass__`. Tier detection and Tier-2 structural validation run in `Orchestrator._validate_subclass()` — the hook `Agent.__init_subclass__` invokes AFTER the suffix/abstract-method checks and BEFORE registration — so an invalid tier or composition cycle raises without leaving a ghost in the registry. (Do NOT validate inside an `__init_subclass__` override after `super().__init_subclass__()`: that registers first, then fails — the register-then-validate ghost bug; see contract "Subtype validation hook".) The compiled LangGraph graph is built lazily on first `invoke`/`stream` and cached. Nodes are `Agent` instances; each node wraps an agent's neutral `invoke` into a LangGraph node function that reads `state["messages"]`, runs the agent, and appends the result via the `add_messages_neutral` reducer. The neutral boundary holds: `Orchestrator.invoke`/`stream` speak only `Message`/`Chunk`; LangGraph/LangChain types live strictly inside `orchestrator.py` and `state.py`.
 
 **Two recursion guards (distinct):**
 - **(A) Composition cycle (structural), always on:** walk the static composition graph of nested agents (referenced via `agents`, `nodes`, or any agent declaring `tools`) at subclass-definition time; revisiting a class already on the current DFS path raises `CompositionCycleError`. A loop *inside* one LangGraph graph (a node edging back) is legitimate and is bounded by guard B, not flagged by guard A.
@@ -25,7 +25,7 @@
 - **Plans 2 and 3 are merged before Plan 4 (contract §9.3): NO try/except fallback shims.** Import `LLM`, `emit_reasoning`, `reasoning_channel` directly from `aixon`; import `make_llm`/`make_echo_agent` directly from `_fakes`. If an import fails, that is a real ordering bug to fix, not something to paper over.
 - **Abstract subtype:** `Orchestrator` is declared `class Orchestrator(Agent, abstract=True)` and sets **`_suffix = "Orchestrator"`**. Concrete user subclasses inherit, get suffix-validated (`*Orchestrator`) and auto-registered by Plan 1's machinery.
 - **`recursion_limit` default = 25** (matches LangGraph's own default). `None` = no cap (still bounded by `timeout`). `timeout` default `None`.
-- **Composition-cycle guard (A) is ALWAYS ON and NOT disableable** — it runs in `__init_subclass__` for every concrete `Orchestrator` subclass and raises `CompositionCycleError` on a structural cycle.
+- **Composition-cycle guard (A) is ALWAYS ON and NOT disableable** — it runs in `_validate_subclass()` (before registration) for every concrete `Orchestrator` subclass and raises `CompositionCycleError` on a structural cycle.
 - **Error tone:** state what was got and how to fix it (mirror Plan 1).
 - **`END` sentinel:** re-export LangGraph's `END` from `aixon.state`; concrete orchestrators and the public API use `aixon.END` / `aixon.state.END`, never `langgraph.graph.END` directly.
 - **Dependencies (contract §9.2 — binding):** `langgraph` lives in the **`llm` extra** (ToolAgent and Orchestrator both need it). There is **NO separate `orchestration` extra**. Plan 2 introduces the `llm` extra as `["langchain>=1.0", "langchain-core>=1.0", "langgraph>=1.0"]`; if (and only if) `langgraph>=1.0` is somehow absent from `llm`, Plan 4 adds it there and ensures it is in `all`. **Never pin a `<1` ceiling anywhere.**
@@ -380,7 +380,7 @@ class Orchestrator(Agent, abstract=True):
     def stream(self, messages: list[Message]) -> Iterator[Chunk]: ...
 ```
 
-**Tier detection order** (computed in `__init_subclass__`, stored as `cls._tier`): `build_graph` overridden on the subclass → Tier 3; else `nodes` non-empty → Tier 2; else `supervisor` set → Tier 1. None apply on a concrete subclass → `AixonError`.
+**Tier detection order** (computed in `_validate_subclass()`, stored as `cls._tier`): `build_graph` overridden on the subclass → Tier 3; else `nodes` non-empty → Tier 2; else `supervisor` set → Tier 1. None apply on a concrete subclass → `AixonError`.
 
 This task implements: the abstract subtype, tier detection, Tier 1 build + run, and the "no tier applies" error. Tier 2 validation is Task 5; Tier 3 is Task 6; composition-cycle guard is Task 7; runtime-guard wiring assertions are Task 8; reasoning propagation is Task 9.
 
@@ -446,6 +446,18 @@ def test_bad_suffix_raises_naming_error():
 def test_no_tier_applies_raises_aixon_error():
     with pytest.raises(AixonError, match="tier"):
         type("EmptyOrchestrator", (Orchestrator,), {})
+
+
+def test_invalid_orchestrator_leaves_no_ghost_in_registry():
+    """A concrete Orchestrator that fails validation (no tier) must NOT be
+    registered: _validate_subclass runs BEFORE registration, so the registry
+    stays clean — no register-then-validate ghost."""
+    before = {a.name for a in get_registry().all()}
+    with pytest.raises(AixonError, match="tier"):
+        type("GhostOrchestrator", (Orchestrator,), {})
+    after = {a.name for a in get_registry().all()}
+    assert "ghostorchestrator" not in after
+    assert after == before
 
 
 def test_stream_yields_content_and_done():
@@ -532,11 +544,16 @@ class Orchestrator(Agent, abstract=True):
     # Resolved at subclass-definition time.
     _tier: int = 0
 
-    def __init_subclass__(cls, *, abstract: bool = False, **kwargs):
-        # Let Plan 1 run suffix validation + auto-registration first.
-        super().__init_subclass__(abstract=abstract, **kwargs)
-        if abstract:
-            return
+    @classmethod
+    def _validate_subclass(cls) -> None:
+        # Runs via Agent.__init_subclass__ AFTER suffix/abstract-method checks
+        # and BEFORE registration (cls()), so an invalid tier, a composition
+        # cycle, or bad Tier-2 wiring raises WITHOUT leaving a ghost in the
+        # registry. Do NOT override __init_subclass__ to validate after
+        # super().__init_subclass__() — that registers first, then fails (the
+        # register-then-validate ghost bug; see contract "Subtype validation
+        # hook"). The base calls this hook only for concrete subclasses, so no
+        # abstract=True guard is needed here.
         cls._tier = cls._detect_tier()
         # Composition-cycle guard (A) — always on (full impl in Task 7).
         cls._check_composition_cycle()
@@ -714,7 +731,7 @@ except ImportError:  # langgraph not installed (no 'llm' extra)
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator_tier1.py -v`
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 5: Run the full suite**
 

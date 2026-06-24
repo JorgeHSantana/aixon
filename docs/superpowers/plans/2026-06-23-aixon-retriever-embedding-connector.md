@@ -779,7 +779,8 @@ from aixon.agent import AgentTool
         """Expose this retriever as a neutral AgentTool.
 
         The returned ``AgentTool`` is the same dataclass as ``Agent.as_tool()``
-        returns, so ``ToolAgent.coerce_tools`` (Plan 3) handles both uniformly.
+        returns, so ``coerce_tools`` (Plan 3, ``aixon._adapters.tools``) handles
+        both uniformly.
 
         Args:
             name:        Tool name (default: lowercased class name).

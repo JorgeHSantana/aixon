@@ -346,7 +346,7 @@ git commit -m "docs: replace README stub with full overview, quickstart, and env
 - Create: `docs/architecture.md`
 
 **Interfaces:**
-- Consumes (contract): §0 (`Message`, `Chunk`, neutral boundary convention), §1.4 (`_langchain.py` boundary note), §4 (`ProtocolAdapter` decoupling), design spec §"Desacoplamento de protocolo", §"Fluxo de um request".
+- Consumes (contract): §0 (`Message`, `Chunk`, neutral boundary convention), §1.4 (`_adapters/messages.py` boundary note), §4 (`ProtocolAdapter` decoupling), design spec §"Desacoplamento de protocolo", §"Fluxo de um request".
 - Produces: the architectural narrative that all other docs reference.
 
 - [ ] **Step 1: Write docs/architecture.md**
