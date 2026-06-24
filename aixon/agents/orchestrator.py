@@ -94,11 +94,52 @@ class Orchestrator(Agent, abstract=True):
             f"Tier 2, or override `build_graph` for Tier 3."
         )
 
-    # ----- guard A placeholder (real impl in Task 7) ----------------------
+    # ----- guard A: structural composition-cycle detection (always on) ----
+
+    @classmethod
+    def _referenced_agent_classes(cls) -> list[type]:
+        """Agent CLASSES this class composes, via `agents`, `nodes`, and any
+        `tools` declared on the class. Instances are mapped to their class.
+        Non-Agent entries (LLMs, plain callables, AgentTool) are ignored — only
+        agent→agent composition can form a structural cycle."""
+        refs: list[type] = []
+        seen: set[int] = set()
+
+        def add(obj: Any) -> None:
+            klass = obj if isinstance(obj, type) else type(obj)
+            if isinstance(klass, type) and issubclass(klass, Agent):
+                if id(klass) not in seen:
+                    seen.add(id(klass))
+                    refs.append(klass)
+
+        for entry in getattr(cls, "agents", []) or []:
+            add(entry)
+        for entry in (getattr(cls, "nodes", {}) or {}).values():
+            add(entry)
+        for entry in getattr(cls, "tools", []) or []:
+            add(entry)
+        return refs
 
     @classmethod
     def _check_composition_cycle(cls) -> None:
-        return None
+        path: list[type] = []
+
+        def walk(node_cls: type) -> None:
+            if node_cls in path:
+                chain = " -> ".join(c.__name__ for c in path + [node_cls])
+                raise CompositionCycleError(
+                    f"Composition cycle detected: {chain}. An agent cannot "
+                    f"(transitively) include itself as a worker/node/tool. "
+                    f"Break the cycle by removing one of the references."
+                )
+            path.append(node_cls)
+            neighbors = getattr(node_cls, "_referenced_agent_classes", None)
+            if callable(neighbors):
+                for nxt in node_cls._referenced_agent_classes():
+                    walk(nxt)
+            path.pop()
+
+        walk(cls)
 
     # ----- Tier-2 validation (contract §3.2) -------------------------------
 
