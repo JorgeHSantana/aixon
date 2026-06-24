@@ -333,9 +333,12 @@ class Orchestrator(Agent, abstract=True):
         return Message(role="assistant", content="")
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
-        # Minimal streaming: run to completion, then emit the final assistant
-        # content as one Chunk + done. (Reasoning propagation lands in Task 9.)
-        final = self.invoke(messages)
+        from aixon.reasoning import reasoning_channel
+
+        with reasoning_channel() as channel:
+            final = self.invoke(messages)
+            for line in channel.drain():
+                yield Chunk(reasoning=line)
         if final.reasoning:
             yield Chunk(reasoning=final.reasoning)
         yield Chunk(content=final.content)
