@@ -1,4 +1,4 @@
-# aixon/_tools.py
+# aixon/_adapters/tools.py
 """Coerce neutral tool entries into LangChain BaseTools for the tool-calling
 loop. This is the ONLY place neutral AgentTool -> LangChain conversion happens
 (the neutral boundary, contract §2.3/§2.4): Agent.as_tool stays neutral and

@@ -8,7 +8,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from aixon._langchain import from_langchain, to_langchain
+from aixon._adapters.messages import from_langchain, to_langchain
 from aixon.message import Message
 
 

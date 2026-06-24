@@ -6,7 +6,7 @@ from langchain_core.tools import BaseTool
 from aixon.agent import Agent, AgentTool
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry
-from aixon._tools import coerce_tools
+from aixon._adapters.tools import coerce_tools
 
 
 def _concrete(name_cls, reply):

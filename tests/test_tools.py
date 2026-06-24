@@ -4,7 +4,7 @@ from langchain_core.tools import BaseTool, StructuredTool, tool
 
 from aixon.agent import AgentTool
 from aixon.exceptions import AixonError
-from aixon._tools import coerce_tools
+from aixon._adapters.tools import coerce_tools
 
 
 def test_agenttool_becomes_structuredtool():

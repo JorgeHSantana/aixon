@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Iterator
 
-from aixon._langchain import from_langchain, to_langchain
+from aixon._adapters.messages import from_langchain, to_langchain
 from aixon.message import Chunk, Message
 
 if TYPE_CHECKING:
