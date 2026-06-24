@@ -74,7 +74,7 @@ class Server:
         # (e.g. between tests).
         if self._initialized:
             return
-        self._adapters: list[ProtocolAdapter] = adapters or [OpenAIAdapter()]
+        self._protocol_adapters: list[ProtocolAdapter] = adapters or [OpenAIAdapter()]
         self._app = None
         self._initialized = True
 
@@ -87,7 +87,7 @@ class Server:
 
     def _public_paths(self) -> set[str]:
         public = {"/health"}
-        for adapter in self._adapters:
+        for adapter in self._protocol_adapters:
             for method, path in adapter.routes():
                 if method.upper() == "GET":
                     public.add(path)  # model-list routes stay public
@@ -111,7 +111,7 @@ class Server:
                 "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
             }
 
-        for adapter in self._adapters:
+        for adapter in self._protocol_adapters:
             self._mount_adapter(app, adapter)
 
         # Wrap unconditionally so the middleware can react to AUTH_API_KEY set
