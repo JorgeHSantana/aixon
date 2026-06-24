@@ -113,6 +113,18 @@ def test_missing_llm_raises_aixon_error():
             pass
 
 
+def test_failed_llm_validation_leaves_no_ghost_in_registry():
+    """A concrete subclass that fails llm validation must NOT be registered:
+    validation runs before registration, so the registry stays clean."""
+    before = {a.name for a in get_registry().all()}
+    with pytest.raises(AixonError, match="llm"):
+        class GhostlyAgent(LLMAgent):
+            pass
+    after = {a.name for a in get_registry().all()}
+    assert "ghostlyagent" not in after
+    assert after == before
+
+
 def test_llm_agent_itself_not_registered():
     names = [a.name for a in get_registry().all()]
     assert "llmagent" not in names

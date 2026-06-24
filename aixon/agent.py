@@ -66,7 +66,17 @@ class Agent(ABC):
                 f"Can't instantiate abstract class {cls.__name__} without an "
                 f"implementation for abstract method(s) {sorted(abstracts)!r}"
             )
+        # Subtype validation runs BEFORE registration so a failed check never
+        # leaves a half-built agent in the registry.
+        cls._validate_subclass()
         cls()
+
+    @classmethod
+    def _validate_subclass(cls) -> None:
+        """Hook for abstract subtypes (LLMAgent/ToolAgent/Orchestrator) to
+        validate a concrete subclass before it is registered. Override to raise
+        on invalid configuration (e.g. a missing required attribute). The base
+        implementation is a no-op."""
 
     def __init__(self) -> None:
         if type(self)._registered:

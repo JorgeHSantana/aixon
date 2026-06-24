@@ -35,11 +35,12 @@ class LLMAgent(Agent, abstract=True):
     llm: LLM         # declared; absence on a concrete subclass is an error
     prompt: str = ""
 
-    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
-        # Let Agent handle suffix validation + auto-registration first.
-        super().__init_subclass__(abstract=abstract, **kwargs)
-        if abstract:
-            return
+    @classmethod
+    def _validate_subclass(cls) -> None:
+        """Require a concrete subclass to declare a class-level ``llm``. Runs
+        (via Agent.__init_subclass__) after suffix validation and before
+        registration, so a missing ``llm`` raises without registering a ghost.
+        Suffix errors still take precedence (NamingError is raised first)."""
         llm_val = cls.__dict__.get("llm") or getattr(cls, "llm", None)
         if not isinstance(llm_val, LLM):
             raise AixonError(
