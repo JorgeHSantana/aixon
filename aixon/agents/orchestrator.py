@@ -100,11 +100,38 @@ class Orchestrator(Agent, abstract=True):
     def _check_composition_cycle(cls) -> None:
         return None
 
-    # ----- Tier-2 validation placeholder (real impl in Task 5) ------------
+    # ----- Tier-2 validation (contract §3.2) -------------------------------
 
     @classmethod
     def _validate_tier2(cls) -> None:
-        return None
+        nodes = cls.nodes
+        edge_srcs = {src for src, _ in cls.edges}
+        for name in nodes:
+            has_edge = name in edge_srcs
+            has_route = callable(getattr(cls, f"route_{name}", None))
+            if has_edge and has_route:
+                raise AixonError(
+                    f"Node '{name}' in Orchestrator '{cls.__name__}' declares "
+                    f"both a fixed edge in `edges` and a `route_{name}` method. "
+                    f"A node must have exactly one exit form — remove one."
+                )
+            # neither -> terminal node (allowed)
+        for src, dst in cls.edges:
+            if src not in nodes:
+                raise AixonError(
+                    f"Edge ({src!r}, ...) in '{cls.__name__}' references unknown "
+                    f"node '{src}'. Known nodes: {sorted(nodes)}."
+                )
+            if dst is not END and dst not in nodes:
+                raise AixonError(
+                    f"Edge (..., {dst!r}) in '{cls.__name__}' references unknown "
+                    f"node '{dst}'. Use a node name or aixon.END."
+                )
+        if cls.entry not in nodes:
+            raise AixonError(
+                f"Orchestrator '{cls.__name__}' has entry={cls.entry!r}, which is "
+                f"not a node. Set `entry` to one of: {sorted(nodes)}."
+            )
 
     # ----- declarative state ----------------------------------------------
 
@@ -191,6 +218,38 @@ class Orchestrator(Agent, abstract=True):
             return {"messages": result}
 
         return node
+
+    # ----- Tier 2: explicit graph (nodes/entry/edges + route_<node>) ------
+
+    def _node_instances(self) -> dict[str, Agent]:
+        return {name: _instantiate(raw) for name, raw in self.nodes.items()}
+
+    def _wrap_router(self, node_name: str):
+        method = getattr(self, f"route_{node_name}")
+
+        def router(state: GraphState):
+            return method(state)  # returns str (one path) or list[str] (fan-out)
+
+        return router
+
+    def _build_explicit_graph(self):
+        instances = self._node_instances()
+        graph = StateGraph(self.State)
+        for name, inst in instances.items():
+            graph.add_node(name, self._make_worker_node(inst))
+        graph.set_entry_point(self.entry)
+
+        edge_srcs = {src for src, _ in self.edges}
+        for src, dst in self.edges:
+            graph.add_edge(src, dst)
+        for name in instances:
+            if name in edge_srcs:
+                continue
+            if callable(getattr(self, f"route_{name}", None)):
+                graph.add_conditional_edges(name, self._wrap_router(name))
+            else:
+                graph.add_edge(name, END)  # terminal node -> END
+        return graph.compile()
 
     # ----- run config (guard B; recursion error wrapping added in Task 8) -
 
