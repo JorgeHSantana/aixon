@@ -319,7 +319,10 @@ def test_echo_stream_yields_content_then_done():
 
 
 def test_reasoning_agent_emits_reasoning():
-    class _R(ReasoningAgent):
+    # NOTE: concrete Agent subclasses MUST end with the "Agent" suffix
+    # (aixon/agent.py enforces _suffix="Agent"); a bare name like `_R` raises
+    # NamingError at class-definition time. Hence `_RAgent`.
+    class _RAgent(ReasoningAgent):
         name = "thinker"
 
     inst = get_registry().resolve("thinker")
