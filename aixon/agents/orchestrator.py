@@ -306,11 +306,21 @@ class Orchestrator(Agent, abstract=True):
     # ----- neutral interface ----------------------------------------------
 
     def invoke(self, messages: list[Message]) -> Message:
+        from langgraph.errors import GraphRecursionError
+
         graph = self._compiled()
         deadline = time.monotonic() + self.timeout if self.timeout else None
-        result = graph.invoke(
-            self._initial_state(messages), config=self._run_config()
-        )
+        try:
+            result = graph.invoke(
+                self._initial_state(messages), config=self._run_config()
+            )
+        except GraphRecursionError as exc:
+            raise AixonError(
+                f"Orchestrator '{type(self).__name__}' hit its recursion limit "
+                f"({self.recursion_limit}). The graph looped without reaching "
+                f"END. Raise `recursion_limit`, fix the routing, or set a "
+                f"terminal edge. (LangGraph: {exc})"
+            ) from exc
         if deadline is not None and time.monotonic() > deadline:
             raise AixonError(
                 f"Orchestrator '{type(self).__name__}' exceeded timeout="
