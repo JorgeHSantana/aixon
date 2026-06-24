@@ -1,4 +1,4 @@
-"""Adapters: the boundary where aixon's neutral types meet LangChain.
+"""Interop: the boundary where aixon's neutral types meet LangChain.
 
 INTERNAL to aixon (the leading underscore marks the whole package private —
 nothing here is part of the public API). Public code speaks only
@@ -14,5 +14,5 @@ This ``__init__`` deliberately does NOT re-export those symbols. ``messages``
 imports ``langchain_core`` at module scope, so an eager re-export here would
 force LangChain at ``import aixon`` time and break the neutral boundary
 (``ToolAgent`` is exported unguarded). Import from the exact submodule instead,
-e.g. ``from aixon._adapters.tools import coerce_tools``.
+e.g. ``from aixon._interop.tools import coerce_tools``.
 """

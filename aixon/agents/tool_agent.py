@@ -22,7 +22,7 @@ from aixon.exceptions import AixonError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.reasoning import current_channel, emit_reasoning, reasoning_channel
-from aixon._adapters.tools import coerce_tools
+from aixon._interop.tools import coerce_tools
 
 _log = Logger("aixon.tool_agent")
 
@@ -69,7 +69,7 @@ class ToolAgent(Agent, abstract=True):
         """Return (compiled_agent, lc_messages, config). A leading neutral
         system message overrides self.prompt."""
         from langchain.agents import create_agent
-        from aixon._adapters.messages import to_langchain
+        from aixon._interop.messages import to_langchain
 
         system_prompt = self.prompt or None
         if messages and messages[0].role == "system":
@@ -105,7 +105,7 @@ class ToolAgent(Agent, abstract=True):
         to the outer channel instead of being shadowed by a fresh one; otherwise
         open a fresh channel so a nested agent's emit_reasoning is still
         captured when this agent is invoked directly (no outer stream)."""
-        from aixon._adapters.messages import from_langchain
+        from aixon._interop.messages import from_langchain
         from contextlib import nullcontext
 
         agent, lc_messages, config = self._build_agent(messages)
