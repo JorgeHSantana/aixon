@@ -1,6 +1,7 @@
 """aixon — declarative AI-agent framework."""
 
 from aixon.agent import Agent, AgentTool
+from aixon.agents.tool_agent import ToolAgent
 from aixon.discovery import autodiscover
 from aixon.exceptions import (
     AixonError,
@@ -51,3 +52,5 @@ try:
     __all__ += ["LLM", "LLMAgent"]
 except ImportError:  # pragma: no cover - bare install without [llm]
     pass
+
+__all__ += ["ToolAgent"]
