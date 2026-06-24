@@ -275,13 +275,13 @@ Expected: FAIL with `ImportError: cannot import name 'OpenAIEmbedding' from 'aix
 
 - [ ] **Step 3: Write the implementation**
 
-Append `OpenAIEmbedding` to `aixon/embedding.py` after the `Embedding` class:
+Append `OpenAIEmbedding` to `aixon/embedding.py` after the `Embedding` class.
+First add `import os` and `from typing import Optional` to the TOP of the file
+(next to `from abc import ABC, abstractmethod`), NOT mid-file — keep all imports
+at the top per PEP 8:
 
 ```python
-# aixon/embedding.py — append after Embedding class
-
-import os
-from typing import Optional
+# aixon/embedding.py — append the class after Embedding (imports go at the TOP of the file)
 
 
 class OpenAIEmbedding(Embedding):
@@ -325,15 +325,24 @@ class OpenAIEmbedding(Embedding):
         return f"OpenAIEmbedding(model={self.model!r})"
 ```
 
-Update `pyproject.toml` to add the `retrieval` extra and an `openai-embedding` optional group. In `[project.optional-dependencies]`:
+Update `pyproject.toml` — **ADDITIVE ONLY. Do NOT rewrite the
+`[project.optional-dependencies]` block.** Plans 1–5 already populated it
+(`dev`, `server`, `cli`, `llm`, `openai`, `anthropic`, `google`, `all`). Add
+exactly two NEW extras and nothing else:
 
 ```toml
-# pyproject.toml — add to [project.optional-dependencies]
+# pyproject.toml — ADD these two lines to [project.optional-dependencies]; touch nothing else
 retrieval = ["httpx>=0.27"]
 openai-embedding = ["langchain-openai>=0.2"]
-# Update 'all' to include these new extras (merge with existing 'all' line):
-# all = [...existing..., "httpx>=0.27", "langchain-openai>=0.2"]
 ```
+
+Do NOT modify the `all` list: `httpx>=0.27` (from the `server` extra, Plan 5)
+and `langchain-openai>=0.2` (from the `openai` extra, Plan 2) are ALREADY in
+`all`. Adding them again would duplicate entries. Leave `all` untouched.
+
+(Note: `openai-embedding` intentionally duplicates the content of the existing
+`openai` extra — different name, same dep — so consumers can install just the
+embedding backend. This is the plan's choice; keep it as a separate extra.)
 
 Update `aixon/__init__.py` to export `OpenAIEmbedding`:
 
@@ -760,10 +769,8 @@ Expected: FAIL with `AttributeError: 'MemoryRetriever' object has no attribute '
 Add the `as_tool` method to the `Retriever` class in `aixon/retriever.py`. Place it after the `write` method:
 
 ```python
-# aixon/retriever.py — add import at the top of the file
-from typing import Callable, Any  # add Callable to the existing Any import
-
-# also add this import for AgentTool:
+# aixon/retriever.py — add this import for AgentTool (the existing `from typing import Any`
+# is sufficient; do NOT add Callable — it is not used anywhere in this module):
 from aixon.agent import AgentTool
 ```
 
@@ -779,7 +786,7 @@ from aixon.agent import AgentTool
         """Expose this retriever as a neutral AgentTool.
 
         The returned ``AgentTool`` is the same dataclass as ``Agent.as_tool()``
-        returns, so ``coerce_tools`` (Plan 3, ``aixon._adapters.tools``) handles
+        returns, so ``coerce_tools`` (Plan 3, ``aixon._interop.tools``) handles
         both uniformly.
 
         Args:
@@ -1014,8 +1021,10 @@ Concrete subclasses must end with 'Connector' (raises ``NamingError``).
 Each subclass declares ``base_url_env`` and ``auth_token_env`` as class
 attributes; constructor overrides take precedence over environment variables.
 
-HTTP calls use ``httpx`` (the ``retrieval`` extra). JSON is returned directly;
-non-2xx responses raise ``httpx.HTTPStatusError``.
+HTTP calls use ``httpx`` (the ``retrieval`` extra), imported LAZILY inside
+``get``/``post`` via ``_httpx()`` so that ``import aixon`` and defining/subclassing
+``Connector`` work on a bare install without the extra (the core has no hard deps).
+JSON is returned directly; non-2xx responses raise ``httpx.HTTPStatusError``.
 
 Example::
 
@@ -1032,9 +1041,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import httpx
-
 from aixon.exceptions import NamingError
+
+# NOTE: httpx is imported lazily inside _httpx() — NOT at module level — so the
+# neutral-boundary guarantee holds (import aixon works without [retrieval]).
 
 
 class Connector:
@@ -1090,6 +1100,18 @@ class Connector:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         return headers
 
+    @staticmethod
+    def _httpx():
+        """Lazily import httpx. Keeps `import aixon` working on a bare install;
+        a clear error tells the user which extra to install if it's missing."""
+        try:
+            import httpx
+        except ImportError as exc:  # pragma: no cover - bare install without [retrieval]
+            raise ImportError(
+                "Connector requires httpx. Install it with: pip install 'aixon[retrieval]'"
+            ) from exc
+        return httpx
+
     def get(self, path: str, **kwargs: Any) -> dict:
         """Issue a GET request to ``base_url + path``.
 
@@ -1099,6 +1121,7 @@ class Connector:
         Returns:
             Parsed JSON dict.
         """
+        httpx = self._httpx()
         url = self.base_url + path
         response = httpx.get(
             url,
@@ -1118,6 +1141,7 @@ class Connector:
         Returns:
             Parsed JSON dict.
         """
+        httpx = self._httpx()
         url = self.base_url + path
         response = httpx.post(
             url,
@@ -1257,72 +1281,32 @@ def test_retriever_not_in_agent_registry():
 Run: `python -m pytest tests/test_plan6_integration.py -v`
 Expected: FAIL with import errors for any name not yet wired up.
 
-- [ ] **Step 3: Write the final `__init__.py` (complete Plan 6 state)**
+- [ ] **Step 3: VERIFY (do NOT rewrite) `aixon/__init__.py`**
 
-This is the complete `aixon/__init__.py` at the end of Plan 6. It merges Plan 1's exports with the five Plan 6 additions. (Plans 2–5 will add their own exports later.)
+**DO NOT rewrite `aixon/__init__.py`.** This plan runs LAST, after Plans 1–5 are
+already merged. The file already contains all Plan 1–5 exports (Agent,
+Orchestrator, ToolAgent, Provider/get_provider/register_provider,
+emit_reasoning/reasoning_channel, GraphState/END, Registry, plus guarded
+`LLM`/`LLMAgent` and guarded `Server`/adapters/`ParsedRequest`). Overwriting it
+with a "complete" file would delete all of those — a regression.
 
-```python
-# aixon/__init__.py
-"""aixon — declarative AI-agent framework."""
+The five Plan-6 names were each added **incrementally** by earlier tasks:
+- Task 1 added `from aixon.embedding import Embedding` + `"Embedding"` in `__all__`.
+- Task 2 widened it to `from aixon.embedding import Embedding, OpenAIEmbedding` + `"OpenAIEmbedding"`.
+- Task 3 added `from aixon.retriever import Retriever, TypeAccess` + both names.
+- Task 5 added `from aixon.connector import Connector` + `"Connector"`.
 
-from aixon.agent import Agent, AgentTool
-from aixon.connector import Connector
-from aixon.discovery import autodiscover
-from aixon.embedding import Embedding, OpenAIEmbedding
-from aixon.exceptions import (
-    AixonError,
-    AgentNotFoundError,
-    CompositionCycleError,
-    NamingError,
-    RegistrationError,
-)
-from aixon.logging import Logger
-from aixon.message import Chunk, Message, Role
-from aixon.registry import get_registry, reset_registry
-from aixon.retriever import Retriever, TypeAccess
+These imports are all bare-install-safe (Embedding/Retriever are pure; OpenAIEmbedding
+imports `langchain_openai` lazily; Connector imports `httpx` lazily — see Task 5),
+so they belong with the UNGUARDED imports at the top, NOT behind a try/except.
 
-__all__ = [
-    # Agent layer (Plan 1)
-    "Agent",
-    "AgentTool",
-    "autodiscover",
-    # Exceptions (Plan 1)
-    "AixonError",
-    "AgentNotFoundError",
-    "CompositionCycleError",
-    "NamingError",
-    "RegistrationError",
-    # Logging (Plan 1)
-    "Logger",
-    # Message types (Plan 1)
-    "Chunk",
-    "Message",
-    "Role",
-    # Registry (Plan 1)
-    "get_registry",
-    "reset_registry",
-    # Retrieval layer (Plan 6)
-    "Connector",
-    "Embedding",
-    "OpenAIEmbedding",
-    "Retriever",
-    "TypeAccess",
-]
-```
+This task's only job for `__init__.py` is to **verify** (with `grep`, not a rewrite)
+that all five Plan-6 names are present in both the import block and `__all__`, and
+that no Plan 1–5 export was disturbed. If a name is missing, add it surgically.
 
-Confirm `pyproject.toml` contains the `retrieval` extra and that `all` includes it. The relevant section should look like:
-
-```toml
-# pyproject.toml — [project.optional-dependencies]
-dev = ["pytest", "pytest-cov"]
-retrieval = ["httpx>=0.27"]
-openai-embedding = ["langchain-openai>=0.2"]
-all = [
-    "httpx>=0.27",
-    "langchain-openai>=0.2",
-    # (earlier plans' extras will be merged here by their respective plans)
-]
-```
+Then confirm `pyproject.toml` contains the new `retrieval` extra (added in Task 2).
+Do NOT touch any other extra. `httpx>=0.27` and `langchain-openai>=0.2` are ALREADY
+present in `all` (from Plans 5 and 2 respectively) — do not add or duplicate them.
 
 Run: `python -m pip install -e ".[retrieval,dev]"` to ensure `httpx` is installed.
 
