@@ -15,6 +15,7 @@ from aixon.message import Chunk, Message, Role
 from aixon.providers.base import Provider, get_provider, register_provider
 from aixon.reasoning import emit_reasoning, reasoning_channel
 from aixon.registry import Registry, get_registry, reset_registry
+from aixon.state import END, GraphState
 
 __all__ = [
     # Plan 1 — foundation
@@ -40,6 +41,9 @@ __all__ = [
     # Plan 3 — reasoning channel (stdlib-only, always available)
     "emit_reasoning",
     "reasoning_channel",
+    # Plan 4 — orchestrator foundation (LangGraph state)
+    "GraphState",
+    "END",
 ]
 
 # Plan 2 — LLM + LLMAgent. These pull in langchain_core (the `llm` extra).
