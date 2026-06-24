@@ -1,7 +1,7 @@
 # tests/test_orchestrator_tier1.py
 import pytest
 
-from _fakes import make_llm, make_echo_agent
+from tests._fakes import make_llm, make_echo_agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.exceptions import AixonError, NamingError
 from aixon.message import Message

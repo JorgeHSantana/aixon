@@ -1,4 +1,4 @@
-from _fakes import make_llm, make_echo_agent
+from tests._fakes import make_llm, make_echo_agent
 from aixon.llm import LLM
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry

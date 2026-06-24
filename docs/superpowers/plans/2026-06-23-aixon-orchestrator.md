@@ -18,11 +18,11 @@
 - **Neutral boundary (binding):** `Orchestrator.invoke`/`stream` and the public API speak ONLY `Message`/`Chunk`. LangGraph/LangChain objects may be used INTERNALLY (inside `aixon/state.py` and `aixon/agents/orchestrator.py`) but never cross the `Agent` interface. `state.py`/`orchestrator.py` must NOT import from `aixon.server` or `aixon.providers`.
 - **Hermetic, offline tests:** no test may require a real provider SDK or network. Orchestrator nodes are fake-LLM agents from `tests/_fakes.py` (built on `LLM("fake-1", provider="fake")` — the hermetic handle established in Plan 2, contract §1.5/§1.6/§9.1). `tests/conftest.py` already provides an autouse `reset_registry` fixture (Plan 1). NO `tests/__init__.py`.
 - **`tests/_fakes.py` is owned by Plan 2 (contract §9.1) — do NOT redefine it.** Plan 4 imports from it directly:
-  `from _fakes import make_llm, make_echo_agent`. Its binding surface (contract §9.1):
+  `from tests._fakes import make_llm, make_echo_agent`. Its binding surface (contract §9.1):
   - `make_llm(**params) -> LLM` — returns `LLM("fake-1", provider="fake", **params)`.
   - `make_echo_agent(name: str = "echo", *, hidden: bool = False)` — returns/registers a concrete `Agent` subclass whose `invoke` echoes the last message and whose `stream` yields one content `Chunk` then `done`. **The echo content is the registered agent's `name` followed by the echoed user text** (this plan's tests only depend on the agent's `name` and the last-user content appearing in the output; see Task 3 for the exact contract used and a fallback if Plan 2's echo format differs).
   - `FakeChatModel`, `register_fake_provider`, `FAKE_MODEL`, `FAKE_PROVIDER` also live there.
-- **Plans 2 and 3 are merged before Plan 4 (contract §9.3): NO try/except fallback shims.** Import `LLM`, `emit_reasoning`, `reasoning_channel` directly from `aixon`; import `make_llm`/`make_echo_agent` directly from `_fakes`. If an import fails, that is a real ordering bug to fix, not something to paper over.
+- **Plans 2 and 3 are merged before Plan 4 (contract §9.3): NO try/except fallback shims.** Import `LLM`, `emit_reasoning`, `reasoning_channel` directly from `aixon`; import `make_llm`/`make_echo_agent` directly from `tests._fakes` (the package-qualified path Plans 1-3 already use — see the Task 3 note for why the unqualified `_fakes` import must NOT be used). If an import fails, that is a real ordering bug to fix, not something to paper over.
 - **Abstract subtype:** `Orchestrator` is declared `class Orchestrator(Agent, abstract=True)` and sets **`_suffix = "Orchestrator"`**. Concrete user subclasses inherit, get suffix-validated (`*Orchestrator`) and auto-registered by Plan 1's machinery.
 - **`recursion_limit` default = 25** (matches LangGraph's own default). `None` = no cap (still bounded by `timeout`). `timeout` default `None`.
 - **Composition-cycle guard (A) is ALWAYS ON and NOT disableable** — it runs in `_validate_subclass()` (before registration) for every concrete `Orchestrator` subclass and raises `CompositionCycleError` on a structural cycle.
@@ -274,7 +274,7 @@ git commit -m "feat(orchestrator): GraphState, add_messages_neutral reducer, END
 **Files:**
 - Test: `tests/test_orchestrator_fakes_smoke.py` (consumes `tests/_fakes.py` — already present from Plan 2)
 
-> `tests/_fakes.py` exists (Plan 2 created it). This task does NOT create or modify it — it confirms the surface Plan 4 relies on (`make_llm`, `make_echo_agent`) behaves as the contract describes, so later tasks build on a known foundation. Tests import `from _fakes import ...` because pytest puts the test dir on `sys.path` (rootdir import mode, mirroring restmcp). There is NO `tests/__init__.py`.
+> `tests/_fakes.py` exists (Plan 2 created it). This task does NOT create or modify it — it confirms the surface Plan 4 relies on (`make_llm`, `make_echo_agent`) behaves as the contract describes, so later tasks build on a known foundation. Tests import `from tests._fakes import ...` (the package-qualified path — `tests` has no `__init__.py` but resolves as a Python 3 implicit namespace package, since the repo root is on `sys.path`). **Always use this qualified form, never the unqualified `from _fakes import ...`**: pytest's default rootdir import mode also makes the bare `_fakes` name resolvable, and Plans 1-3's existing tests already import the qualified `tests._fakes` form — mixing the two forms loads `tests/_fakes.py` as two distinct module objects with two distinct `FakeChatModel` classes, breaking `isinstance` checks across files in the same test session. There is still NO `tests/__init__.py` file on disk.
 
 **Interfaces (contract §9.1 — binding):**
 - `make_llm(**params) -> LLM` → `LLM("fake-1", provider="fake", **params)`.
@@ -286,7 +286,7 @@ git commit -m "feat(orchestrator): GraphState, add_messages_neutral reducer, END
 
 ```python
 # tests/test_orchestrator_fakes_smoke.py
-from _fakes import make_llm, make_echo_agent
+from tests._fakes import make_llm, make_echo_agent
 from aixon.llm import LLM
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry
@@ -392,7 +392,7 @@ This task implements: the abstract subtype, tier detection, Tier 1 build + run, 
 # tests/test_orchestrator_tier1.py
 import pytest
 
-from _fakes import make_llm, make_echo_agent
+from tests._fakes import make_llm, make_echo_agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.exceptions import AixonError, NamingError
 from aixon.message import Message
@@ -771,7 +771,7 @@ git commit -m "feat(orchestrator): Orchestrator subtype, tier detection, Tier 1 
 # tests/test_orchestrator_tier2.py
 import pytest
 
-from _fakes import make_echo_agent
+from tests._fakes import make_echo_agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.exceptions import AixonError
 from aixon.message import Message
@@ -997,7 +997,7 @@ git commit -m "feat(orchestrator): Tier 2 explicit graph, route_<node> condition
 # tests/test_orchestrator_tier3.py
 from langgraph.graph import StateGraph
 
-from _fakes import make_echo_agent
+from tests._fakes import make_echo_agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.message import Message
 from aixon.registry import get_registry
@@ -1079,7 +1079,7 @@ git commit -m "test(orchestrator): lock Tier 3 build_graph escape hatch"
 # tests/test_orchestrator_cycle.py
 import pytest
 
-from _fakes import make_llm, make_echo_agent
+from tests._fakes import make_llm, make_echo_agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.exceptions import CompositionCycleError
 from aixon.registry import get_registry
@@ -1231,7 +1231,7 @@ git commit -m "feat(orchestrator): always-on composition-cycle guard (Compositio
 # tests/test_orchestrator_guards.py
 import pytest
 
-from _fakes import make_llm, make_echo_agent
+from tests._fakes import make_llm, make_echo_agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.exceptions import AixonError
 from aixon.message import Message
@@ -1388,7 +1388,7 @@ git commit -m "feat(orchestrator): wire recursion_limit + timeout runtime guards
 # tests/test_orchestrator_reasoning.py
 from typing import Iterator
 
-from _fakes import make_llm
+from tests._fakes import make_llm
 from aixon import emit_reasoning
 from aixon.agent import Agent
 from aixon.agents.orchestrator import Orchestrator
