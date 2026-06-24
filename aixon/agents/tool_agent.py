@@ -21,7 +21,7 @@ from aixon.agent import Agent
 from aixon.exceptions import AixonError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
-from aixon.reasoning import emit_reasoning, reasoning_channel
+from aixon.reasoning import current_channel, emit_reasoning, reasoning_channel
 from aixon._tools import coerce_tools
 
 _log = Logger("aixon.tool_agent")
@@ -99,14 +99,20 @@ class ToolAgent(Agent, abstract=True):
         """Run the tool-calling graph to completion; return a neutral Message.
 
         Reasoning collected during the run (tool-step labels, plus reasoning a
-        nested agent emitted) is set on Message.reasoning. Runs inside a
-        reasoning_channel so a nested agent's emit_reasoning is captured even
-        when this agent is invoked directly (no outer stream)."""
+        nested agent emitted) is set on Message.reasoning. If a ReasoningChannel
+        is already active (this agent is itself nested under an outer stream()
+        or invoke()), reuse it so this agent's own emit_reasoning calls bubble
+        to the outer channel instead of being shadowed by a fresh one; otherwise
+        open a fresh channel so a nested agent's emit_reasoning is still
+        captured when this agent is invoked directly (no outer stream)."""
         from aixon._langchain import from_langchain
+        from contextlib import nullcontext
 
         agent, lc_messages, config = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
-        with reasoning_channel() as channel:
+        outer_channel = current_channel()
+        cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
+        with cm as channel:
             result = agent.invoke({"messages": lc_messages}, config=config)
             # Derive parent tool-call labels from the AI messages in the result.
             for m in result["messages"]:
@@ -117,7 +123,9 @@ class ToolAgent(Agent, abstract=True):
                     f"agent '{self.name}' exceeded max_execution_time "
                     f"({self.max_execution_time}s)"
                 )
-            reasoning_lines = channel.drain()
+            # Only drain (and consume) the lines if we own this channel. When
+            # nested, leave them in the outer channel for its owner to drain.
+            reasoning_lines = [] if outer_channel is not None else channel.drain()
         final = from_langchain(result["messages"][-1])
         if reasoning_lines:
             final.reasoning = "\n".join(reasoning_lines)
