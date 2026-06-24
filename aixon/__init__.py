@@ -12,6 +12,7 @@ from aixon.exceptions import (
 from aixon.logging import Logger
 from aixon.message import Chunk, Message, Role
 from aixon.providers.base import Provider, get_provider, register_provider
+from aixon.reasoning import emit_reasoning, reasoning_channel
 from aixon.registry import Registry, get_registry, reset_registry
 
 __all__ = [
@@ -35,6 +36,9 @@ __all__ = [
     "Provider",
     "get_provider",
     "register_provider",
+    # Plan 3 — reasoning channel (stdlib-only, always available)
+    "emit_reasoning",
+    "reasoning_channel",
 ]
 
 # Plan 2 — LLM + LLMAgent. These pull in langchain_core (the `llm` extra).
