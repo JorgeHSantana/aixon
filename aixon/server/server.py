@@ -68,6 +68,10 @@ class Server:
         return cls._instance
 
     def __init__(self, adapters: list[ProtocolAdapter] | None = None):
+        # Singleton: adapters are fixed on first construction. A later
+        # Server(adapters=[...]) call silently reuses the first instance's
+        # adapters — call Server._reset() first if a different set is needed
+        # (e.g. between tests).
         if self._initialized:
             return
         self._adapters: list[ProtocolAdapter] = adapters or [OpenAIAdapter()]
