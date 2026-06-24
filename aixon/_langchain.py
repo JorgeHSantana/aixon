@@ -1,0 +1,90 @@
+"""Conversion helpers between neutral Message/Chunk and LangChain types.
+
+INTERNAL to aixon. Public code speaks only Message/Chunk. LLM, LLMAgent,
+ToolAgent, and Orchestrator call these helpers at the boundary where they
+must interact with LangChain internals. Validated for LangChain 1.x.
+"""
+from __future__ import annotations
+
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+
+from aixon.message import Message
+
+
+def to_langchain(messages: list[Message]) -> list[BaseMessage]:
+    """Convert neutral Message[] to LangChain message objects.
+
+    Mapping:
+        system    → SystemMessage
+        user      → HumanMessage
+        assistant → AIMessage (tool_calls forwarded if present)
+        tool      → ToolMessage (requires tool_call_id)
+    """
+    result: list[BaseMessage] = []
+    for msg in messages:
+        role = msg.role
+        if role == "system":
+            result.append(SystemMessage(content=msg.content))
+        elif role == "user":
+            result.append(HumanMessage(content=msg.content))
+        elif role == "assistant":
+            kwargs: dict = {"content": msg.content}
+            if msg.tool_calls:
+                kwargs["tool_calls"] = msg.tool_calls
+            result.append(AIMessage(**kwargs))
+        elif role == "tool":
+            result.append(
+                ToolMessage(
+                    content=msg.content,
+                    tool_call_id=msg.tool_call_id or "",
+                    name=msg.name,
+                )
+            )
+        else:
+            raise ValueError(
+                f"Unknown message role '{role}'. "
+                f"Expected one of: system, user, assistant, tool."
+            )
+    return result
+
+
+def from_langchain(msg: BaseMessage) -> Message:
+    """Convert a LangChain BaseMessage to a neutral Message.
+
+    - Role inferred from the LangChain type.
+    - tool_calls: forwarded from AIMessage.tool_calls (list of dicts).
+    - reasoning: read from additional_kwargs['reasoning_content'] if present.
+    """
+    if isinstance(msg, AIMessage):
+        role = "assistant"
+    elif isinstance(msg, HumanMessage):
+        role = "user"
+    elif isinstance(msg, SystemMessage):
+        role = "system"
+    elif isinstance(msg, ToolMessage):
+        role = "tool"
+    else:
+        role = "assistant"  # safe fallback for unknown LangChain types
+
+    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+
+    tool_calls: list[dict] = []
+    if isinstance(msg, AIMessage) and msg.tool_calls:
+        tool_calls = [dict(tc) for tc in msg.tool_calls]
+
+    reasoning: str | None = None
+    if getattr(msg, "additional_kwargs", None):
+        reasoning = msg.additional_kwargs.get("reasoning_content")
+
+    return Message(
+        role=role,
+        content=content,
+        tool_calls=tool_calls,
+        reasoning=reasoning or None,
+    )
