@@ -338,6 +338,12 @@ def new_command(name: str) -> None:
     """Scaffold a new consumer project."""
     import os
 
+    sep = os.path.sep
+    alt = os.path.altsep or ""
+    if os.path.isabs(name) or name in (".", "..") or sep in name or (alt and alt in name):
+        click.echo(f"Error: '{name}' is not a valid project name (must be a single path component).", err=True)
+        raise SystemExit(1)
+
     base = os.path.join(os.getcwd(), name)
     if os.path.exists(base):
         click.echo(f"Error: directory '{name}' already exists.", err=True)
