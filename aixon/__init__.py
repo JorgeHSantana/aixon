@@ -59,3 +59,16 @@ except ImportError:  # pragma: no cover - bare install without [llm]
     pass
 
 __all__ += ["ToolAgent", "Orchestrator"]
+
+# Plan 5 — server surface (optional; requires aixon[server]). Guard so
+# `import aixon` still works on a bare install without FastAPI/uvicorn
+# (mirrors the LLM guard above; contract §9.4).
+try:
+    from aixon.server.adapters.anthropic import AnthropicAdapter
+    from aixon.server.adapters.openai import OpenAIAdapter
+    from aixon.server.protocol import ParsedRequest, ProtocolAdapter
+    from aixon.server.server import Server
+
+    __all__ += ["Server", "ProtocolAdapter", "OpenAIAdapter", "AnthropicAdapter", "ParsedRequest"]
+except ImportError:  # pragma: no cover - bare install without [server]
+    pass
