@@ -1,0 +1,14 @@
+# The framework with the extras this example uses:
+#   server           -> FastAPI/uvicorn ASGI app (the Server)
+#   cli              -> the `aixon` command (click) + OpenAI client for remote chat
+#   openai           -> gpt-4o-mini provider     (only used when OPENAI_API_KEY is set)
+#   retrieval        -> httpx for the Connector
+#   openai-embedding -> OpenAIEmbedding          (only used when OPENAI_API_KEY is set)
+# langchain / langgraph are core deps and always installed.
+aixon[server,cli,openai,retrieval,openai-embedding]
+
+# Served by `python main.py`.
+uvicorn[standard]
+
+# For running the tests.
+pytest
