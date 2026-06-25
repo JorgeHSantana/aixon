@@ -206,14 +206,16 @@ aixon/
 ├── aixon/
 │   ├── __init__.py          # API pública
 │   ├── agent.py             # Agent — base + interface invoke/stream/as_tool
+│   ├── message.py           # Message / Chunk / Role — tipos neutros
 │   ├── agents/
 │   │   ├── llm_agent.py     # LLMAgent
 │   │   ├── tool_agent.py    # ToolAgent
 │   │   └── orchestrator.py  # Orchestrator (3 tiers)
 │   ├── llm.py               # LLM — declaração + factory + registry de modelos
 │   ├── providers/           # adapters de provider (openai/anthropic/google)
+│   ├── _interop/            # fronteira LangChain privada (messages.py, tools.py)
 │   ├── retriever.py         # Retriever — base de busca de contexto
-│   ├── embedding.py         # Embedding — base
+│   ├── embedding.py         # Embedding — base + OpenAIEmbedding (lazy)
 │   ├── connector.py         # Connector — cliente de microserviço externo
 │   ├── server/
 │   │   ├── server.py        # singleton + registry + app ASGI + auth
@@ -224,9 +226,10 @@ aixon/
 │   ├── discovery.py         # autodiscover()
 │   ├── registry.py          # registro de agentes
 │   ├── reasoning.py         # canal de reasoning (stream, propaga no aninhamento)
-│   ├── state.py             # GraphState
+│   ├── state.py             # GraphState / END
+│   ├── logging.py           # Logger
 │   ├── exceptions.py
-│   └── cli.py               # click: chat / new / serve / list
+│   └── cli.py               # click: list / chat / new / serve
 ├── docs/
 ├── pyproject.toml
 └── tests/
@@ -272,7 +275,7 @@ README + `docs/`, nível restmcp: filosofia, arquitetura em camadas, modelo `Age
 
 ## Empacotamento
 
-`pyproject.toml` no padrão restmcp (hatch): nome `aixon`, `requires-python >=3.11`, `[project.scripts] aixon = "aixon.cli:app"`. Dependências core: `langgraph`, `langchain-core`, `langchain`, provider SDKs (openai/anthropic/google), `fastapi`/`uvicorn` (ASGI), `pydantic`, `click`. Retrieval/embeddings opcionais via extras (`weaviate`, `ragie`, `tavily`).
+`pyproject.toml` no padrão restmcp (hatch): nome `aixon`, `requires-python >=3.11`, `[project.scripts] aixon = "aixon.cli:app"`. Dependências core (obrigatórias): `langchain`, `langchain-core`, `langgraph` — o framework não funciona sem elas. Todo o resto é extra opcional: `server` (`fastapi`, `uvicorn[standard]`, `pydantic`, `httpx`), `cli` (`click`, `openai`), `openai`/`anthropic`/`google` (bindings de provider — `langchain-openai`/`langchain-anthropic`/`langchain-google-genai`, carregados lazy), `retrieval` (`httpx>=0.27` para `Connector`), `openai-embedding` (`langchain-openai` para `OpenAIEmbedding`), `dev`, e `all` (agrega os extras). Backends de vector store (Weaviate/Ragie/Tavily) estão fora de escopo — YAGNI.
 
 ## Fora de escopo (YAGNI)
 

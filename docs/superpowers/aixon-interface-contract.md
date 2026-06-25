@@ -111,10 +111,12 @@ NamingError, RegistrationError, AgentNotFoundError, CompositionCycleError  # all
 - **Neutral boundary:** `Agent.invoke`/`stream` and the public API speak ONLY
   `Message`/`Chunk`. LangChain/LangGraph/provider objects may be used
   INTERNALLY but must be converted at the boundary. Conversion helpers live in
-  the private `aixon/_adapters/` package (see §1.4).
-- **Dependencies:** core `dependencies = []`. Each plan adds what it needs to
-  the relevant extra in `pyproject.toml`. Extras so far: `dev`, `server`,
-  `cli`, `all`. New extras introduced below: `llm` (providers), `retrieval`.
+  the private `aixon/_interop/` package (see §1.4).
+- **Dependencies:** core `dependencies = ["langchain>=1.0", "langchain-core>=1.0",
+  "langgraph>=1.0"]` — the langchain stack is MANDATORY (every agent subtype and
+  the orchestrator need it). Optional layers live in extras: `dev`, `server`,
+  `cli`, `openai`/`anthropic`/`google` (provider bindings), `retrieval`,
+  `openai-embedding`, `all`. There is NO `llm` extra (see §9.2/§9.4).
 - **Tests:** pytest, `tests/conftest.py` has an autouse `reset_registry`
   fixture. NO `tests/__init__.py`. Tests must NOT require real API keys or
   network — use the fakes defined in §1.5 and §3.4.
@@ -188,10 +190,10 @@ class LLM:
         deltas and a final Chunk(done=True)."""
 ```
 
-### 1.4 `aixon/_adapters/messages.py` (internal conversion helpers)
+### 1.4 `aixon/_interop/messages.py` (internal conversion helpers)
 
-Import from the exact submodule: `from aixon._adapters.messages import
-to_langchain, from_langchain`. The `aixon/_adapters/__init__.py` deliberately
+Import from the exact submodule: `from aixon._interop.messages import
+to_langchain, from_langchain`. The `aixon/_interop/__init__.py` deliberately
 does NOT re-export these (an eager re-export would import `langchain_core` at
 `import aixon` time and break the neutral boundary).
 
@@ -243,7 +245,8 @@ that vendor should be skipped via `pytest.importorskip`.
 
 ### 1.7 `pyproject.toml` + exports
 
-- New extra: `llm = ["langchain>=1.0", "langchain-core>=1.0", "langgraph>=1.0"]`.
+- Core deps: `langchain>=1.0`, `langchain-core>=1.0`, `langgraph>=1.0` (mandatory,
+  not an extra — see §9.2).
   **langgraph-native (LangChain 1.x):** the old 0.x `create_tool_calling_agent`
   + `AgentExecutor` are removed; the ToolAgent (Plan 3) uses
   `from langchain.agents import create_agent` (validated against
@@ -331,8 +334,8 @@ mapping and pass what it accepts (do not invent a parameter).
 
 ### 2.3 Tool coercion
 
-A helper `aixon/_adapters/tools.py::coerce_tools(tools: list) -> list[BaseTool]`
-(import via `from aixon._adapters.tools import coerce_tools`) that converts each
+A helper `aixon/_interop/tools.py::coerce_tools(tools: list) -> list[BaseTool]`
+(import via `from aixon._interop.tools import coerce_tools`) that converts each
 entry to a LangChain `BaseTool`:
 - `AgentTool` (from `Agent.as_tool()` / `Retriever.as_tool()`) →
   `StructuredTool.from_function(func=tool.func, name=tool.name, description=tool.description)`
@@ -445,8 +448,7 @@ isolation of state is automatic (each `invoke` gets its own State).
 Hermetic: use fake-LLM agents (`LLM("fake-1", provider="fake")`) as nodes.
 Test all three tiers, the exit-form validation errors, parallel fan-out,
 composition-cycle detection, and that `recursion_limit`/`timeout` are wired.
-Add `langgraph>=1.0` to the `llm` extra (or a new `orchestration` extra; the
-plan picks one and updates `all`).
+`langgraph>=1.0` is already a core dependency (§9.2) — no extra to add.
 
 ### 3.5 Exports
 
@@ -659,7 +661,7 @@ aixon/
 │   ├── openai.py       # (P2)
 │   ├── anthropic.py    # (P2)
 │   └── google.py       # (P2)
-├── _adapters/          # private LangChain-boundary package
+├── _interop/           # private LangChain-boundary package
 │   ├── __init__.py     # namespace only — no eager re-export (keeps boundary)
 │   ├── messages.py     # (P2) neutral<->langchain message conversion
 │   └── tools.py        # (P3) coerce_tools
@@ -795,7 +797,7 @@ it ONCE before Plan 2 and every run/install step uses it:
 ```bash
 cd /Users/jorge/Documents/Git/aixon
 python3 -m venv .venv                      # .venv is git-ignored
-.venv/bin/python -m pip install -e ".[dev,llm,openai,server,retrieval,cli]"
+.venv/bin/python -m pip install -e ".[dev,openai,server,retrieval,cli]"
 ```
 
 Every plan's run step uses `.venv/bin/python -m pytest ...` (NOT a bare
