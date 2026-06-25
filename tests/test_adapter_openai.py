@@ -122,6 +122,8 @@ class TestFormatModelsAndRoutes:
         a = OpenAIAdapter()
         assert a.routes() == [
             ("POST", "/v1/chat/completions"),
+            ("POST", "/chat/completions"),
             ("GET", "/v1/models"),
+            ("GET", "/models"),
         ]
         assert a.name == "openai"
