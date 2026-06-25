@@ -107,4 +107,11 @@ class OpenAIAdapter(ProtocolAdapter):
 
     # --- routing ---------------------------------------------------------
     def routes(self) -> list[tuple[str, str]]:
-        return [("POST", "/v1/chat/completions"), ("GET", "/v1/models")]
+        # Serve both the canonical /v1/* paths and the bare aliases (/chat/
+        # completions, /models) for OpenAI clients that omit the version prefix.
+        return [
+            ("POST", "/v1/chat/completions"),
+            ("POST", "/chat/completions"),
+            ("GET", "/v1/models"),
+            ("GET", "/models"),
+        ]
