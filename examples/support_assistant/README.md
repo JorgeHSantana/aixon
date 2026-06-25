@@ -91,14 +91,11 @@ The assistant is also reachable by its aliases — use `"model":"assistant"` or
 ## Use the CLI
 
 ```bash
-# The CLI autodiscovers the local agents/ package — put the CWD on the path:
-PYTHONPATH=. aixon list                 # -> support  [SupportOrchestrator]  ...
-PYTHONPATH=. aixon chat                 # interactive, in-process
-PYTHONPATH=. aixon chat --url http://localhost:8000   # against the running server
+# The CLI autodiscovers the local agents/ package (run from this folder):
+aixon list                              # -> support  [SupportOrchestrator]  ...
+aixon chat                              # interactive, in-process
+aixon chat --url http://localhost:8000  # against the running server
 ```
-
-> Note: the `PYTHONPATH=.` prefix is a current workaround — see
-> [`../../ISSUES.md`](../../ISSUES.md) #3. `python main.py` needs no such prefix.
 
 ## Turn on auth
 

@@ -44,6 +44,14 @@ class ProtocolAdapter(ABC):
 
     name: str = ""  # e.g. "openai", "anthropic"
 
+    def __init__(self, *, mount_prefix: str = "") -> None:
+        """``mount_prefix`` is prepended to every path from ``routes()`` when the
+        Server mounts this adapter (default ``""`` = the adapter's canonical
+        paths). Use it to serve two dialects whose ``routes()`` would otherwise
+        collide, e.g. ``AnthropicAdapter(mount_prefix="/anthropic")`` so its
+        ``/v1/models`` does not clash with OpenAI's."""
+        self.mount_prefix = mount_prefix.rstrip("/")
+
     @abstractmethod
     def parse_request(self, body: dict, *, path: str) -> ParsedRequest:
         """Reduce a raw request body to a neutral ``ParsedRequest``. ``path`` is

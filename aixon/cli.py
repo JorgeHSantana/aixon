@@ -9,12 +9,26 @@ serve   Start the aixon server (delegates to Plan 5 Server).
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import click
 
 from aixon.discovery import autodiscover
 from aixon.registry import get_registry
+
+
+def _ensure_cwd_on_path() -> None:
+    """Put the current working directory on ``sys.path`` so ``autodiscover``
+    can import a project-local package (e.g. ``agents/``).
+
+    A ``python main.py`` run already has the script's dir on ``sys.path[0]``,
+    but the installed ``aixon`` console-script has its launcher dir there
+    instead — so a CWD-local ``agents`` package would not import. Insert the CWD
+    explicitly to make the CLI behave like the script."""
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
 
 # ---------------------------------------------------------------------------
 # OpenAI — module-level import so tests can patch aixon.cli.OpenAI
@@ -59,6 +73,7 @@ def app() -> None:
               help="Package to autodiscover before listing.")
 def list_command(package: str) -> None:
     """List registered agents."""
+    _ensure_cwd_on_path()
     try:
         autodiscover(package)
     except (ImportError, ModuleNotFoundError, ValueError):
@@ -145,6 +160,7 @@ def _stream_inprocess(agent: object, messages: list) -> str:
 def _chat_inprocess(package: str) -> None:
     from aixon.message import Message
 
+    _ensure_cwd_on_path()
     try:
         autodiscover(package)
     except (ImportError, ModuleNotFoundError, ValueError):
@@ -392,6 +408,7 @@ def serve_command(host: str, port: int, package: str) -> None:
         )
         raise SystemExit(1)
 
+    _ensure_cwd_on_path()
     try:
         autodiscover(package)
     except (ImportError, ModuleNotFoundError, ValueError):

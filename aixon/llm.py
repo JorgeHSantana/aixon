@@ -2,7 +2,7 @@
 
 Usage on an agent class body:
     class MyAgent(LLMAgent):
-        llm = LLM("gpt-5.4", temperature=0.2)
+        llm = LLM("gpt-4o-mini", temperature=0.2)
 
 The LLM handle is lazy: it does not build the underlying LangChain model
 until the first access to .chat_model (or .complete / .stream). Declaring an

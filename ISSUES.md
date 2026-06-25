@@ -7,7 +7,7 @@ incrementally. Each entry: symptom, location, suggested fix, status.
 
 ## 1. Fictional model `gpt-5.4` lingering in source docstrings and error messages
 
-**Status:** open
+**Status:** RESOLVED
 
 **Symptom:** The living docs were corrected to real models (`gpt-4o-mini`), but
 several source files still reference the fictional `gpt-5.4` in docstrings and —
@@ -25,11 +25,14 @@ declare `llm`. Suggesting a fictional model in an error is confusing.
 
 **Suggested fix:** Replace every `gpt-5.4` with `gpt-4o-mini` across these files.
 
+**Fixed:** All six occurrences in `llm.py`, `agents/llm_agent.py` and
+`agents/tool_agent.py` now use `gpt-4o-mini`. No `gpt-5.4` remains in source.
+
 ---
 
 ## 2. Built-in OpenAI and Anthropic adapters both claim `GET /v1/models`
 
-**Status:** open
+**Status:** RESOLVED
 
 **Symptom:** `OpenAIAdapter.routes()` returns `GET /v1/models` and
 `AnthropicAdapter.routes()` also returns `GET /v1/models`. Mounting both on one
@@ -44,14 +47,19 @@ multi-dialect deployment hits it.
 
 **Suggested fix:** Give each adapter a mount prefix (e.g. Anthropic under
 `/anthropic`) or let `Server` namespace adapter routes so two adapters never
-collide on a shared path. Until then, the support_assistant example uses the
-default OpenAI-only `Server()`.
+collide on a shared path.
+
+**Fixed:** `ProtocolAdapter` gained an optional `mount_prefix` (default `""`);
+`Server` prepends it to every route and now raises a clear `AixonError` on a
+genuine `(method, path)` collision instead of silently shadowing. Mount both
+with `AnthropicAdapter(mount_prefix="/anthropic")`. Covered by
+`tests/test_server_multi_adapter.py` and documented in `docs/server.md`.
 
 ---
 
 ## 3. CLI does not put the current directory on `sys.path`
 
-**Status:** open
+**Status:** RESOLVED
 
 **Symptom:** Running `aixon list` / `aixon serve` / `aixon chat` from a project
 directory reports **"No agents registered."** even when an importable `agents/`
@@ -72,7 +80,11 @@ the CLI does not — a confusing inconsistency. The silent swallow makes it look
 like nothing is wrong.
 
 **Suggested fix:** In the CLI commands, insert `os.getcwd()` at `sys.path[0]`
-before calling `autodiscover()` (mirrors how `python main.py` behaves). The
-support_assistant README documents the `PYTHONPATH=.` workaround until then.
+before calling `autodiscover()` (mirrors how `python main.py` behaves).
+
+**Fixed:** `aixon/cli.py` adds `_ensure_cwd_on_path()`, called by `list`, `chat`
+(in-process) and `serve` before autodiscover. `aixon list` now works from a
+project directory with no `PYTHONPATH=.`; the example README dropped the
+workaround.
 
 ---

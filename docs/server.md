@@ -182,14 +182,28 @@ Wire-format differences handled by the adapter (agents see none of these):
 - Stop reason field is `stop_reason` instead of `finish_reason`.
 - Streaming uses named event types (`message_start`, `content_block_delta`, `message_stop`).
 
+### Serving more than one dialect
+
+Both built-in adapters declare `GET /v1/models`, so mounting them at their
+canonical paths would collide. Give one a `mount_prefix` — the Server prepends
+it to every route from that adapter's `routes()`:
+
 ```python
 from aixon import Server
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.adapters.anthropic import AnthropicAdapter
 
-server = Server(adapters=[OpenAIAdapter(), AnthropicAdapter()])
+server = Server(adapters=[
+    OpenAIAdapter(),                          # /v1/chat/completions, /v1/models
+    AnthropicAdapter(mount_prefix="/anthropic"),  # /anthropic/v1/messages, /anthropic/v1/models
+])
 server.serve()
 ```
+
+`mount_prefix` defaults to `""` (canonical paths), so a single adapter is
+unaffected. If two adapters end up claiming the same `(method, path)`, the
+Server raises a clear `AixonError` at app-build time instead of silently
+shadowing one route — set a prefix to disambiguate.
 
 ---
 

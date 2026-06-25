@@ -19,7 +19,7 @@ import hmac
 import os
 from typing import Optional
 
-from aixon.exceptions import AgentNotFoundError
+from aixon.exceptions import AgentNotFoundError, AixonError
 from aixon.logging import Logger
 from aixon.registry import get_registry
 from aixon.server.adapters.openai import OpenAIAdapter
@@ -85,12 +85,19 @@ class Server:
             self._app = self._build_app()
         return self._app
 
+    @staticmethod
+    def _full_path(adapter: ProtocolAdapter, path: str) -> str:
+        """Apply the adapter's mount prefix (default ``""``) to a route path.
+        ``getattr`` guards custom adapters written before mount_prefix existed."""
+        return getattr(adapter, "mount_prefix", "") + path
+
     def _public_paths(self) -> set[str]:
         public = {"/health"}
         for adapter in self._protocol_adapters:
             for method, path in adapter.routes():
                 if method.upper() == "GET":
-                    public.add(path)  # model-list routes stay public
+                    # model-list routes stay public (at their mounted path)
+                    public.add(self._full_path(adapter, path))
         return public
 
     def _build_app(self):
@@ -111,6 +118,7 @@ class Server:
                 "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
             }
 
+        self._check_route_collisions()
         for adapter in self._protocol_adapters:
             self._mount_adapter(app, adapter)
 
@@ -119,12 +127,31 @@ class Server:
         # the env is unset, so this is safe and matches restmcp's per-request check.
         return _AuthMiddleware(app, public_paths=self._public_paths())
 
+    def _check_route_collisions(self) -> None:
+        """Fail loudly if two adapters claim the same (method, mounted path).
+        Without this, FastAPI keeps both registrations and the first silently
+        shadows the second (e.g. OpenAI + Anthropic both at GET /v1/models).
+        Give one adapter a ``mount_prefix`` to disambiguate."""
+        seen: dict[tuple[str, str], str] = {}
+        for adapter in self._protocol_adapters:
+            for method, path in adapter.routes():
+                key = (method.upper(), self._full_path(adapter, path))
+                if key in seen:
+                    raise AixonError(
+                        f"Route {key[0]} {key[1]} is claimed by both "
+                        f"'{seen[key]}' and '{adapter.name}'. Give one adapter a "
+                        f"mount_prefix, e.g. "
+                        f"{type(adapter).__name__}(mount_prefix='/{adapter.name}')."
+                    )
+                seen[key] = adapter.name
+
     def _mount_adapter(self, app, adapter: ProtocolAdapter) -> None:
         for method, path in adapter.routes():
+            full = self._full_path(adapter, path)
             if method.upper() == "GET":
-                self._mount_models(app, adapter, path)
+                self._mount_models(app, adapter, full)
             else:
-                self._mount_chat(app, adapter, path)
+                self._mount_chat(app, adapter, full)
 
     def _mount_models(self, app, adapter: ProtocolAdapter, path: str) -> None:
         async def list_models():

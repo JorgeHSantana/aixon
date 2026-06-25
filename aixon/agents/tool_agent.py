@@ -31,7 +31,7 @@ class ToolAgent(Agent, abstract=True):
     """Tool-calling agent. Declarative attributes:
 
         class Diagnosis(ToolAgent):
-            llm = LLM("gpt-5.4", temperature=0.1)
+            llm = LLM("gpt-4o-mini", temperature=0.1)
             prompt = "..."
             tools = [LibraryRetriever.as_tool(), check_battery]
 
@@ -60,7 +60,7 @@ class ToolAgent(Agent, abstract=True):
         if getattr(cls, "llm", None) is None:
             raise AixonError(
                 f"ToolAgent subclass '{cls.__name__}' must declare an `llm` "
-                f"attribute (e.g. `llm = LLM(\"gpt-5.4\")`). It was missing or None."
+                f"attribute (e.g. `llm = LLM(\"gpt-4o-mini\")`). It was missing or None."
             )
 
     # ---- internal: build the langgraph agent + neutral message prep -------

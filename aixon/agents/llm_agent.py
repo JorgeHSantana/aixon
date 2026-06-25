@@ -6,7 +6,7 @@ ToolAgent, which uses langchain.agents.create_agent.)
 
 Consumer usage:
     class Athena(LLMAgent):
-        llm = LLM("gpt-5.4", temperature=0.2)
+        llm = LLM("gpt-4o-mini", temperature=0.2)
         prompt = "You are a strategic planner."
         description = "Strategic planning assistant"
 
@@ -26,7 +26,7 @@ class LLMAgent(Agent, abstract=True):
     """Abstract subtype for agents that delegate directly to an LLM.
 
     Required class attribute:
-        llm: LLM   — e.g. LLM("gpt-5.4", temperature=0.2)
+        llm: LLM   — e.g. LLM("gpt-4o-mini", temperature=0.2)
     Optional class attribute:
         prompt: str   — system prompt prepended to every invocation.
     """
@@ -45,7 +45,7 @@ class LLMAgent(Agent, abstract=True):
         if not isinstance(llm_val, LLM):
             raise AixonError(
                 f"'{cls.__name__}' must declare a class-level 'llm' attribute "
-                f"of type LLM (e.g. llm = LLM('gpt-5.4')). Got: {llm_val!r}."
+                f"of type LLM (e.g. llm = LLM('gpt-4o-mini')). Got: {llm_val!r}."
             )
 
     def invoke(self, messages: list[Message]) -> Message:
