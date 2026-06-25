@@ -51,6 +51,9 @@ specialist `ToolAgent`, whose answer is the final reply.
 | `hidden` workers + `aliases` on the public entry point | [agents/support.py](agents/support.py) |
 | `autodiscover` (drop a file in `agents/`, it goes live) | [main.py](main.py) |
 | `Server` — OpenAI wire protocol + Bearer auth | [main.py](main.py) |
+| Bare routes (`/chat/completions`, `/models`) for clients that omit `/v1` | [test_sp1_server_features.py](test_sp1_server_features.py) |
+| `thought_stream_mode` (`content` / `custom` / `hidden`) | [test_sp1_server_features.py](test_sp1_server_features.py) |
+| `usage` token counting + per-request generation params | [test_sp1_server_features.py](test_sp1_server_features.py) |
 | Dependency-injection / offline testing | [test_support_assistant.py](test_support_assistant.py) |
 
 ## Run it
@@ -78,11 +81,30 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"support","messages":[{"role":"user","content":"how do I enable SSO?"}]}'
 
-# Stream it (SSE) — reasoning lines arrive before the answer:
+# Stream it (SSE). By default reasoning is wrapped in a <think>...</think> block
+# inside delta.content (the `content` thought_stream_mode) — how most OpenAI UIs
+# render thinking:
 curl -N -X POST http://localhost:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"support","messages":[{"role":"user","content":"cancel my order 1003"}],"stream":true}'
+
+# Prefer reasoning on a separate delta.reasoning field? Set thought_stream_mode
+# to "custom". Use "hidden" to drop reasoning entirely:
+curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"support","messages":[{"role":"user","content":"cancel my order 1003"}],"stream":true,"thought_stream_mode":"custom"}'
+
+# No /v1 prefix needed — bare routes work too (for clients that omit it):
+curl -X POST http://localhost:8000/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"support","messages":[{"role":"user","content":"where is my order 1002?"}],"temperature":0.2}'
 ```
+
+Responses carry an OpenAI-style `usage` block (prompt/completion/total tokens)
+when `tiktoken` is installed (it is, via this example's extras); without it,
+`usage` is simply omitted. Add `"stream_options":{"include_usage":true}` to get a
+final usage chunk on a stream. Per-request generation params (`temperature`,
+`top_p`, `max_tokens`, …) are forwarded to the model automatically.
 
 The assistant is also reachable by its aliases — use `"model":"assistant"` or
 `"model":"help"`. Any OpenAI SDK works too; point `base_url` at

@@ -130,11 +130,28 @@ Full OpenAI-compatible wire format. Served routes:
 | Route | Method | Description |
 |---|---|---|
 | `/v1/chat/completions` | POST | Non-streaming and streaming (SSE) completions. |
+| `/chat/completions` | POST | Same as above, for clients that omit the `/v1` prefix. |
 | `/v1/models` | GET | List registered agents in OpenAI `model` object format. |
+| `/models` | GET | Same as above, without the `/v1` prefix. |
 
-> **`usage` is always `{}`.** The neutral boundary (`Message`) carries no token
-> counts, so the server cannot report `prompt_tokens`/`completion_tokens`.
-> Clients that need usage must measure it themselves.
+> **`usage`.** When `tiktoken` is installed (`pip install aixon[tiktoken]`), the
+> server reports `prompt_tokens`/`completion_tokens`/`total_tokens`, counted in
+> the Server layer (the neutral `Message`/`Chunk` types still carry no token
+> counts). Without `tiktoken`, `usage` is omitted — never an error. On a stream,
+> add `"stream_options": {"include_usage": true}` to get a final usage chunk
+> before `[DONE]`.
+
+> **`thought_stream_mode`** (request body, OpenAI adapter) controls how an
+> agent's reasoning reaches the wire on a stream:
+> - `content` (default) — reasoning wrapped in a `<think>...</think>` block inside
+>   `delta.content`.
+> - `custom` — reasoning on a separate `delta.reasoning` field.
+> - `hidden` — reasoning dropped; content only.
+
+> **Generation params.** Per-request `temperature`, `top_p`, `max_tokens`,
+> `presence_penalty`, `frequency_penalty`, and `stop` are forwarded to the model
+> automatically (allow-listed), overriding the agent's class-level `LLM(...)`
+> defaults for that request.
 
 > **Non-blocking.** The server `await`s `agent.ainvoke` / `agent.astream`, so an
 > in-flight LLM call does not block the event loop — concurrent requests overlap

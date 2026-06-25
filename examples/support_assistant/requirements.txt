@@ -4,8 +4,9 @@
 #   openai           -> gpt-4o-mini provider     (only used when OPENAI_API_KEY is set)
 #   retrieval        -> httpx for the Connector
 #   openai-embedding -> OpenAIEmbedding          (only used when OPENAI_API_KEY is set)
+#   tiktoken         -> token counting for the `usage` field on responses
 # langchain / langgraph are core deps and always installed.
-aixon[server,cli,openai,retrieval,openai-embedding]
+aixon[server,cli,openai,retrieval,openai-embedding,tiktoken]
 
 # Served by `python main.py`.
 uvicorn[standard]
