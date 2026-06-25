@@ -301,19 +301,17 @@ class GreeterAgent(LLMAgent):
 """
 
 _MAIN_PY = """\
-import os
-import uvicorn
-from aixon import autodiscover
-from aixon.server.server import Server
+from aixon import Server, autodiscover
 
 # Import every module in agents/, registering each Agent at startup.
 autodiscover("agents")
 
-# Build the ASGI app (OpenAI-compatible API). Set AUTH_API_KEY for auth.
-app = Server.get_instance().app
+# OpenAI-compatible API server. Set AUTH_API_KEY to require a Bearer token.
+server = Server()
+app = server.app  # ASGI app — for production: `uvicorn main:app --workers 4`
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    server.serve(host="0.0.0.0", port=8000)
 """
 
 _PYPROJECT = """\
@@ -329,6 +327,9 @@ dependencies = [
     "aixon[server,cli]",
     "uvicorn[standard]",
 ]
+
+[project.optional-dependencies]
+all = ["aixon[all]"]
 """
 
 
