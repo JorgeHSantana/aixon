@@ -1,10 +1,10 @@
 # aixon/server/adapters/openai.py
 """OpenAI-compatible ProtocolAdapter — the full, primary dialect.
 
-Wire shapes mirror OpenAI's Chat Completions API (translated from olympus's
-Flask handler to pure neutral translation): ``/v1/chat/completions`` (stream +
-non-stream) and ``/v1/models``. Reasoning is surfaced in the ``message``/``delta``
-``reasoning`` field (reasoning-field mode)."""
+Wire shapes mirror OpenAI's Chat Completions API as pure neutral translation:
+``/v1/chat/completions`` (stream + non-stream) and ``/v1/models``. Reasoning is
+surfaced in the ``message``/``delta`` ``reasoning`` field (reasoning-field
+mode)."""
 
 from __future__ import annotations
 

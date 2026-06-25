@@ -78,15 +78,33 @@ The `LLM` object is lazy — it builds the underlying LangChain `BaseChatModel`
 only on first use, so constructing an agent never requires a network call or an
 API key to be present at import time.
 
-**Provider inference table:**
+**Provider inference table** (the model name's prefix selects the provider):
 
-| Model prefix | Provider (`Provider` enum) |
+| Model prefix | Provider name |
 |---|---|
-| `gpt-*`, `o[0-9]*`, `text-*` | `OPENAI` |
-| `claude-*` | `ANTHROPIC` |
-| `gemini-*` | `GOOGLE` |
+| `gpt-*`, `o[0-9]*`, `text-*` | `"openai"` |
+| `claude-*` | `"anthropic"` |
+| `gemini-*` | `"google"` |
 
-For custom providers use `register_provider(provider, cls)` before first use.
+Provider names are lowercase strings, not an enum. To override inference, pass
+`provider=` explicitly: `LLM("some-model", provider="openai")`.
+
+For a custom backend, subclass the `Provider` ABC (`aixon.providers.base`) and
+register a single instance before first use:
+
+```python
+from aixon.providers.base import Provider, register_provider
+
+class MyProvider(Provider):
+    name = "myvendor"
+    env_key = "MYVENDOR_API_KEY"
+    def build(self, model: str, **params):
+        from my_sdk import ChatModel        # lazy import
+        return ChatModel(model=model, **params)
+
+register_provider(MyProvider())             # one instance, keyed by .name
+# then: LLM("my-model", provider="myvendor")
+```
 
 ---
 

@@ -180,7 +180,7 @@ Wire-format differences handled by the adapter (agents see none of these):
 - System prompt is outside the `messages` array (a separate top-level field).
 - Response body uses typed content blocks (`[{"type": "text", "text": "..."}]`).
 - Stop reason field is `stop_reason` instead of `finish_reason`.
-- Streaming uses named event types (`message_start`, `content_block_delta`, `message_stop`).
+- Streaming uses named event types (`content_block_delta`, `message_delta`, `message_stop`).
 
 ### Serving more than one dialect
 

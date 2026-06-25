@@ -214,21 +214,55 @@ class Orchestrator(Agent, abstract=True):
         return out
 
     def _route_supervisor(self, state: GraphState) -> str:
-        """Pick the next worker, or END. Default: first worker that has not yet
-        emitted an assistant message this run, else END. A real LLM-driven
-        supervisor replaces this hook; the declarative surface stays the same.
+        """Ask the supervisor LLM which worker should act next, or END.
 
-        We track which workers already ran by counting assistant messages: the
-        initial state has only the user message, and each worker appends exactly
-        one assistant message, so the Nth assistant message means N workers have
-        run. This terminates after every worker runs once."""
-        workers = list(self._worker_instances().items())
-        ran = sum(
-            1 for m in state.get("messages", []) if m.role == "assistant"
-        )
-        if ran < len(workers):
-            return workers[ran][0]  # next un-run worker's node name
+        The supervisor sees the full conversation (including any worker answers
+        appended earlier this run) plus the worker roster, and returns a worker
+        name or DONE. Termination is the LLM's decision, backstopped by
+        ``recursion_limit``. Safety net: we never END on an *unanswered* user
+        turn — if the LLM declines to route while the last message is still the
+        user's, dispatch to the first worker so the turn is always handled."""
+        workers = self._worker_instances()
+        messages = list(state.get("messages", []))
+        choice = self._supervisor_choose(messages, workers)
+        if choice in workers:
+            return choice
+        last_role = messages[-1].role if messages else "user"
+        if last_role != "assistant" and workers:
+            return next(iter(workers))  # don't strand an unanswered user turn
         return END
+
+    def _supervisor_choose(self, messages: list[Message], workers: dict) -> str:
+        """Run the supervisor LLM and return a worker name, or ``""`` for DONE.
+
+        Matches the reply against worker names (exact first, then substring,
+        since models add punctuation/words). Requires ``self.supervisor`` to be
+        an ``LLM`` (or anything exposing ``complete(list[Message]) -> Message``)."""
+        roster = "\n".join(
+            f"- {name}: {inst.description or 'no description'}"
+            for name, inst in workers.items()
+        )
+        system = Message(
+            role="system",
+            content=(
+                "You are a routing supervisor coordinating a team of workers. "
+                "Read the conversation and decide who should act next.\n\n"
+                f"Workers:\n{roster}\n\n"
+                "Reply with ONLY the name of the worker that should handle the "
+                "conversation next, or the single word DONE if the user's "
+                "request has been fully answered. If no worker has answered the "
+                "latest request yet, you MUST pick a worker."
+            ),
+        )
+        reply = self.supervisor.complete([system, *messages])
+        text = (reply.content or "").strip().lower()
+        for name in workers:                 # exact match wins
+            if text == name.lower():
+                return name
+        for name in workers:                 # then substring
+            if name.lower() in text:
+                return name
+        return ""  # DONE / unparseable
 
     def _build_supervisor_graph(self):
         workers = self._worker_instances()

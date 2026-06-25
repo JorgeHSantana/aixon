@@ -37,7 +37,7 @@ def test_get_unknown_provider_raises():
 
 # ── resolve_provider_for_model (concrete providers registered below) ─────────
 
-@pytest.mark.parametrize("model", ["gpt-4o", "gpt-5.4", "o3", "o1-mini", "text-davinci-003"])
+@pytest.mark.parametrize("model", ["gpt-4o", "gpt-4.1", "o3", "o1-mini", "text-davinci-003"])
 def test_resolve_openai_models(model):
     importlib.import_module("aixon.providers.openai")  # self-registers
     assert resolve_provider_for_model(model).name == "openai"

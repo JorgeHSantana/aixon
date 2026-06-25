@@ -169,7 +169,7 @@ requires every vendor SDK to be installed.
 ```python
 class LLM:
     """Declarative handle for a chat model. Stored as a class attribute on
-    agents: `llm = LLM("gpt-5.4", temperature=0.2)`. Resolves to a LangChain
+    agents: `llm = LLM("gpt-4o-mini", temperature=0.2)`. Resolves to a LangChain
     chat model lazily (so construction needs no API key / network)."""
     def __init__(self, model: str, *, provider: str | None = None, **params):
         self.model = model
