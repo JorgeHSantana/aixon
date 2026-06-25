@@ -236,4 +236,4 @@ the `aixon chat` selection menu.
 ## See also
 
 - [Architecture overview](architecture.md) — how agents, retrievers, and the server compose
-- [Retrievers](retrievers.md) — `Retriever.as_tool()` and the same `AgentTool` contract
+- [Retrieval](retrieval.md) — `Retriever.as_tool()` and the same `AgentTool` contract
