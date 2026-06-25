@@ -52,8 +52,12 @@ def test_new_creates_pyproject_toml(runner, tmp_path):
         assert os.path.isfile("my-project/pyproject.toml")
         content = open("my-project/pyproject.toml").read()
         assert "my-project" in content
-        assert "aixon" in content
-        assert "uvicorn" in content
+        # Depends on the server stack via the aixon[server] extra (which itself
+        # provides uvicorn[standard]) — assert the real dependency, not a comment.
+        assert "aixon[server,cli]" in content
+        # tomllib must parse it (a real, valid pyproject, not just substrings).
+        import tomllib
+        assert tomllib.loads(content)["project"]["name"] == "my-project"
 
 
 def test_new_agents_init_contains_no_import_loop(runner, tmp_path):
