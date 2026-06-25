@@ -49,9 +49,17 @@ class LLM:
             self._chat_model = provider.build(self.model, **self.params)
         return self._chat_model
 
+    def _bound_model(self) -> "BaseChatModel":
+        """Chat model with the current request's generation params bound on top
+        of the class-level defaults. No params active → the bare model."""
+        from aixon.runtime import current_generation_params
+
+        params = current_generation_params()
+        return self.chat_model.bind(**params) if params else self.chat_model
+
     def complete(self, messages: list[Message]) -> Message:
         """Single-shot neutral completion. Used by LLMAgent.invoke."""
-        lc_result = self.chat_model.invoke(to_langchain(messages))
+        lc_result = self._bound_model().invoke(to_langchain(messages))
         return from_langchain(lc_result)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
@@ -61,7 +69,7 @@ class LLM:
         Works whether the model yields AIMessageChunk deltas (real providers)
         or a single AIMessage (the fake, which has no _stream).
         """
-        for lc_chunk in self.chat_model.stream(to_langchain(messages)):
+        for lc_chunk in self._bound_model().stream(to_langchain(messages)):
             content = getattr(lc_chunk, "content", "")
             if isinstance(content, str) and content:
                 yield Chunk(content=content)
@@ -70,13 +78,13 @@ class LLM:
     async def acomplete(self, messages: list[Message]) -> Message:
         """Async single-shot completion. Used by LLMAgent.ainvoke. Delegates to
         the LangChain model's native ``ainvoke`` (does not block the loop)."""
-        lc_result = await self.chat_model.ainvoke(to_langchain(messages))
+        lc_result = await self._bound_model().ainvoke(to_langchain(messages))
         return from_langchain(lc_result)
 
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """Async neutral streaming. Used by LLMAgent.astream. Mirrors stream()
         over the model's native ``astream``."""
-        async for lc_chunk in self.chat_model.astream(to_langchain(messages)):
+        async for lc_chunk in self._bound_model().astream(to_langchain(messages)):
             content = getattr(lc_chunk, "content", "")
             if isinstance(content, str) and content:
                 yield Chunk(content=content)

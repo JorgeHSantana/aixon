@@ -22,6 +22,7 @@ from typing import Optional
 from aixon.exceptions import AgentNotFoundError, AixonError
 from aixon.logging import Logger
 from aixon.registry import get_registry
+from aixon.runtime import generation_params
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.protocol import ProtocolAdapter
 
@@ -205,13 +206,11 @@ class Server:
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
-            # await ainvoke instead of calling the sync invoke() directly: the
-            # latter would block the event loop for the whole LLM call, serializing
-            # concurrent requests. ainvoke is async-native (or a threaded bridge).
-            message = await agent.ainvoke(pr.messages)
-            # usage is intentionally empty: the neutral boundary (Message) carries
-            # no token counts, so the server cannot populate prompt/completion
-            # tokens. Clients receive "usage": {} (documented in docs/server.md).
+            # await ainvoke (async-native or threaded bridge) so the LLM call
+            # never blocks the event loop. Request generation params are active
+            # for the duration of the call via the runtime contextvar.
+            with generation_params(pr.params):
+                message = await agent.ainvoke(pr.messages)
             return adapter.format_response(model=model, message=message, usage={})
 
         # `from __future__ import annotations` (module-level) turns
