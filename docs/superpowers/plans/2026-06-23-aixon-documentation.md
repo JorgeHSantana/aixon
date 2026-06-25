@@ -64,12 +64,12 @@ OpenAI-compatible client can reach.
 
 ```mermaid
 graph LR
-    Client["🤖 Client / LLM"] -->|"HTTP · SSE"| SA["Server\n(ProtocolAdapter)"]
+    Client["🤖 Client / LLM"] -->|"HTTP · SSE"| SA["Server<br/>(ProtocolAdapter)"]
     SA --> R["Registry"]
-    R --> A["Agent\n(LLMAgent · ToolAgent · Orchestrator)"]
-    A --> LLM["LLM\n(Provider)"]
-    A --> T["Tools\n(Retriever · Connector · Agent)"]
-    A --> O["Orchestrator\n→ nodes (Agents)"]
+    R --> A["Agent<br/>(LLMAgent · ToolAgent · Orchestrator)"]
+    A --> LLM["LLM<br/>(Provider)"]
+    A --> T["Tools<br/>(Retriever · Connector · Agent)"]
+    A --> O["Orchestrator<br/>→ nodes (Agents)"]
 
     style SA fill:#4f46e5,color:#fff,stroke:none
     style A fill:#7c3aed,color:#fff,stroke:none
@@ -87,20 +87,21 @@ provider SDKs stay hidden inside `LLM`.
 ## Installation
 
 ```bash
-pip install aixon
+pip install aixon          # core: langchain + langgraph — agents work out of the box
 ```
 
-Optional extras:
+`langchain`/`langchain-core`/`langgraph` are mandatory core dependencies. The
+optional extras add the outer layers:
 
 ```bash
-pip install "aixon[llm]"          # LangChain core + LangGraph (required for agents)
-pip install "aixon[openai]"       # OpenAI provider SDK
-pip install "aixon[anthropic]"    # Anthropic provider SDK
-pip install "aixon[google]"       # Google provider SDK
-pip install "aixon[server]"       # FastAPI + uvicorn + httpx
-pip install "aixon[cli]"          # click + openai (remote chat mode)
-pip install "aixon[retrieval]"    # httpx (Connector HTTP client)
-pip install "aixon[all]"          # everything above
+pip install "aixon[server]"            # FastAPI + uvicorn + httpx — serve agents as an API
+pip install "aixon[cli]"               # click + openai — the `aixon` command + remote chat
+pip install "aixon[openai]"            # OpenAI provider binding (langchain-openai)
+pip install "aixon[anthropic]"         # Anthropic provider binding
+pip install "aixon[google]"            # Google provider binding
+pip install "aixon[retrieval]"         # httpx — Connector HTTP client
+pip install "aixon[openai-embedding]"  # langchain-openai — OpenAIEmbedding
+pip install "aixon[all]"               # everything above
 ```
 
 ---
@@ -127,19 +128,19 @@ Or inline — no scaffolding needed:
 from aixon import LLMAgent, LLM
 
 class HelloAgent(LLMAgent):
-    llm = LLM("gpt-5.4", temperature=0.2)
+    llm = LLM("gpt-4o-mini", temperature=0.2)
     description = "Greets the user"
     prompt = "You are a concise greeter. Reply in one sentence."
 ```
 
 ```python
 # main.py
-from aixon import autodiscover
+from aixon import autodiscover, Message
 from aixon.registry import get_registry
 
 autodiscover("agents")
 agent = get_registry().resolve("helloagent")
-reply = agent.invoke([{"role": "user", "content": "Hi!"}])
+reply = agent.invoke([Message(role="user", content="Hi!")])
 print(reply.content)
 ```
 
@@ -167,7 +168,7 @@ you need:
 | Subtype | When to use | Suffix required |
 |---|---|---|
 | `LLMAgent` | Direct LLM call — no tools, no loop | `*Agent` |
-| `ToolAgent` | LLM + tool-calling loop (`AgentExecutor`) | `*Agent` |
+| `ToolAgent` | LLM + tool-calling loop (LangGraph `create_agent`) | `*Agent` |
 | `Orchestrator` | Multiple agents coordinated by a graph | `*Orchestrator` |
 
 **Suffix rule:** every concrete subclass name must end with its declared suffix.
@@ -189,7 +190,7 @@ class GreeterAgent(LLMAgent):  # ← correct
 from aixon import LLMAgent, LLM
 
 class PlannerAgent(LLMAgent):
-    llm         = LLM("gpt-5.4", temperature=0.2)
+    llm         = LLM("gpt-4o-mini", temperature=0.2)
     description = "Strategic planner"
     prompt      = "You plan step-by-step actions for complex goals."
 ```
@@ -216,7 +217,7 @@ from aixon import Orchestrator, LLM
 from aixon.state import END
 
 class SupportOrchestrator(Orchestrator):
-    supervisor = LLM("gpt-5.4")
+    supervisor = LLM("gpt-4o-mini")
     agents     = [BillingAgent, TechAgent, PlannerAgent]
 ```
 
@@ -294,14 +295,16 @@ never registered.
 ## Dependencies
 
 ```
-langchain      >= 0.3
-langchain-core >= 0.3
-langgraph      >= 0.2
-fastapi        >= 0.100   (server extra)
-uvicorn        >= 0.20    (server extra)
-pydantic       >= 2.0
-click          >= 8.0
-httpx          >= 0.27    (retrieval extra)
+langchain        >= 1.0    (core)
+langchain-core   >= 1.0    (core)
+langgraph        >= 1.0    (core)
+fastapi          >= 0.100  (server extra)
+uvicorn          >= 0.20   (server extra)
+pydantic         >= 2.0    (server extra)
+httpx            >= 0.27   (server / retrieval extra)
+click            >= 8.0    (cli extra)
+openai           >= 1.0    (cli extra — remote chat client)
+langchain-openai >= 0.2    (openai / openai-embedding extra)
 ```
 
 ---
@@ -346,7 +349,7 @@ git commit -m "docs: replace README stub with full overview, quickstart, and env
 - Create: `docs/architecture.md`
 
 **Interfaces:**
-- Consumes (contract): §0 (`Message`, `Chunk`, neutral boundary convention), §1.4 (`_adapters/messages.py` boundary note), §4 (`ProtocolAdapter` decoupling), design spec §"Desacoplamento de protocolo", §"Fluxo de um request".
+- Consumes (contract): §0 (`Message`, `Chunk`, neutral boundary convention), §1.4 (`_interop/messages.py` boundary note), §4 (`ProtocolAdapter` decoupling), design spec §"Desacoplamento de protocolo", §"Fluxo de um request".
 - Produces: the architectural narrative that all other docs reference.
 
 - [ ] **Step 1: Write docs/architecture.md**
@@ -366,7 +369,7 @@ Server (Registry)        ← resolves agent name from request's "model" field
 Agent.invoke / stream    ← speaks ONLY neutral types; no wire type crosses here
     │
     ├── LLMAgent  → LLM → Provider → vendor SDK (OpenAI / Anthropic / Google)
-    ├── ToolAgent → AgentExecutor → tools: Retriever · Connector · Agent.as_tool()
+    ├── ToolAgent → create_agent (LangGraph) → tools: Retriever · Connector · Agent.as_tool()
     └── Orchestrator → LangGraph → nodes (Agents) → ...
 ```
 
@@ -506,10 +509,10 @@ before the server starts.
 
 ```python
 class Greeter(LLMAgent):      # ← NamingError raised here, at import time
-    llm = LLM("gpt-5.4")
+    llm = LLM("gpt-4o-mini")
 
 class GreeterAgent(LLMAgent): # ← fine
-    llm = LLM("gpt-5.4")
+    llm = LLM("gpt-4o-mini")
 ```
 
 Abstract intermediate classes opt out with `abstract=True` and are never
@@ -521,7 +524,7 @@ class BaseResearchAgent(LLMAgent, abstract=True):
     # no llm declared — subclasses must supply it
 
 class WebResearchAgent(BaseResearchAgent):
-    llm = LLM("gpt-5.4")   # ← registered as "webresearchagent"
+    llm = LLM("gpt-4o-mini")   # ← registered as "webresearchagent"
 ```
 ```
 
@@ -598,7 +601,7 @@ path from question to answer.
 from aixon import LLMAgent, LLM
 
 class PlannerAgent(LLMAgent):
-    llm         = LLM("gpt-5.4", temperature=0.2)
+    llm         = LLM("gpt-4o-mini", temperature=0.2)
     description = "Breaks complex goals into step-by-step plans"
     prompt      = "You are a concise strategic planner. Use numbered lists."
 ```
@@ -627,7 +630,7 @@ llm = LLM("claude-opus-4", provider="anthropic", temperature=0.3)
 #   gpt-* / o[0-9]* / text-*  →  openai
 #   claude-*                   →  anthropic
 #   gemini-*                   →  google
-llm = LLM("gpt-5.4", temperature=0.2, max_tokens=4096)
+llm = LLM("gpt-4o-mini", temperature=0.2, max_tokens=4096)
 ```
 
 The `LLM` object is lazy — it builds the underlying LangChain `BaseChatModel`
@@ -644,12 +647,12 @@ answer.
 
 ```python
 from aixon import ToolAgent, LLM
-from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.tools import DuckDuckGoSearchRun  # pip install langchain-community
 
 from retrievers.library import LibraryRetriever
 
 class ResearchAgent(ToolAgent):
-    llm                 = LLM("gpt-5.4", temperature=0.1)
+    llm                 = LLM("gpt-4o-mini", temperature=0.1)
     description         = "Researches topics using web search and the knowledge base"
     prompt              = "Always cite your sources. Think step by step."
     tools               = [LibraryRetriever, DuckDuckGoSearchRun()]
@@ -683,7 +686,7 @@ Any `Agent` exposes itself as a tool via `as_tool()`. The result is a neutral
 from aixon import ToolAgent, LLM
 
 class OrchestratorAgent(ToolAgent):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [
         PlannerAgent().as_tool(description="Break the goal into steps"),
         ResearchAgent().as_tool(),
@@ -732,7 +735,7 @@ handles both uniformly.
 
 ```python
 class BaseSupportAgent(ToolAgent, abstract=True):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [check_ticket]
 
 class BillingAgent(BaseSupportAgent):     # ← valid: ends with "Agent"
@@ -804,7 +807,7 @@ each turn and loops until it decides the conversation is complete.
 ```python
 class SupportOrchestrator(Orchestrator):
     description = "Routes support tickets to the right specialist"
-    supervisor  = LLM("gpt-5.4")
+    supervisor  = LLM("gpt-4o-mini")
     agents      = [BillingAgent, TechAgent, PlannerAgent]
 ```
 
@@ -970,7 +973,7 @@ orchestrator as a tool inside a `ToolAgent` or as a node in another orchestrator
 
 ```python
 class RouterAgent(ToolAgent):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [SupportOrchestrator().as_tool(description="Handle support tickets")]
 ```
 
@@ -994,11 +997,11 @@ time, before the server starts:
 
 ```python
 class PingAgent(ToolAgent):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [PongAgent().as_tool()]   # ← CompositionCycleError if PongAgent uses PingAgent
 
 class PongAgent(ToolAgent):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [PingAgent().as_tool()]   # ← closes the cycle
 ```
 
@@ -1009,7 +1012,7 @@ node) is legitimate and allowed — it is bounded by Guard B below.
 
 ```python
 class ResearchOrchestrator(Orchestrator):
-    supervisor       = LLM("gpt-5.4")
+    supervisor       = LLM("gpt-4o-mini")
     agents           = [SearchAgent, SummarizeAgent]
     recursion_limit  = 50    # LangGraph supersteps. Default: 25. None = no cap.
     timeout          = 600   # Wall-clock backstop in seconds. None = no backstop.
@@ -1379,7 +1382,7 @@ returns. `ToolAgent.tools` handles both uniformly:
 
 ```python
 class ResearchAgent(ToolAgent):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [
         LibraryRetriever().as_tool(k=10),
         PlannerAgent().as_tool(),
@@ -1469,7 +1472,7 @@ class Connector:
     base_url_env:   str = ""    # env var holding the service base URL
     auth_token_env: str = ""    # env var holding the auth token (Bearer)
 
-    def __init__(self, *, base_url=None, auth_token=None, timeout=None): ...
+    def __init__(self, *, base_url=None, auth_token=None, timeout=30.0): ...
 
     def get(self, path: str, **kw) -> dict: ...
     def post(self, path: str, json=None, **kw) -> dict: ...
@@ -1491,7 +1494,7 @@ stock = connector.get_stock("prod-123")
 
 ```python
 class InventoryAgent(ToolAgent):
-    llm   = LLM("gpt-5.4")
+    llm   = LLM("gpt-4o-mini")
     tools = [
         InventoryConnector().get_stock,   # plain callable → coerced to StructuredTool
     ]
@@ -1614,8 +1617,12 @@ my-agents/
 ```python
 from aixon import Server, autodiscover
 
+# Import every module in agents/, registering each Agent at startup.
 autodiscover("agents")
+
+# OpenAI-compatible API server. Set AUTH_API_KEY to require a Bearer token.
 server = Server()
+app = server.app  # ASGI app — for production: `uvicorn main:app --workers 4`
 
 if __name__ == "__main__":
     server.serve(host="0.0.0.0", port=8000)
@@ -1665,13 +1672,12 @@ aixon list
 aixon list --package myagents
 ```
 
-Output:
+Output — one line per agent, `name  [Type]  description`:
 
 ```
-NAME                TYPE            DESCRIPTION
-planneragent        LLMAgent        Breaks complex goals into step-by-step plans
-researchagent       ToolAgent       Researches topics using web search and the knowledge base
-supportorchestr...  Orchestrator    Routes support tickets to the right specialist
+planneragent  [LLMAgent]  Breaks complex goals into step-by-step plans
+researchagent  [ToolAgent]  Researches topics using web search and the knowledge base
+supportorchestrator  [Orchestrator]  Routes support tickets to the right specialist
 ```
 
 Hidden agents (`.hidden = True`) are excluded from the list. Use
@@ -1781,7 +1787,7 @@ class KnowledgeRetriever(Retriever):
 from aixon import LLMAgent, LLM
 
 class BillingAgent(LLMAgent):
-    llm         = LLM("gpt-5.4", temperature=0.1)
+    llm         = LLM("gpt-4o-mini", temperature=0.1)
     description = "Handles billing and account questions"
     prompt      = "You are a billing specialist. Be concise and factual."
 ```
@@ -1792,7 +1798,7 @@ from aixon import ToolAgent, LLM
 from agents.retriever import KnowledgeRetriever
 
 class TechAgent(ToolAgent):
-    llm         = LLM("gpt-5.4", temperature=0.1)
+    llm         = LLM("gpt-4o-mini", temperature=0.1)
     description = "Handles technical issues using the knowledge base"
     prompt      = "Use the knowledge base. Cite your sources."
     tools       = [KnowledgeRetriever()]
@@ -1810,7 +1816,7 @@ from agents.tech import TechAgent
 
 class SupportOrchestrator(Orchestrator):
     description = "Routes support tickets to the right specialist"
-    supervisor  = LLM("gpt-5.4")
+    supervisor  = LLM("gpt-4o-mini")
     agents      = [BillingAgent, TechAgent]
 ```
 
@@ -1822,13 +1828,12 @@ class SupportOrchestrator(Orchestrator):
 aixon list --package agents
 ```
 
-Expected output:
+Expected output — one line per agent, `name  [Type]  description`:
 
 ```
-NAME                  TYPE           DESCRIPTION
-billingagent          LLMAgent       Handles billing and account questions
-techagent             ToolAgent      Handles technical issues using the knowledge base
-supportorchestrator   Orchestrator   Routes support tickets to the right specialist
+billingagent  [LLMAgent]  Handles billing and account questions
+techagent  [ToolAgent]  Handles technical issues using the knowledge base
+supportorchestrator  [Orchestrator]  Routes support tickets to the right specialist
 ```
 
 `KnowledgeRetriever` does not appear — `Retriever` subclasses are not `Agent`
@@ -1907,7 +1912,7 @@ class CRMConnector(Connector):
 from agents.crm import CRMConnector
 
 class TechAgent(ToolAgent):
-    llm   = LLM("gpt-5.4", temperature=0.1)
+    llm   = LLM("gpt-4o-mini", temperature=0.1)
     tools = [
         KnowledgeRetriever(),
         CRMConnector().get_ticket,   # plain callable → coerced to StructuredTool
