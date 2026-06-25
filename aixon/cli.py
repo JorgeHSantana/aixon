@@ -24,8 +24,8 @@ def _ensure_cwd_on_path() -> None:
 
     A ``python main.py`` run already has the script's dir on ``sys.path[0]``,
     but the installed ``aixon`` console-script has its launcher dir there
-    instead — so a CWD-local ``agents`` package would not import. Insert the CWD
-    explicitly to make the CLI behave like the script."""
+    instead — so a CWD-local ``agents`` package would not import. Add the CWD to
+    ``sys.path`` (only if absent) so the CLI behaves like the script."""
     cwd = os.getcwd()
     if cwd not in sys.path:
         sys.path.insert(0, cwd)

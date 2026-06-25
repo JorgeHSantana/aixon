@@ -82,6 +82,28 @@ def test_models_route_is_public_at_its_mounted_path():
     assert "/anthropic/v1/models" in public
 
 
+def test_auth_exempts_prefixed_model_list_but_guards_prefixed_chat(monkeypatch):
+    # With AUTH_API_KEY set, the prefixed model-list route stays public while
+    # the prefixed chat route requires a token — proves the prefix flows all the
+    # way into the auth middleware's behavior, not just the public-path set.
+    monkeypatch.setenv("AUTH_API_KEY", "secret")
+    make_echo("echo", description="d")
+    client = TestClient(_both())
+
+    assert client.get("/anthropic/v1/models").status_code == 200  # public
+    no_token = client.post(
+        "/anthropic/v1/messages",
+        json={"model": "echo", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert no_token.status_code == 401
+    with_token = client.post(
+        "/anthropic/v1/messages",
+        headers={"Authorization": "Bearer secret"},
+        json={"model": "echo", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert with_token.status_code == 200
+
+
 def test_default_single_adapter_is_unchanged():
     make_echo("echo", description="d")
     client = TestClient(Server(adapters=[OpenAIAdapter()]).app)
