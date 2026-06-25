@@ -24,13 +24,20 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Operating System :: OS Independent",
 ]
-dependencies = []
+# langchain/langchain-core/langgraph are MANDATORY — every agent subtype and
+# the orchestrator require them, so they are core deps (not an optional extra).
+# `import aixon` always pulls them in. Provider bindings (openai/anthropic/
+# google) stay optional; pick the one(s) you use.
+dependencies = [
+    "langchain>=1.0",
+    "langchain-core>=1.0",
+    "langgraph>=1.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
 server = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "httpx>=0.27", "pydantic>=2.0"]
 cli = ["click>=8.0", "openai>=1.0"]
-llm = ["langchain>=1.0", "langchain-core>=1.0", "langgraph>=1.0"]
 openai = ["langchain-openai>=0.2"]
 anthropic = ["langchain-anthropic>=0.2"]
 google = ["langchain-google-genai>=2.0"]
@@ -43,9 +50,6 @@ all = [
     "pydantic>=2.0",
     "click>=8.0",
     "openai>=1.0",
-    "langchain>=1.0",
-    "langchain-core>=1.0",
-    "langgraph>=1.0",
     "langchain-openai>=0.2",
     "langchain-anthropic>=0.2",
     "langchain-google-genai>=2.0",

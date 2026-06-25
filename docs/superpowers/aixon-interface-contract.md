@@ -750,16 +750,24 @@ def make_echo_agent(name: str = "echo", *, hidden: bool = False): ...
   `make_echo_agent` / `emit_reasoning` / `reasoning_channel` directly, because
   by execution time Plans 2 and 3 are merged (see 9.3 ordering).
 
-### 9.2 Extras (final, authoritative set in `pyproject.toml`)
+### 9.2 Dependencies and extras (final, authoritative set in `pyproject.toml`)
 
-Each plan appends only its own extra; the union is:
-`dev`, `llm` (`langchain>=1.0`, `langchain-core>=1.0`, `langgraph>=1.0`),
-`openai`, `anthropic`, `google`, `server` (`fastapi`, `uvicorn[standard]`,
-`pydantic`, `httpx`), `retrieval` (`httpx>=0.27`), `cli` (`click`,
-`openai>=1.0`). NOTE: `langgraph` lives in the `llm` extra (ToolAgent and
-Orchestrator both need it); there is NO separate `orchestration` extra — Plan 4
-adds `langgraph` to `llm` if Plan 2 hasn't, no new extra. `all` aggregates
-every extra. When two plans both touch `all`, the controller merges (union).
+**Core (mandatory) dependencies:** `langchain>=1.0`, `langchain-core>=1.0`,
+`langgraph>=1.0`. The framework does not function without them — every agent
+subtype (LLMAgent/ToolAgent) and the Orchestrator require langchain/langgraph,
+so they are core `project.dependencies`, NOT an optional extra. `import aixon`
+always pulls them in; there is NO `llm` extra and NO `orchestration` extra.
+(Superseded the earlier design where langgraph lived in an `llm` extra behind a
+bare-install guard — see §9.4.)
+
+**Extras** (genuinely optional layers):
+`dev`, `openai` / `anthropic` / `google` (provider bindings —
+`langchain-openai` / `langchain-anthropic` / `langchain-google-genai`; pick the
+one you use), `server` (`fastapi`, `uvicorn[standard]`, `pydantic`, `httpx`),
+`retrieval` (`httpx>=0.27`), `openai-embedding` (`langchain-openai`), `cli`
+(`click`, `openai>=1.0`). `all` aggregates every extra (it does NOT re-list the
+core langchain stack, which is always installed). When two plans both touch
+`all`, the controller merges (union).
 
 ### 9.3 Execution order (dependency-driven)
 
@@ -767,13 +775,16 @@ every extra. When two plans both touch `all`, the controller merges (union).
 independent). Rationale: 3 consumes 2's `LLM`; 4 consumes 2+3; 7's `serve`
 consumes 5; 8 documents all. Each plan is still its own branch/review cycle.
 
-### 9.4 Top-level export guard (Plan 5)
+### 9.4 Top-level export guard (for extra-only layers)
 
-Plan 5's `Server`/adapter exports from `aixon/__init__.py` stay behind a
-`try/except ImportError` so `import aixon` works on a bare install (no `server`
-extra). Same pattern is acceptable for any layer whose deps live in an extra
-(e.g. `LLMAgent`/`ToolAgent`/`Orchestrator` import langchain lazily; if a
-top-level export would force the import, guard it the same way).
+Exports whose deps live in an OPTIONAL extra stay behind a `try/except
+ImportError` in `aixon/__init__.py` so `import aixon` works without that extra.
+This applies to the `Server`/adapter surface (needs the `server` extra:
+FastAPI/uvicorn). It does NOT apply to `LLM`/`LLMAgent`/`ToolAgent`/
+`Orchestrator`: langchain/langgraph are core dependencies (§9.2), always
+present, so those are plain unconditional top-level imports — no guard. Provider
+SDKs (openai/anthropic/google bindings) are still loaded lazily inside provider
+methods, so `import aixon` does not require any specific provider binding.
 
 ### 9.5 Dedicated virtualenv (REQUIRED — do not reuse another project's venv)
 

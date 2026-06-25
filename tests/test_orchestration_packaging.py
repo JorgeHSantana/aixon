@@ -1,3 +1,4 @@
+import re
 import tomllib
 from pathlib import Path
 
@@ -8,23 +9,34 @@ def _pyproject() -> dict:
         return tomllib.load(fh)
 
 
-def test_langgraph_lives_in_the_llm_extra():
+def _dep_names(deps: list[str]) -> set[str]:
+    """Extract bare package names from PEP 508 dependency strings."""
+    return {re.split(r"[><=~!\[ ]", d, maxsplit=1)[0] for d in deps}
+
+
+def test_langchain_stack_is_a_core_dependency():
+    """langchain / langchain-core / langgraph are MANDATORY — aixon does not
+    function without them (every agent subtype and the orchestrator need them),
+    so they live in core `project.dependencies`, NOT an optional extra.
+    `import aixon` must always pull them in."""
+    names = _dep_names(_pyproject()["project"]["dependencies"])
+    assert {"langchain", "langchain-core", "langgraph"} <= names, (
+        "langchain/langchain-core/langgraph must be core dependencies "
+        f"(got core deps: {sorted(names)})"
+    )
+
+
+def test_no_llm_extra_exists():
+    """The old `llm` extra is gone — its contents are core dependencies now,
+    so there is no optional 'llm' feature to install separately."""
     extras = _pyproject()["project"]["optional-dependencies"]
-    assert "llm" in extras, "Plan 2 must have created the 'llm' extra"
-    assert any(dep.startswith("langgraph") for dep in extras["llm"]), (
-        "langgraph must live in the 'llm' extra (contract §9.2) — "
-        "there is NO separate 'orchestration' extra"
+    assert "llm" not in extras, (
+        "langchain stack is mandatory (core deps); there is no 'llm' extra"
     )
 
 
 def test_no_orchestration_extra_exists():
     extras = _pyproject()["project"]["optional-dependencies"]
     assert "orchestration" not in extras, (
-        "langgraph belongs in 'llm', not a separate 'orchestration' extra "
-        "(contract §9.2)"
+        "langgraph is a core dependency, not a separate 'orchestration' extra"
     )
-
-
-def test_all_extra_includes_langgraph():
-    extras = _pyproject()["project"]["optional-dependencies"]
-    assert any(dep.startswith("langgraph") for dep in extras["all"])
