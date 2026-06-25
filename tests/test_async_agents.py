@@ -11,7 +11,6 @@ from langchain_core.messages import AIMessage
 from aixon.agent import Agent
 from aixon.agents.orchestrator import Orchestrator
 from aixon.agents.tool_agent import ToolAgent
-from aixon.llm import LLM
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry
 from aixon.retriever import Retriever, TypeAccess
@@ -88,6 +87,9 @@ def test_tool_agent_ainvoke_and_astream():
          "tools": [_KbRetriever().as_tool(name="faq", description="faq")]},
     )
     agent = cls()
+    # ToolAgent provides NATIVE async (not the base thread bridge).
+    assert type(agent).ainvoke is not Agent.ainvoke
+    assert type(agent).astream is not Agent.astream
     out = _run(agent.ainvoke([Message(role="user", content="hi")]))
     assert out.role == "assistant"
     chunks = _run(_collect(agent.astream([Message(role="user", content="hi")])))
@@ -122,6 +124,8 @@ def test_orchestrator_tier2_ainvoke_and_astream():
         entry = "worker"
 
     o = get_registry().resolve("t2")
+    # Orchestrator provides NATIVE async (async-node graph), not the base bridge.
+    assert type(o).ainvoke is not Agent.ainvoke
     out = _run(o.ainvoke([Message(role="user", content="hi")]))
     assert out.role == "assistant"
     chunks = _run(_collect(o.astream([Message(role="user", content="hi")])))

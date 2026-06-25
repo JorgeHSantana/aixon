@@ -107,7 +107,12 @@ class Agent(ABC):
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
         """Async variant of ``stream``. Default: drive the sync generator in a
         background thread and forward its chunks, so it does not block the loop.
-        Async-native subtypes override this."""
+        Async-native subtypes override this.
+
+        A producer exception is re-raised to the consumer (via ``await fut``)
+        after any chunks produced before it. Note: if the consumer stops early
+        (``break``), the background thread runs the sync ``stream`` to completion
+        before this returns — fine for finite streams."""
         import asyncio
 
         loop = asyncio.get_running_loop()
