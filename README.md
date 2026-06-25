@@ -157,7 +157,7 @@ Attributes:
 `aixon list` output (no header, one agent per line):
 
 ```
-greeter  [LLMAgent]  Friendly greeter
+greeteragent  [LLMAgent]  Friendly greeter
 ```
 | `name` | `str` | Registry name (defaults to lowercased class name). |
 | `aliases` | `list[str]` | Alternate names for registry resolution. |
@@ -188,10 +188,9 @@ Three tiers — pick by complexity. See [docs/orchestrator.md](docs/orchestrator
 (`TypeAccess.READ`, `TypeAccess.WRITE`, or `TypeAccess.ALL`).
 
 ```python
-from aixon import Retriever, TypeAccess, LLM
+from aixon import Retriever, TypeAccess
 
 class LibraryRetriever(Retriever):
-    llm         = LLM("gpt-4o-mini")
     description = "Fetches relevant documents from the knowledge base"
     type_access = TypeAccess.READ
 ```
