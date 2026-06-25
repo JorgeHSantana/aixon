@@ -246,3 +246,20 @@ those; everything above is newly found.
    Tier 2 fan-out against langgraph≥1.0.
 3. **3.5 / 3.6** — the registry footguns; cheap to fix, surprising in production.
 4. The LOW doc fixes (3.10–3.12) — they actively mislead new users.
+
+---
+
+## 5. Resolution log
+
+Status after the `fix/tier1-and-docs` branch (full suite: **294 passed, 4 skipped**).
+
+| # | Status | Notes |
+|---|---|---|
+| **3.1** | ✅ FIXED | Tier 1 now does real LLM routing: `_route_supervisor`/`_supervisor_choose` consult `self.supervisor` (conversation + worker roster), pick the next worker or DONE, with a safety net for unanswered user turns. The message-counting hack (and its multi-turn skip / stale-return bugs) is gone. 6 regression tests in `test_orchestrator_tier1_routing.py` encode all three old failure modes. |
+| **3.4** | ❎ FALSE POSITIVE | Tier 2 list fan-out works. `test_tier2_list_fanout_runs_multiple_nodes` returns `["left","right"]` with no path_map and asserts ≥3 assistant messages — it passes. LangGraph's conditional edge accepts a list of node names for fan-out. Doc was correct. |
+| **3.10** | ✅ FIXED (partial) | `gpt-5.4` removed from the interface contract and `test_providers.py`. Dated `docs/superpowers/plans|specs` left as historical process artifacts (not living docs). |
+| **3.11** | ✅ FIXED | `docs/agents.md` now describes `Provider` as an ABC with lowercase string names and `register_provider(instance)` — was a fictional enum + 2-arg signature (a Plan 8 doc error). |
+| **3.11b** | ✅ FIXED | Stale "Flask handler" docstring removed from `adapters/openai.py`; no "Flask" remains in source. |
+| **3.12** | ✅ FIXED | `docs/server.md` SSE events corrected to `content_block_delta`/`message_delta`/`message_stop` (the adapter never emits `message_start`). |
+| 3.2, 3.3, 3.5, 3.6, 3.7, 3.8, 3.9, 3.13 | ⏳ OPEN | Not in this branch's scope. 3.2 (stream multi-field drop) and 3.8 (CLI can't reach multi-adapter) are the highest-value remaining. |
+| **3.14** | ⚠️ CORRECTION | The `.env.example` sub-claim is **stale** — the file exists in `examples/support_assistant/`. The `_dim(_text)` and duplicate-`uvicorn` sub-claims still hold. |

@@ -105,3 +105,29 @@ def test_terminates_after_worker_answers():
     # no loop to the recursion limit.
     out = _orch().invoke([Message(role="user", content="refund")])
     assert out.content == "[billing handled it]"
+
+
+def test_overlapping_worker_names_route_to_most_specific():
+    # A worker name that contains another ("order" vs "order-history") must not
+    # mis-route: the longest matching name wins on the substring fallback.
+    _make_worker("order", "[order]")
+    _make_worker("order-history", "[order-history]")
+
+    class _Sup:
+        def complete(self, messages):
+            if messages and messages[-1].role == "assistant":
+                return Message(role="assistant", content="DONE")
+            # reply is the longer name; must not match the shorter "order".
+            return Message(role="assistant", content="order-history please")
+
+    class OverlapOrchestrator(Orchestrator):
+        supervisor = _Sup()
+        agents = [
+            get_registry().resolve("order"),
+            get_registry().resolve("order-history"),
+        ]
+
+    out = get_registry().resolve("overlaporchestrator").invoke(
+        [Message(role="user", content="anything")]
+    )
+    assert out.content == "[order-history]"

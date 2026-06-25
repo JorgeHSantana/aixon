@@ -259,7 +259,9 @@ class Orchestrator(Agent, abstract=True):
         for name in workers:                 # exact match wins
             if text == name.lower():
                 return name
-        for name in workers:                 # then substring
+        # Substring fallback, longest name first so a more specific worker
+        # (e.g. "order-history") wins over a shorter one it contains ("order").
+        for name in sorted(workers, key=len, reverse=True):
             if name.lower() in text:
                 return name
         return ""  # DONE / unparseable
