@@ -153,6 +153,12 @@ Attributes:
 | `llm` | `LLM` | **Required.** The language model to use. |
 | `prompt` | `str` | Optional system prompt prepended to every conversation. |
 | `description` | `str` | Human-readable purpose (shown in `aixon list`). |
+
+`aixon list` output (no header, one agent per line):
+
+```
+greeter  [LLMAgent]  Friendly greeter
+```
 | `name` | `str` | Registry name (defaults to lowercased class name). |
 | `aliases` | `list[str]` | Alternate names for registry resolution. |
 | `hidden` | `bool` | Exclude from `aixon chat` menu and `public()` listing. |
@@ -165,7 +171,6 @@ See [docs/agents.md](docs/agents.md) for `ToolAgent` and full API reference.
 
 ```python
 from aixon import Orchestrator, LLM
-from aixon.state import END
 
 class SupportOrchestrator(Orchestrator):
     supervisor = LLM("gpt-4o-mini")
@@ -173,6 +178,42 @@ class SupportOrchestrator(Orchestrator):
 ```
 
 Three tiers — pick by complexity. See [docs/orchestrator.md](docs/orchestrator.md).
+
+---
+
+## Retrieval — Retriever, Connector, Embedding
+
+`Retriever` is the base class for any agent that fetches context. Name it with a
+`*Retriever` suffix and declare `type_access` to control read/write permissions
+(`TypeAccess.READ`, `TypeAccess.WRITE`, or `TypeAccess.ALL`).
+
+```python
+from aixon import Retriever, TypeAccess, LLM
+
+class LibraryRetriever(Retriever):
+    llm         = LLM("gpt-4o-mini")
+    description = "Fetches relevant documents from the knowledge base"
+    type_access = TypeAccess.READ
+```
+
+`Connector` is an HTTP base class for wrapping external APIs. Declare
+`base_url_env` and optionally `auth_token_env` — the framework injects the
+values from environment variables at runtime.
+
+`Embedding` is the vector-embedding ABC. The built-in implementation is
+`OpenAIEmbedding`. Install with:
+
+```bash
+pip install 'aixon[openai,retrieval,openai-embedding]'
+```
+
+Then import what you need:
+
+```python
+from aixon import Retriever, TypeAccess, Connector, Embedding, OpenAIEmbedding
+```
+
+See [docs/retrieval.md](docs/retrieval.md) for the full retrieval pipeline.
 
 ---
 
