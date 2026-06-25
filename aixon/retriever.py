@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any
 
+from aixon.agent import AgentTool
 from aixon.exceptions import AixonError, NamingError
 
 
@@ -83,4 +84,48 @@ class Retriever(ABC):
         raise NotImplementedError(
             f"'{type(self).__name__}' declares type_access={self.type_access!r} "
             f"but does not implement write(). Override write() in your subclass."
+        )
+
+    def as_tool(
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        k: int | None = None,
+    ) -> AgentTool:
+        """Expose this retriever as a neutral AgentTool.
+
+        The returned ``AgentTool`` is the same dataclass as ``Agent.as_tool()``
+        returns, so ``coerce_tools`` (Plan 3, ``aixon._interop.tools``) handles
+        both uniformly.
+
+        Args:
+            name:        Tool name (default: lowercased class name).
+            description: Tool description (default: ``self.description``).
+            k:           Max results forwarded to the agent. ``None`` = no cap.
+
+        Returns:
+            ``AgentTool(name, description, func)`` where ``func(query) -> str``
+            calls ``self.search(query, k=k)`` and formats results as text.
+        """
+        _k = k
+        _retriever = self
+
+        def _run(query: str) -> str:
+            docs = _retriever.search(query, k=_k)
+            if not docs:
+                return f"No results found for query: {query!r}"
+            parts = []
+            for doc in docs:
+                text = doc.get("text", "")
+                meta = doc.get("metadata", {})
+                if meta:
+                    parts.append(f"{text} [metadata: {meta}]")
+                else:
+                    parts.append(text)
+            return "\n".join(parts)
+
+        return AgentTool(
+            name=name or type(self).__name__.lower(),
+            description=description or self.description,
+            func=_run,
         )
