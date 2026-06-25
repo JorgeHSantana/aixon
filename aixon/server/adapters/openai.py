@@ -12,7 +12,7 @@ import json
 import time
 import uuid
 
-from aixon.server.protocol import Chunk, Message, ParsedRequest, ProtocolAdapter
+from aixon.server.protocol import Chunk, Message, ParsedRequest, ProtocolAdapter, StreamSession
 
 # Transport-level fields the adapter consumes itself; everything else in the
 # body is a passthrough param handed to the agent's params.
@@ -90,6 +90,20 @@ class OpenAIAdapter(ProtocolAdapter):
     def format_stream_done(self, *, model: str) -> str:
         return "data: [DONE]\n\n"
 
+    def _usage_chunk_line(self, *, model: str, usage: dict) -> str:
+        payload = {
+            "id": f"chatcmpl-{uuid.uuid4()}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [],
+            "usage": usage,
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def open_stream(self, *, model: str, request: ParsedRequest) -> StreamSession:
+        return _OpenAIStreamSession(self, model=model, request=request)
+
     # --- model listing ---------------------------------------------------
     def format_models(self, agents: list) -> dict:
         created = int(time.time())
@@ -115,3 +129,69 @@ class OpenAIAdapter(ProtocolAdapter):
             ("GET", "/v1/models"),
             ("GET", "/models"),
         ]
+
+
+class _OpenAIStreamSession(StreamSession):
+    """OpenAI streaming with thought_stream_mode + optional usage.
+
+    Modes (request param ``thought_stream_mode``, default ``content``):
+      - content: reasoning wrapped in a single <think>...</think> block inside
+        delta.content; closed before the first real content delta.
+      - custom:  reasoning in delta.reasoning (aixon's native behavior).
+      - hidden:  reasoning dropped; content only.
+    Usage (when ``stream_options.include_usage`` is true) is emitted as a final
+    choices=[] chunk before [DONE]."""
+
+    def __init__(self, adapter, *, model, request):
+        super().__init__(adapter, model=model, request=request)
+        params = request.params or {}
+        self.mode = params.get("thought_stream_mode") or "content"
+        stream_options = params.get("stream_options") or {}
+        self.include_usage = bool(stream_options.get("include_usage"))
+        self._think_open = False
+        self._content_started = False
+        self._content_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
+
+    def _line(self, delta, finish_reason=None):
+        return self.adapter._chunk_line(model=self.model, delta=delta, finish_reason=finish_reason)
+
+    def chunk(self, chunk: Chunk) -> str:
+        out = ""
+        if chunk.reasoning:
+            self._reasoning_parts.append(chunk.reasoning)
+            if self.mode == "custom":
+                out += self._line({"reasoning": chunk.reasoning})
+            elif self.mode == "content":
+                text = ("\n" if self._think_open else "<think>\n") + chunk.reasoning
+                self._think_open = True
+                out += self._line({"content": text})
+            # hidden: drop reasoning
+        if chunk.content:
+            self._content_parts.append(chunk.content)
+            text = chunk.content
+            if self.mode == "content" and self._think_open and not self._content_started:
+                text = "</think>\n" + text
+                self._think_open = False
+            self._content_started = True
+            out += self._line({"content": text})
+        if chunk.done:
+            if self.mode == "content" and self._think_open:
+                out += self._line({"content": "</think>\n"})
+                self._think_open = False
+            out += self._line({}, finish_reason="stop")
+        return out
+
+    def finish(self) -> str:
+        if not self.include_usage:
+            return ""
+        from aixon.server.usage import build_usage
+
+        prompt_text = "\n".join(m.content for m in self.request.messages)
+        completion_text = "".join(self._content_parts)
+        if self._reasoning_parts:
+            completion_text += "\n" + "".join(self._reasoning_parts)
+        usage = build_usage(self.model, prompt_text, completion_text)
+        if not usage:
+            return ""
+        return self.adapter._usage_chunk_line(model=self.model, usage=usage)

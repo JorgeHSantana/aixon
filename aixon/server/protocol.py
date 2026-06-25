@@ -16,7 +16,7 @@ from dataclasses import dataclass
 # can do `from aixon.server.protocol import Message, Chunk`.
 from aixon.message import Chunk, Message, Role
 
-__all__ = ["Message", "Chunk", "Role", "ParsedRequest", "ProtocolAdapter"]
+__all__ = ["Message", "Chunk", "Role", "ParsedRequest", "ProtocolAdapter", "StreamSession"]
 
 
 @dataclass
@@ -36,6 +36,30 @@ class ParsedRequest:
     messages: list[Message]
     params: dict
     stream: bool
+
+
+class StreamSession:
+    """Per-request streaming state. Base is stateless: it delegates to the
+    adapter's ``format_stream_chunk`` / ``format_stream_done``. Dialects that
+    need per-request state (think-mode wrapping, usage accumulation) subclass
+    this and are returned by ``ProtocolAdapter.open_stream``."""
+
+    def __init__(self, adapter: "ProtocolAdapter", *, model: str, request: "ParsedRequest"):
+        self.adapter = adapter
+        self.model = model
+        self.request = request
+
+    def chunk(self, chunk: "Chunk") -> str:
+        """SSE line(s) for one neutral Chunk ('' to emit nothing)."""
+        return self.adapter.format_stream_chunk(model=self.model, chunk=chunk)
+
+    def finish(self) -> str:
+        """Extra SSE line(s) emitted after the last chunk, before done()."""
+        return ""
+
+    def done(self) -> str:
+        """Terminal SSE line(s)."""
+        return self.adapter.format_stream_done(model=self.model)
 
 
 class ProtocolAdapter(ABC):
@@ -78,3 +102,8 @@ class ProtocolAdapter(ABC):
     def routes(self) -> list[tuple[str, str]]:
         """``[(http_method, path)]`` this adapter serves, e.g.
         ``[("POST","/v1/chat/completions"), ("GET","/v1/models")]``."""
+
+    def open_stream(self, *, model: str, request: "ParsedRequest") -> "StreamSession":
+        """Return a per-request StreamSession. Default = stateless passthrough;
+        override to add dialect-specific per-request stream state."""
+        return StreamSession(self, model=model, request=request)

@@ -195,15 +195,18 @@ class Server:
             model = pr.model or agent.name
 
             if pr.stream:
+                session = adapter.open_stream(model=model, request=pr)
+
                 async def gen():
-                    # agent.astream is async-native for LLM/Tool/Orchestrator
-                    # agents and bridges a sync stream() otherwise — either way it
-                    # never blocks the event loop.
-                    async for chunk in agent.astream(pr.messages):
-                        line = adapter.format_stream_chunk(model=model, chunk=chunk)
-                        if line:
-                            yield line
-                    yield adapter.format_stream_done(model=model)
+                    with generation_params(pr.params):
+                        async for chunk in agent.astream(pr.messages):
+                            line = session.chunk(chunk)
+                            if line:
+                                yield line
+                    tail = session.finish()
+                    if tail:
+                        yield tail
+                    yield session.done()
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
