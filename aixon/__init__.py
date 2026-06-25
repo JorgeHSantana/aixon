@@ -4,6 +4,7 @@ from aixon.agent import Agent, AgentTool
 from aixon.agents.orchestrator import Orchestrator
 from aixon.agents.tool_agent import ToolAgent
 from aixon.discovery import autodiscover
+from aixon.embedding import Embedding
 from aixon.exceptions import (
     AixonError,
     AgentNotFoundError,
@@ -45,6 +46,8 @@ __all__ = [
     # Plan 4 — orchestrator foundation (LangGraph state)
     "GraphState",
     "END",
+    # Plan 7 — retriever + embedding + connector
+    "Embedding",
 ]
 
 # Plan 2 — LLM + LLMAgent. These pull in langchain_core (the `llm` extra).
