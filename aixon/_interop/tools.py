@@ -8,6 +8,7 @@ requires it."""
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 from aixon.agent import AgentTool
@@ -25,7 +26,10 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
         wrapped with ``StructuredTool.from_function``.
       * a LangChain ``BaseTool`` (incl. ``@tool``-decorated functions) ->
         passed through unchanged.
-      * a plain callable -> wrapped with ``StructuredTool.from_function``.
+      * a plain callable -> wrapped with ``StructuredTool.from_function``. An
+        async callable is registered via ``coroutine=`` and therefore requires
+        an async agent path (``ainvoke``/``astream``); calling it from sync
+        ``invoke`` raises ``NotImplementedError`` rather than silently skipping.
 
     Raises ``AixonError`` for any other type.
     """
@@ -44,7 +48,23 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
                 )
             )
         elif callable(entry):
-            coerced.append(StructuredTool.from_function(entry))
+            # An async callable MUST be registered via `coroutine=`, not as the
+            # positional sync `func`. Passing a coroutine function as `func`
+            # makes StructuredTool call it synchronously, producing an un-awaited
+            # coroutine that is silently dropped — the tool never runs (in either
+            # invoke or ainvoke). With `coroutine=`, the async path (arun) awaits
+            # it; the sync path raises NotImplementedError instead of silently
+            # skipping, so async tools require an async agent path (ainvoke/astream).
+            if inspect.iscoroutinefunction(entry):
+                coerced.append(
+                    StructuredTool.from_function(
+                        coroutine=entry,
+                        name=entry.__name__,
+                        description=(entry.__doc__ or entry.__name__),
+                    )
+                )
+            else:
+                coerced.append(StructuredTool.from_function(entry))
         else:
             raise AixonError(
                 f"Tool entry {entry!r} (type {type(entry).__name__}) cannot be "

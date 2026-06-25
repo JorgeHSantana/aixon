@@ -256,6 +256,15 @@ async for chunk in ResearchAgent().astream([Message(role="user", content="...")]
 - The neutral types are unchanged: `ainvoke` returns a `Message`, `astream`
   yields `Chunk`s.
 
+**Async tools.** A `ToolAgent` tool may be an `async def` callable — it runs on
+the async path (`ainvoke`/`astream`) and does real non-blocking I/O (e.g. an MCP
+call via `Connector.aget`). An async tool requires that path: calling it from
+sync `invoke` raises `NotImplementedError` (it is never silently skipped). Sync
+tool callables work on **both** paths (under `ainvoke` they run in a thread
+executor). So: use **sync** tools if you need the agent to work via both `invoke`
+and `ainvoke`; use **async** tools when you commit to the async path and want
+non-blocking I/O.
+
 **Real timeouts (cancellation).** On the async path, `ToolAgent.max_execution_time`
 and `Orchestrator.timeout` wrap the run in `asyncio.wait_for`, so an overrun is
 **cancelled at the next await point** — provided the chain is genuinely async
