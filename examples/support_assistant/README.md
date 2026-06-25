@@ -117,6 +117,19 @@ Agents switch to `gpt-4o-mini` and the retriever to `OpenAIEmbedding`
 (`text-embedding-3-small`) — automatically, via [llm_config.py](llm_config.py).
 No other change.
 
+## Async
+
+The same agents expose async `ainvoke`/`astream` (sync stays the default; async
+is additive). The server already `await`s them, so concurrent requests don't
+serialize. See it directly:
+
+```bash
+python async_demo.py      # await ainvoke, async for astream, concurrent gather
+```
+
+`OrdersConnector.alookup_order` uses `Connector.aget` (httpx.AsyncClient) — a
+real orders backend would be reached without blocking the event loop.
+
 ## Test it
 
 ```bash

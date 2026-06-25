@@ -135,3 +135,24 @@ class Connector:
         )
         response.raise_for_status()
         return response.json()
+
+    async def aget(self, path: str, **kwargs: Any) -> dict:
+        """Async GET via ``httpx.AsyncClient`` (does not block the event loop).
+        Same contract as ``get``. Use from an async tool / ``ainvoke`` path."""
+        httpx = self._httpx()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(
+                self.base_url + path, headers=self._headers(), **kwargs
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def apost(self, path: str, json: dict | None = None, **kwargs: Any) -> dict:
+        """Async POST via ``httpx.AsyncClient``. Same contract as ``post``."""
+        httpx = self._httpx()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                self.base_url + path, json=json, headers=self._headers(), **kwargs
+            )
+        response.raise_for_status()
+        return response.json()

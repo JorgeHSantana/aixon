@@ -44,6 +44,17 @@ class OrdersConnector(Connector):
             return {"order_id": order_id, "status": "not_found"}
         return order
 
+    async def alookup_order(self, order_id: str) -> dict:
+        """Async variant of ``lookup_order`` — uses ``aget`` (httpx.AsyncClient)
+        when ``ORDERS_API_URL`` is set, so a real deployment never blocks the
+        event loop. Falls back to the in-memory fixture offline."""
+        if self.base_url:
+            return await self.aget(f"/orders/{order_id}")
+        order = _DEMO_ORDERS.get(order_id)
+        if order is None:
+            return {"order_id": order_id, "status": "not_found"}
+        return order
+
 
 def extract_order_id(text: str) -> str:
     """Pull the first run of digits out of free text ('order 1002?' -> '1002')."""

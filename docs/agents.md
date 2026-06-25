@@ -233,6 +233,37 @@ for chunk in ResearchAgent().stream([Message(role="user", content="Latest on LLM
         print(chunk.content, end="", flush=True)
 ```
 
+## Async — `ainvoke` / `astream`
+
+Every agent also exposes async methods. **Sync is the default; async is purely
+additive** — existing sync code is untouched, and you opt into async only where
+you want it.
+
+```python
+reply = await PlannerAgent().ainvoke([Message(role="user", content="Plan a launch")])
+
+async for chunk in ResearchAgent().astream([Message(role="user", content="...")]):
+    if chunk.content:
+        print(chunk.content, end="", flush=True)
+```
+
+- `LLMAgent`, `ToolAgent` and `Orchestrator` implement `ainvoke`/`astream`
+  **natively** over LangGraph's async path (`ainvoke`/`astream`), so they never
+  block the event loop.
+- A purely sync custom `Agent` (one that only implements `invoke`/`stream`)
+  still gets working `ainvoke`/`astream` for free — the base bridges them to a
+  worker thread.
+- The neutral types are unchanged: `ainvoke` returns a `Message`, `astream`
+  yields `Chunk`s.
+
+**Real timeouts (cancellation).** On the async path, `ToolAgent.max_execution_time`
+and `Orchestrator.timeout` wrap the run in `asyncio.wait_for`, so an overrun is
+**cancelled at the next await point** — provided the chain is genuinely async
+(an async model, async tools). Sync work bridged to a thread cannot be
+interrupted mid-call; bound that at the tool/IO layer (e.g. `Connector.timeout`).
+The server (`docs/server.md`) awaits `ainvoke`/`astream`, so concurrent requests
+no longer serialize.
+
 ---
 
 ## Registry helpers

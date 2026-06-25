@@ -9,7 +9,7 @@ LangGraph lives entirely inside this module and ``aixon.state``."""
 from __future__ import annotations
 
 import time
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Iterator
 
 from langgraph.graph import StateGraph
 
@@ -192,6 +192,21 @@ class Orchestrator(Agent, abstract=True):
             self._compiled_graph = cached
         return cached
 
+    def _acompiled(self):
+        """Async-node graph: worker nodes ``await agent.ainvoke`` so the whole
+        chain is genuinely async (LangGraph can then cancel it at await points).
+        Tier 3 reuses the user's compiled graph (it already exposes ``ainvoke``)."""
+        cached = getattr(self, "_compiled_agraph", None)
+        if cached is None:
+            if self._tier == 3 or "build_graph" in type(self).__dict__:
+                cached = self._compiled()
+            elif self._tier == 1:
+                cached = self._build_supervisor_graph(node_factory=self._make_aworker_node)
+            else:
+                cached = self._build_explicit_graph(node_factory=self._make_aworker_node)
+            self._compiled_agraph = cached
+        return cached
+
     def build_graph(self):
         """Build & compile the LangGraph graph for this orchestrator's tier.
         Tier 3 users OVERRIDE this method to return their own compiled graph."""
@@ -266,7 +281,8 @@ class Orchestrator(Agent, abstract=True):
                 return name
         return ""  # DONE / unparseable
 
-    def _build_supervisor_graph(self):
+    def _build_supervisor_graph(self, node_factory=None):
+        node_factory = node_factory or self._make_worker_node
         workers = self._worker_instances()
         if not workers:
             raise AixonError(
@@ -280,7 +296,7 @@ class Orchestrator(Agent, abstract=True):
 
         graph.add_node(_SUPERVISOR, supervisor_node)
         for name, inst in workers.items():
-            graph.add_node(name, self._make_worker_node(inst))
+            graph.add_node(name, node_factory(inst))
             graph.add_edge(name, _SUPERVISOR)  # back to supervisor after each worker
 
         graph.set_entry_point(_SUPERVISOR)
@@ -292,6 +308,15 @@ class Orchestrator(Agent, abstract=True):
     def _make_worker_node(self, agent: Agent):
         def node(state: GraphState) -> dict:
             result = agent.invoke(list(state.get("messages", [])))
+            return {"messages": result}
+
+        return node
+
+    def _make_aworker_node(self, agent: Agent):
+        """Async worker node: ``await agent.ainvoke`` so the async graph chain is
+        genuinely async (cancellable at await points)."""
+        async def node(state: GraphState) -> dict:
+            result = await agent.ainvoke(list(state.get("messages", [])))
             return {"messages": result}
 
         return node
@@ -309,11 +334,12 @@ class Orchestrator(Agent, abstract=True):
 
         return router
 
-    def _build_explicit_graph(self):
+    def _build_explicit_graph(self, node_factory=None):
+        node_factory = node_factory or self._make_worker_node
         instances = self._node_instances()
         graph = StateGraph(self.State)
         for name, inst in instances.items():
-            graph.add_node(name, self._make_worker_node(inst))
+            graph.add_node(name, node_factory(inst))
         graph.set_entry_point(self.entry)
 
         edge_srcs = {src for src, _ in self.edges}
@@ -373,6 +399,56 @@ class Orchestrator(Agent, abstract=True):
 
         with reasoning_channel() as channel:
             final = self.invoke(messages)
+            for line in channel.drain():
+                yield Chunk(reasoning=line)
+        if final.reasoning:
+            yield Chunk(reasoning=final.reasoning)
+        yield Chunk(content=final.content)
+        yield Chunk(done=True)
+
+    # ----- async neutral interface ----------------------------------------
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        """Async invoke over the graph's ``ainvoke`` — does not block the event
+        loop (worker nodes run via the executor). When ``timeout`` is set the run
+        is wrapped in ``asyncio.wait_for``, so it is cancelled between supersteps
+        if it overruns (a real deadline, not the sync post-hoc check)."""
+        import asyncio
+
+        from langgraph.errors import GraphRecursionError
+
+        graph = self._acompiled()
+        try:
+            coro = graph.ainvoke(
+                self._initial_state(messages), config=self._run_config()
+            )
+            if self.timeout:
+                result = await asyncio.wait_for(coro, timeout=self.timeout)
+            else:
+                result = await coro
+        except asyncio.TimeoutError:
+            raise AixonError(
+                f"Orchestrator '{type(self).__name__}' exceeded timeout="
+                f"{self.timeout}s; the run was cancelled."
+            )
+        except GraphRecursionError as exc:
+            raise AixonError(
+                f"Orchestrator '{type(self).__name__}' hit its recursion limit "
+                f"({self.recursion_limit}). The graph looped without reaching "
+                f"END. Raise `recursion_limit`, fix the routing, or set a "
+                f"terminal edge. (LangGraph: {exc})"
+            ) from exc
+        out_messages = result.get("messages", [])
+        for m in reversed(out_messages):
+            if m.role == "assistant":
+                return m
+        return Message(role="assistant", content="")
+
+    async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
+        from aixon.reasoning import reasoning_channel
+
+        with reasoning_channel() as channel:
+            final = await self.ainvoke(messages)
             for line in channel.drain():
                 yield Chunk(reasoning=line)
         if final.reasoning:

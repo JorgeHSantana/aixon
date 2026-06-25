@@ -271,4 +271,25 @@ Status after the `fix/tier1-and-docs` branch (full suite: **294 passed, 4 skippe
 | **3.13** | ✅ FIXED | `aixon.__version__` (from package metadata) and `aixon --version` added. `test_cli_version.py`. The `0.0.1`/Alpha classifier is a release decision, left as-is. |
 | **3.14** | ✅ FIXED / ⚠️ CORRECTED | `_dim(_text)` renamed to `_supports_ansi()` (no unused arg); the scaffold no longer double-declares `uvicorn` (the `server` extra provides it); the README orchestrator snippet now comments the illustrative agent names. The original `.env.example` sub-claim was **stale** — that file exists. |
 
-All resolved items above are covered by tests (full suite: **311 passed, 4 skipped**). Nothing from §3 remains open.
+All resolved items above are covered by tests (full suite: **324 passed, 4 skipped**). Nothing from §3 remains open.
+
+### 3.15 — Server blocked the event loop on agent work (found while adding async; FIXED)
+
+Not in the original audit. The server route was `async def` but called the sync
+`agent.invoke()` directly, **blocking the event loop for the whole LLM call** —
+under concurrency, requests serialized. Fixed by giving the agent stack async
+methods and having the server `await agent.ainvoke` / `agent.astream`:
+
+- `Agent` gains `ainvoke`/`astream`. `LLMAgent`/`ToolAgent`/`Orchestrator`
+  implement them **natively** over LangGraph's async path; a purely sync custom
+  agent gets them via a worker-thread bridge. **Sync stays the default; async is
+  additive** — no existing code changes.
+- The async path makes `max_execution_time`/`timeout` a **real cancellation**
+  (`asyncio.wait_for`) when the chain is genuinely async — the proper answer to
+  3.3's interruption gap (sync work bridged to a thread still can't be killed
+  mid-call; bound that at the tool/IO layer via `Connector.timeout`).
+- `Connector` gains `aget`/`apost` (httpx.AsyncClient).
+- Covered by `test_async_agents.py`, `test_async_cancellation.py`,
+  `test_connector_async.py`, and `test_server_async_nonblocking.py` (two
+  concurrent slow requests overlap instead of serializing). The example ships
+  `async_demo.py`.

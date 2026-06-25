@@ -136,6 +136,11 @@ Full OpenAI-compatible wire format. Served routes:
 > counts, so the server cannot report `prompt_tokens`/`completion_tokens`.
 > Clients that need usage must measure it themselves.
 
+> **Non-blocking.** The server `await`s `agent.ainvoke` / `agent.astream`, so an
+> in-flight LLM call does not block the event loop — concurrent requests overlap
+> instead of serializing. Native-async agents run truly async; a purely sync
+> agent is bridged to a worker thread. You write agents the same way.
+
 Any OpenAI-compatible client works out of the box:
 
 ```python

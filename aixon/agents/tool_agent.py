@@ -15,7 +15,7 @@ never requires it."""
 from __future__ import annotations
 
 import time
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 from aixon.agent import Agent
 from aixon.exceptions import AixonError
@@ -171,6 +171,73 @@ class ToolAgent(Agent, abstract=True):
                         yield Chunk(reasoning=line + "\n")
                     break
             # Any trailing reasoning emitted after the last update.
+            for line in channel.drain():
+                yield Chunk(reasoning=line + "\n")
+        if final_content:
+            yield Chunk(content=final_content)
+        yield Chunk(done=True)
+
+    # ---- async neutral boundary -----------------------------------------
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        """Async invoke over LangGraph's native ``ainvoke``. ``max_execution_time``
+        becomes a REAL deadline here: the run is wrapped in ``asyncio.wait_for``
+        and cancelled at the next await point if it overruns (unlike sync
+        ``invoke``, whose deadline is only post-hoc)."""
+        import asyncio
+        from contextlib import nullcontext
+
+        from aixon._interop.messages import from_langchain
+
+        agent, lc_messages, config = self._build_agent(messages)
+        outer_channel = current_channel()
+        cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
+        with cm as channel:
+            try:
+                result = await asyncio.wait_for(
+                    agent.ainvoke({"messages": lc_messages}, config=config),
+                    timeout=self.max_execution_time,
+                )
+            except asyncio.TimeoutError:
+                raise AixonError(
+                    f"agent '{self.name}' exceeded max_execution_time "
+                    f"({self.max_execution_time}s); the run was cancelled."
+                )
+            for m in result["messages"]:
+                if getattr(m, "type", "") == "ai":
+                    self._emit_tool_call_labels(m)
+            reasoning_lines = [] if outer_channel is not None else channel.drain()
+        final = from_langchain(result["messages"][-1])
+        if reasoning_lines:
+            final.reasoning = "\n".join(reasoning_lines)
+        _log.info(f"agent '{self.name}' completed async ({len(reasoning_lines)} step(s))")
+        return final
+
+    async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
+        """Async stream mirroring ``stream`` over the graph's ``astream``."""
+        agent, lc_messages, config = self._build_agent(messages)
+        deadline = time.monotonic() + self.max_execution_time
+        final_content = ""
+        with reasoning_channel() as channel:
+            async for update in agent.astream(
+                {"messages": lc_messages}, config=config, stream_mode="updates"
+            ):
+                for node_state in update.values():
+                    for m in node_state.get("messages", []) or []:
+                        if getattr(m, "type", "") == "ai":
+                            self._emit_tool_call_labels(m)
+                            if getattr(m, "content", ""):
+                                final_content = m.content
+                for line in channel.drain():
+                    yield Chunk(reasoning=line + "\n")
+                if time.monotonic() > deadline:
+                    emit_reasoning(
+                        f"(stopped: exceeded max_execution_time "
+                        f"{self.max_execution_time}s)"
+                    )
+                    for line in channel.drain():
+                        yield Chunk(reasoning=line + "\n")
+                    break
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
         if final_content:

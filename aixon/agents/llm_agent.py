@@ -14,7 +14,7 @@ Athena auto-registers, gets suffix-validated, and is ready to be routed by name.
 """
 from __future__ import annotations
 
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 from aixon.agent import Agent
 from aixon.exceptions import AixonError
@@ -55,6 +55,15 @@ class LLMAgent(Agent, abstract=True):
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         """Prepend system prompt (if any) and delegate to self.llm.stream."""
         yield from self.llm.stream(self._with_prompt(messages))
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        """Async invoke — native (delegates to the model's ``ainvoke``)."""
+        return await self.llm.acomplete(self._with_prompt(messages))
+
+    async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
+        """Async stream — native (delegates to the model's ``astream``)."""
+        async for chunk in self.llm.astream(self._with_prompt(messages)):
+            yield chunk
 
     def _with_prompt(self, messages: list[Message]) -> list[Message]:
         """Return a new list with the system prompt prepended if set.

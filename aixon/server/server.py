@@ -193,8 +193,11 @@ class Server:
             model = pr.model or agent.name
 
             if pr.stream:
-                def gen():
-                    for chunk in agent.stream(pr.messages):
+                async def gen():
+                    # agent.astream is async-native for LLM/Tool/Orchestrator
+                    # agents and bridges a sync stream() otherwise — either way it
+                    # never blocks the event loop.
+                    async for chunk in agent.astream(pr.messages):
                         line = adapter.format_stream_chunk(model=model, chunk=chunk)
                         if line:
                             yield line
@@ -202,7 +205,10 @@ class Server:
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
-            message = agent.invoke(pr.messages)
+            # await ainvoke instead of calling the sync invoke() directly: the
+            # latter would block the event loop for the whole LLM call, serializing
+            # concurrent requests. ainvoke is async-native (or a threaded bridge).
+            message = await agent.ainvoke(pr.messages)
             # usage is intentionally empty: the neutral boundary (Message) carries
             # no token counts, so the server cannot populate prompt/completion
             # tokens. Clients receive "usage": {} (documented in docs/server.md).

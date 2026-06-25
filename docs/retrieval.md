@@ -202,6 +202,18 @@ class InventoryConnector(Connector):
         return self.post("/reservations", json={"product_id": product_id, "qty": qty})
 ```
 
+**Async:** `Connector` also provides `aget`/`apost`, which use
+`httpx.AsyncClient` so they don't block the event loop. Use them from an async
+tool or an agent's `ainvoke` path:
+
+```python
+class InventoryConnector(Connector):
+    base_url_env = "INVENTORY_URL"
+
+    async def get_stock(self, product_id: str) -> dict:
+        return await self.aget(f"/products/{product_id}/stock")
+```
+
 **Suffix rule:** concrete `Connector` subclasses must end with `"Connector"`.
 Violating it raises `NamingError` at import time.
 

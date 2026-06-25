@@ -10,7 +10,7 @@ LLM therefore needs neither an API key nor an installed vendor SDK.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 from aixon._interop.messages import from_langchain, to_langchain
 from aixon.message import Chunk, Message
@@ -62,6 +62,21 @@ class LLM:
         or a single AIMessage (the fake, which has no _stream).
         """
         for lc_chunk in self.chat_model.stream(to_langchain(messages)):
+            content = getattr(lc_chunk, "content", "")
+            if isinstance(content, str) and content:
+                yield Chunk(content=content)
+        yield Chunk(done=True)
+
+    async def acomplete(self, messages: list[Message]) -> Message:
+        """Async single-shot completion. Used by LLMAgent.ainvoke. Delegates to
+        the LangChain model's native ``ainvoke`` (does not block the loop)."""
+        lc_result = await self.chat_model.ainvoke(to_langchain(messages))
+        return from_langchain(lc_result)
+
+    async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
+        """Async neutral streaming. Used by LLMAgent.astream. Mirrors stream()
+        over the model's native ``astream``."""
+        async for lc_chunk in self.chat_model.astream(to_langchain(messages)):
             content = getattr(lc_chunk, "content", "")
             if isinstance(content, str) and content:
                 yield Chunk(content=content)

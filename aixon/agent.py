@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 from aixon.exceptions import NamingError
 from aixon.message import Chunk, Message
@@ -93,6 +93,43 @@ class Agent(ABC):
     @abstractmethod
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         """Run the agent, yielding neutral Chunks as they are produced."""
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        """Async variant of ``invoke``. Default: run the sync ``invoke`` in a
+        worker thread so it does not block the event loop. Async-native subtypes
+        (LLMAgent/ToolAgent/Orchestrator) override this to use LangGraph's native
+        async path. A purely sync custom Agent gets a working ``ainvoke`` for
+        free via this bridge."""
+        import asyncio
+
+        return await asyncio.to_thread(self.invoke, messages)
+
+    async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
+        """Async variant of ``stream``. Default: drive the sync generator in a
+        background thread and forward its chunks, so it does not block the loop.
+        Async-native subtypes override this."""
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        queue: "asyncio.Queue" = asyncio.Queue()
+        done = object()
+
+        def _producer() -> None:
+            try:
+                for chunk in self.stream(messages):
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        fut = loop.run_in_executor(None, _producer)
+        try:
+            while True:
+                item = await queue.get()
+                if item is done:
+                    break
+                yield item
+        finally:
+            await fut
 
     def as_tool(
         self, name: str | None = None, description: str | None = None
