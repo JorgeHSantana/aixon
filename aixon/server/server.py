@@ -24,6 +24,7 @@ from aixon.logging import Logger
 from aixon.registry import get_registry
 from aixon.runtime import generation_params
 from aixon.server.adapters.openai import OpenAIAdapter
+from aixon.server.usage import build_usage
 from aixon.server.protocol import ProtocolAdapter
 
 _log = Logger("aixon.server")
@@ -211,7 +212,12 @@ class Server:
             # for the duration of the call via the runtime contextvar.
             with generation_params(pr.params):
                 message = await agent.ainvoke(pr.messages)
-            return adapter.format_response(model=model, message=message, usage={})
+            prompt_text = "\n".join(m.content for m in pr.messages)
+            completion_text = message.content
+            if message.reasoning:
+                completion_text += "\n" + message.reasoning
+            usage = build_usage(model, prompt_text, completion_text)
+            return adapter.format_response(model=model, message=message, usage=usage)
 
         # `from __future__ import annotations` (module-level) turns
         # `request: Request` into the *string* "Request". FastAPI resolves
