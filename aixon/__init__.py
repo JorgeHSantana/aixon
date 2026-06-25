@@ -4,7 +4,7 @@ from aixon.agent import Agent, AgentTool
 from aixon.agents.orchestrator import Orchestrator
 from aixon.agents.tool_agent import ToolAgent
 from aixon.discovery import autodiscover
-from aixon.embedding import Embedding
+from aixon.embedding import Embedding, OpenAIEmbedding
 from aixon.exceptions import (
     AixonError,
     AgentNotFoundError,
@@ -48,6 +48,7 @@ __all__ = [
     "END",
     # Plan 7 — retriever + embedding + connector
     "Embedding",
+    "OpenAIEmbedding",
 ]
 
 # Plan 2 — LLM + LLMAgent. These pull in langchain_core (the `llm` extra).
