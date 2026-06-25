@@ -3,6 +3,7 @@
 from aixon.agent import Agent, AgentTool
 from aixon.agents.orchestrator import Orchestrator
 from aixon.agents.tool_agent import ToolAgent
+from aixon.connector import Connector
 from aixon.discovery import autodiscover
 from aixon.embedding import Embedding, OpenAIEmbedding
 from aixon.exceptions import (
@@ -48,6 +49,7 @@ __all__ = [
     "GraphState",
     "END",
     # Plan 7 — retriever + embedding + connector
+    "Connector",
     "Embedding",
     "OpenAIEmbedding",
     "Retriever",
