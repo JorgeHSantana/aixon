@@ -17,6 +17,7 @@ from aixon.message import Chunk, Message, Role
 from aixon.providers.base import Provider, get_provider, register_provider
 from aixon.reasoning import emit_reasoning, reasoning_channel
 from aixon.registry import Registry, get_registry, reset_registry
+from aixon.retriever import Retriever, TypeAccess
 from aixon.state import END, GraphState
 
 __all__ = [
@@ -49,6 +50,8 @@ __all__ = [
     # Plan 7 — retriever + embedding + connector
     "Embedding",
     "OpenAIEmbedding",
+    "Retriever",
+    "TypeAccess",
 ]
 
 # Plan 2 — LLM + LLMAgent. These pull in langchain_core (the `llm` extra).
