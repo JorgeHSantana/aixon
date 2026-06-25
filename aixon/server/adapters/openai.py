@@ -73,17 +73,19 @@ class OpenAIAdapter(ProtocolAdapter):
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def format_stream_chunk(self, *, model: str, chunk: Chunk) -> str:
-        if chunk.done:
-            return self._chunk_line(model=model, delta={}, finish_reason="stop")
-        if chunk.content:
-            return self._chunk_line(
-                model=model, delta={"content": chunk.content}, finish_reason=None
-            )
+        # Build the delta additively: a Chunk may carry content AND reasoning AND
+        # done together (message.py allows it), so an exclusive if/return ladder
+        # would silently drop fields (e.g. Chunk(content=..., done=True) losing
+        # the content). Include every field that is present.
+        delta: dict = {}
         if chunk.reasoning:
-            return self._chunk_line(
-                model=model, delta={"reasoning": chunk.reasoning}, finish_reason=None
-            )
-        return ""  # nothing to emit for an empty chunk
+            delta["reasoning"] = chunk.reasoning
+        if chunk.content:
+            delta["content"] = chunk.content
+        if not delta and not chunk.done:
+            return ""  # nothing to emit for an empty chunk
+        finish_reason = "stop" if chunk.done else None
+        return self._chunk_line(model=model, delta=delta, finish_reason=finish_reason)
 
     def format_stream_done(self, *, model: str) -> str:
         return "data: [DONE]\n\n"

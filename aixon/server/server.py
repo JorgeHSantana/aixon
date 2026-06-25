@@ -69,14 +69,29 @@ class Server:
 
     def __init__(self, adapters: list[ProtocolAdapter] | None = None):
         # Singleton: adapters are fixed on first construction. A later
-        # Server(adapters=[...]) call silently reuses the first instance's
-        # adapters — call Server._reset() first if a different set is needed
-        # (e.g. between tests).
+        # Server(adapters=[...]) that asks for a DIFFERENT set raises instead of
+        # silently ignoring the argument (which used to lock callers into
+        # OpenAI-only without warning) — call Server._reset() first to rebuild.
         if self._initialized:
+            if adapters is not None and self._adapter_signature(adapters) != \
+                    self._adapter_signature(self._protocol_adapters):
+                raise AixonError(
+                    "Server is already constructed with a different adapter set "
+                    f"({[type(a).__name__ for a in self._protocol_adapters]}). "
+                    "The singleton's adapters are fixed; call Server._reset() "
+                    "before constructing it with a new adapter set."
+                )
             return
         self._protocol_adapters: list[ProtocolAdapter] = adapters or [OpenAIAdapter()]
         self._app = None
         self._initialized = True
+
+    @staticmethod
+    def _adapter_signature(adapters: list[ProtocolAdapter]) -> list[tuple[str, str]]:
+        """Identity of an adapter set for the 'already constructed' check:
+        (class name, mount prefix) per adapter. Two equivalent sets compare
+        equal even though the instances differ."""
+        return [(type(a).__name__, getattr(a, "mount_prefix", "")) for a in adapters]
 
     # --- app construction ------------------------------------------------
     @property
@@ -188,6 +203,9 @@ class Server:
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
             message = agent.invoke(pr.messages)
+            # usage is intentionally empty: the neutral boundary (Message) carries
+            # no token counts, so the server cannot populate prompt/completion
+            # tokens. Clients receive "usage": {} (documented in docs/server.md).
             return adapter.format_response(model=model, message=message, usage={})
 
         # `from __future__ import annotations` (module-level) turns

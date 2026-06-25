@@ -38,11 +38,15 @@ def test_alias_collision_with_name_raises():
         reg.register(_FakeAgent("beta", aliases=["alpha"]))
 
 
-def test_single_agent_is_default():
+def test_single_agent_resolves_only_for_empty_model():
+    # An empty/missing model on a single-agent registry resolves to that agent...
     reg = Registry()
     only = _FakeAgent("alpha")
     reg.register(only)
-    assert reg.resolve("anything-else") is only
+    assert reg.resolve("") is only
+    # ...but a NON-empty wrong name raises instead of masking the typo.
+    with pytest.raises(AgentNotFoundError):
+        reg.resolve("anything-else")
 
 
 def test_unknown_name_with_multiple_agents_raises():

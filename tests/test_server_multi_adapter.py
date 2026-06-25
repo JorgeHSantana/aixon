@@ -109,3 +109,18 @@ def test_default_single_adapter_is_unchanged():
     client = TestClient(Server(adapters=[OpenAIAdapter()]).app)
     assert client.get("/v1/models").status_code == 200
     assert client.get("/anthropic/v1/models").status_code == 404
+
+
+def test_reconstructing_with_different_adapters_raises():
+    # The singleton's adapters are fixed; asking for a different set must raise
+    # instead of silently ignoring the argument (audit 3.8).
+    Server(adapters=[OpenAIAdapter()])  # first construction: OpenAI only
+    with pytest.raises(AixonError, match="already constructed"):
+        Server(adapters=[OpenAIAdapter(), AnthropicAdapter(mount_prefix="/anthropic")])
+
+
+def test_reconstructing_with_equivalent_adapters_is_ok():
+    # An equivalent set (same types + prefixes, different instances) does not raise.
+    Server(adapters=[OpenAIAdapter()])
+    again = Server(adapters=[OpenAIAdapter()])  # must not raise
+    assert again is Server()  # same singleton

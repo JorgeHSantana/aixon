@@ -82,9 +82,17 @@ def from_langchain(msg: BaseMessage) -> Message:
     if getattr(msg, "additional_kwargs", None):
         reasoning = msg.additional_kwargs.get("reasoning_content")
 
+    # Preserve tool-routing fields so a Message -> LangChain -> Message round-trip
+    # of a tool message keeps its tool_call_id/name. Without this, to_langchain
+    # would rebuild a ToolMessage with an empty tool_call_id on the next turn.
+    tool_call_id = getattr(msg, "tool_call_id", None)
+    name = getattr(msg, "name", None)
+
     return Message(
         role=role,
         content=content,
+        name=name,
+        tool_call_id=tool_call_id,
         tool_calls=tool_calls,
         reasoning=reasoning or None,
     )

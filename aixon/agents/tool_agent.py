@@ -36,9 +36,11 @@ class ToolAgent(Agent, abstract=True):
             tools = [LibraryRetriever.as_tool(), check_battery]
 
     ``max_iterations`` maps to LangGraph's per-invocation ``recursion_limit``
-    (a model+tool pair plus the final model turn per iteration);
-    ``max_execution_time`` is a wall-clock backstop enforced here (LangGraph's
-    compiled graph has no built-in time knob)."""
+    (a model+tool pair plus the final model turn per iteration).
+    ``max_execution_time`` is a wall-clock **deadline**, not an interrupt:
+    ``invoke`` checks it after the run completes and raises ``AixonError`` if
+    exceeded; ``stream`` checks it between updates. Neither can abort a single
+    in-flight tool call (LangGraph's compiled graph has no time knob)."""
 
     _suffix = "Agent"
 
@@ -119,9 +121,13 @@ class ToolAgent(Agent, abstract=True):
                 if getattr(m, "type", "") == "ai":
                     self._emit_tool_call_labels(m)
             if time.monotonic() > deadline:
-                _log.warning(
+                # Post-hoc deadline: checked after the run completes (it does NOT
+                # interrupt an in-flight tool call). Raise so an over-budget run
+                # is rejected rather than silently returned. For between-step
+                # enforcement, use stream(), which breaks between updates.
+                raise AixonError(
                     f"agent '{self.name}' exceeded max_execution_time "
-                    f"({self.max_execution_time}s)"
+                    f"({self.max_execution_time}s)."
                 )
             # Only drain (and consume) the lines if we own this channel. When
             # nested, leave them in the outer channel for its owner to drain.

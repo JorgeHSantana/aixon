@@ -173,8 +173,8 @@ See [docs/agents.md](docs/agents.md) for `ToolAgent` and full API reference.
 from aixon import Orchestrator, LLM
 
 class SupportOrchestrator(Orchestrator):
-    supervisor = LLM("gpt-4o-mini")
-    agents     = [BillingAgent, TechAgent, PlannerAgent]
+    supervisor = LLM("gpt-4o-mini")          # routes each turn to a worker
+    agents     = [BillingAgent, TechAgent, PlannerAgent]   # your own LLMAgent/ToolAgent classes
 ```
 
 Three tiers — pick by complexity. See [docs/orchestrator.md](docs/orchestrator.md).

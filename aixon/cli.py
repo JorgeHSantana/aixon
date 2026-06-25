@@ -14,6 +14,7 @@ import sys
 
 import click
 
+from aixon import __version__
 from aixon.discovery import autodiscover
 from aixon.registry import get_registry
 
@@ -45,13 +46,13 @@ _DIM = "\033[2m"
 _RESET = "\033[0m"
 
 
-def _dim(_text: str) -> bool:
-    """Return True when the terminal likely supports ANSI (not piped)."""
+def _supports_ansi() -> bool:
+    """Return True when the terminal likely supports ANSI (stdout is a TTY)."""
     return sys.stdout.isatty()
 
 
 def _print_dim(text: str) -> None:
-    if _dim(text):
+    if _supports_ansi():
         click.echo(f"{_DIM}{text}{_RESET}", nl=False)
     else:
         click.echo(text, nl=False)
@@ -61,6 +62,7 @@ def _print_dim(text: str) -> None:
 # CLI group
 # ---------------------------------------------------------------------------
 @click.group()
+@click.version_option(version=__version__, prog_name="aixon", message="%(prog)s %(version)s")
 def app() -> None:
     """aixon — declarative AI-agent framework."""
 
@@ -340,8 +342,7 @@ name = "{name}"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "aixon[server,cli]",
-    "uvicorn[standard]",
+    "aixon[server,cli]",   # the server extra already pulls in uvicorn[standard]
 ]
 
 [project.optional-dependencies]
@@ -396,10 +397,14 @@ def new_command(name: str) -> None:
 @click.option("--port", default=8000, show_default=True, type=int)
 @click.option("--package", "-p", default="agents", show_default=True,
               help="Package to autodiscover before serving.")
-def serve_command(host: str, port: int, package: str) -> None:
+@click.option("--anthropic", "-a", is_flag=True, default=False,
+              help="Also serve the Anthropic dialect under /anthropic "
+                   "(in addition to OpenAI at /v1).")
+def serve_command(host: str, port: int, package: str, anthropic: bool) -> None:
     """Start the aixon server."""
     try:
         from aixon.server.server import Server
+        from aixon.server.adapters.openai import OpenAIAdapter
     except ImportError:
         click.echo(
             "The server extra is required for 'serve'. "
@@ -414,6 +419,15 @@ def serve_command(host: str, port: int, package: str) -> None:
     except (ImportError, ModuleNotFoundError, ValueError):
         click.echo(f"Warning: could not autodiscover package '{package}'.", err=True)
 
-    server = Server.get_instance()
-    click.echo(f"Starting aixon server on {host}:{port} ...")
+    adapters = [OpenAIAdapter()]
+    if anthropic:
+        from aixon.server.adapters.anthropic import AnthropicAdapter
+
+        adapters.append(AnthropicAdapter(mount_prefix="/anthropic"))
+
+    # Construct the singleton with the chosen adapters (raises if one was
+    # already built with a different set — e.g. a main.py imported first).
+    server = Server(adapters=adapters)
+    dialects = "OpenAI + Anthropic" if anthropic else "OpenAI"
+    click.echo(f"Starting aixon server ({dialects}) on {host}:{port} ...")
     server.serve(host=host, port=port)

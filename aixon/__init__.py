@@ -1,5 +1,12 @@
 """aixon — declarative AI-agent framework."""
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    __version__ = _pkg_version("aixon")
+except PackageNotFoundError:  # not installed (e.g. running from a source checkout)
+    __version__ = "0.0.0"
+
 from aixon.agent import Agent, AgentTool
 from aixon.agents.llm_agent import LLMAgent
 from aixon.agents.orchestrator import Orchestrator

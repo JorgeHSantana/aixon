@@ -132,6 +132,10 @@ Full OpenAI-compatible wire format. Served routes:
 | `/v1/chat/completions` | POST | Non-streaming and streaming (SSE) completions. |
 | `/v1/models` | GET | List registered agents in OpenAI `model` object format. |
 
+> **`usage` is always `{}`.** The neutral boundary (`Message`) carries no token
+> counts, so the server cannot report `prompt_tokens`/`completion_tokens`.
+> Clients that need usage must measure it themselves.
+
 Any OpenAI-compatible client works out of the box:
 
 ```python

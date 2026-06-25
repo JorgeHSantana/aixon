@@ -78,24 +78,29 @@ class AnthropicAdapter(ProtocolAdapter):
 
     # --- outbound (stream) ----------------------------------------------
     def format_stream_chunk(self, *, model: str, chunk: Chunk) -> str:
-        if chunk.done:
-            return _event(
-                "message_delta",
-                {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}},
-            )
-        if chunk.content:
-            return _event(
-                "content_block_delta",
-                {"type": "content_block_delta", "index": 0,
-                 "delta": {"type": "text_delta", "text": chunk.content}},
-            )
+        # A Chunk may carry reasoning AND content AND done at once (message.py
+        # allows it). Emit one named SSE event per present field rather than an
+        # exclusive ladder that would drop the others (e.g. Chunk(content=...,
+        # done=True) losing the content).
+        parts: list[str] = []
         if chunk.reasoning:
-            return _event(
+            parts.append(_event(
                 "content_block_delta",
                 {"type": "content_block_delta", "index": 0,
                  "delta": {"type": "thinking_delta", "thinking": chunk.reasoning}},
-            )
-        return ""
+            ))
+        if chunk.content:
+            parts.append(_event(
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": chunk.content}},
+            ))
+        if chunk.done:
+            parts.append(_event(
+                "message_delta",
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}},
+            ))
+        return "".join(parts)
 
     def format_stream_done(self, *, model: str) -> str:
         return _event("message_stop", {"type": "message_stop"})

@@ -231,9 +231,12 @@ class ResearchOrchestrator(Orchestrator):
     supervisor       = LLM("gpt-4o-mini")
     agents           = [SearchAgent, SummarizeAgent]
     recursion_limit  = 50    # LangGraph supersteps. Default: 25. None = no cap.
-    timeout          = 600   # Wall-clock backstop in seconds. None = no backstop.
+    timeout          = 600   # Wall-clock deadline in seconds. None = no deadline.
 ```
 
-`recursion_limit` is passed to LangGraph's compiled graph config. `timeout` is
-enforced as a wall-clock backstop. Setting both to `None` is allowed but not
-recommended — cost and time are then unbounded.
+`recursion_limit` is passed to LangGraph's compiled graph config and is the real
+guard against runaway loops. `timeout` is a **post-hoc deadline**: `invoke`
+checks it after the graph returns and raises `AixonError` if exceeded; it does
+**not** interrupt a single in-flight node/tool call (LangGraph's compiled graph
+has no time knob). Setting both to `None` is allowed but not recommended — cost
+and depth are then bounded only by the model and tools themselves.

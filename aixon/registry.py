@@ -43,7 +43,10 @@ class Registry:
             return self._agents[name]
         if name in self._aliases:
             return self._agents[self._aliases[name]]
-        if len(self._agents) == 1:
+        # Convenience: an empty/missing model on a single-agent registry resolves
+        # to that lone agent (the client need not know its name). A NON-empty
+        # unknown name always raises — we never silently mask a typo'd model.
+        if not name and len(self._agents) == 1:
             return next(iter(self._agents.values()))
         raise AgentNotFoundError(
             f"No agent registered as '{name}'. "
@@ -73,5 +76,20 @@ def get_registry() -> Registry:
 
 
 def reset_registry() -> None:
+    """Replace the global registry with a fresh, empty one AND clear the
+    ``_registered`` flag on every Agent subclass.
+
+    Without the flag reset, ``Agent.__init__`` would short-circuit on the stale
+    ``cls._registered = True`` and never re-register into the new registry — the
+    registry would stay empty while the classes still believe they are
+    registered (a desync between the two reset paths). Imported lazily to avoid a
+    registry<->agent import cycle."""
     global _registry
     _registry = Registry()
+    from aixon.agent import Agent
+
+    stack = [Agent]
+    while stack:
+        cls = stack.pop()
+        cls._registered = False
+        stack.extend(cls.__subclasses__())
