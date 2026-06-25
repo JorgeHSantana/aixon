@@ -2,7 +2,7 @@
 
 import pytest
 
-# All six names must be importable from aixon directly.
+# All five Plan-7 names must be importable from aixon directly.
 from aixon import (
     Connector,
     Embedding,
