@@ -84,3 +84,32 @@ def test_agent_as_tool_is_also_dual():
     tool = agent.as_tool()
     assert tool.func is not None and tool.coroutine is not None
     assert coerce_tools([tool])[0].coroutine is not None
+
+
+def test_agent_as_tool_coroutine_actually_runs():
+    # Execute the coroutine body (Agent.as_tool's _arun -> ainvoke), not just
+    # assert it exists.
+    agent = type("LeafRunAgent", (ToolAgent,), {"name": "leafrun", "llm": make_llm()})()
+    out = asyncio.run(agent.as_tool().coroutine("hi"))
+    assert isinstance(out, str)
+
+
+def test_agent_as_tool_func_runs():
+    agent = type("LeafSyncAgent", (ToolAgent,), {"name": "leafsync", "llm": make_llm()})()
+    assert isinstance(agent.as_tool().func("hi"), str)
+
+
+def test_write_capable_retriever_without_write_raises_not_implemented():
+    # A non-READ retriever that doesn't override write() must raise
+    # NotImplementedError (defensive branch in Retriever.write).
+    import pytest
+
+    class WritableRetriever(Retriever):
+        description = "w"
+        type_access = TypeAccess.ALL
+
+        def search(self, query, *, k=None):
+            return []
+
+    with pytest.raises(NotImplementedError):
+        WritableRetriever().write(["doc"])
