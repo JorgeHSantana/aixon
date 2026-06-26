@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from aixon.exceptions import NamingError
+from aixon.exceptions import AixonError, NamingError
 
 # NOTE: httpx is imported lazily inside _httpx() — NOT at module level — so the
 # neutral-boundary guarantee holds (import aixon works without [retrieval]).
@@ -156,3 +156,54 @@ class Connector:
             )
         response.raise_for_status()
         return response.json()
+
+
+class HttpToolConnector(Connector):
+    """HTTP-JSON client for a tool server (``POST /<path>`` + a
+    ``{success, result, error}`` response envelope).
+
+    Typed methods on subclasses pass the explicit ``path``/``method`` — the tool
+    name is NOT assumed to equal the URL (servers may route arbitrarily). This is
+    NOT the MCP wire protocol (stdio/SSE); for that, use langchain-mcp-adapters ->
+    BaseTool -> coerce_tools.
+
+    ``call``/``acall`` drop ``None`` params before sending (POST -> json, GET ->
+    query). ``_unwrap`` understands the default ``{success, result, error}``
+    envelope and is overridable per consumer. ``list_tools`` is discovery only
+    (NOT routing) and is cached per instance.
+    """
+
+    tools_path = "/mcp/tools"
+
+    def list_tools(self) -> list[dict]:
+        """Fetch the tool catalog (``GET tools_path``) once, cached per instance."""
+        if getattr(self, "_tools_cache", None) is None:
+            self._tools_cache = self.get(self.tools_path).get("tools", [])
+        return self._tools_cache
+
+    def call(self, method: str, path: str, **params: Any) -> Any:
+        """Sync tool call. ``None`` params are dropped."""
+        clean = {k: v for k, v in params.items() if v is not None}
+        if method.upper() == "POST":
+            resp = self.post(path, json=clean)
+        else:
+            resp = self.get(path, params=clean)
+        return self._unwrap(resp)
+
+    async def acall(self, method: str, path: str, **params: Any) -> Any:
+        """Async tool call (non-blocking IO). ``None`` params are dropped."""
+        clean = {k: v for k, v in params.items() if v is not None}
+        if method.upper() == "POST":
+            resp = await self.apost(path, json=clean)
+        else:
+            resp = await self.aget(path, params=clean)
+        return self._unwrap(resp)
+
+    def _unwrap(self, resp: dict) -> Any:
+        """Default envelope: ``{success, result, error}``. Overridable.
+
+        Raises ``AixonError`` when ``success`` is falsy; otherwise returns
+        ``result`` (or the whole dict if there is no ``result`` key)."""
+        if not resp.get("success", True):
+            raise AixonError(resp.get("error") or f"tool failed: {resp.get('tool')}")
+        return resp.get("result", resp)
