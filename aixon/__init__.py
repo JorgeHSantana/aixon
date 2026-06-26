@@ -28,6 +28,7 @@ from aixon.providers.base import Provider, get_provider, register_provider
 from aixon.reasoning import emit_reasoning, reasoning_channel
 from aixon.registry import Registry, get_registry, reset_registry
 from aixon.retriever import Retriever, TypeAccess
+from aixon.retrievers.ragie import RagieRetriever
 from aixon.retrievers.tavily import TavilyRetriever
 from aixon.state import END, GraphState
 
@@ -70,6 +71,7 @@ __all__ = [
     "Retriever",
     "TypeAccess",
     "TavilyRetriever",
+    "RagieRetriever",
 ]
 
 # Plan 5 — server surface (optional; requires aixon[server]). Guard so

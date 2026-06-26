@@ -45,6 +45,7 @@ retrieval = ["httpx>=0.27"]
 openai-embedding = ["langchain-openai>=0.2"]
 tiktoken = ["tiktoken>=0.7"]
 tavily = ["tavily-python>=0.7"]
+ragie = ["ragie>=2"]
 all = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
@@ -57,6 +58,7 @@ all = [
     "langchain-google-genai>=2.0",
     "tiktoken>=0.7",
     "tavily-python>=0.7",
+    "ragie>=2",
 ]
 
 [project.urls]
