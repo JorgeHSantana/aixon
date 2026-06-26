@@ -146,8 +146,15 @@ is additive). The server already `await`s them, so concurrent requests don't
 serialize. See it directly:
 
 ```bash
-python async_demo.py      # await ainvoke, async for astream, concurrent gather
+python async_demo.py            # await ainvoke, async for astream, concurrent gather
+python async_retriever_demo.py  # native asearch() + dual tool: concurrent retrieval
 ```
+
+`async_retriever_demo.py` shows a retriever with a **native** `asearch()`
+alongside its sync `search()`: the same retriever works on both paths (sync
+`aixon chat` and the async server), and concurrent retrievals **overlap**
+instead of serializing (5 × 0.2s → ~0.2s, measured). The latency is simulated;
+swap in a real async SDK (Weaviate/Ragie/Tavily) for production.
 
 `OrdersConnector.alookup_order` uses `Connector.aget` (httpx.AsyncClient) — a
 real orders backend would be reached without blocking the event loop.
