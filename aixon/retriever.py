@@ -62,6 +62,16 @@ class Retriever(ABC):
             A list of dicts with at least ``{'text': str, 'metadata': dict}``.
         """
 
+    async def asearch(self, query: str, *, k: int | None = None) -> list[dict]:
+        """Async search. The default bridges to the sync ``search`` in a worker
+        thread, so every retriever gets a working ``asearch`` for free and the
+        event loop is not blocked. Vendor retrievers backed by an async SDK
+        (Weaviate/Ragie/Tavily) should OVERRIDE this for true non-blocking I/O —
+        ``as_tool`` then exposes it as the tool's async path."""
+        import asyncio
+
+        return await asyncio.to_thread(self.search, query, k=k)
+
     def write(
         self,
         texts: list[str],
@@ -110,8 +120,7 @@ class Retriever(ABC):
         _k = k
         _retriever = self
 
-        def _run(query: str) -> str:
-            docs = _retriever.search(query, k=_k)
+        def _format(docs: list[dict], query: str) -> str:
             if not docs:
                 return f"No results found for query: {query!r}"
             parts = []
@@ -124,8 +133,15 @@ class Retriever(ABC):
                     parts.append(text)
             return "\n".join(parts)
 
+        def _run(query: str) -> str:
+            return _format(_retriever.search(query, k=_k), query)
+
+        async def _arun(query: str) -> str:
+            return _format(await _retriever.asearch(query, k=_k), query)
+
         return AgentTool(
             name=name or type(self).__name__.lower(),
             description=description or self.description,
             func=_run,
+            coroutine=_arun,
         )

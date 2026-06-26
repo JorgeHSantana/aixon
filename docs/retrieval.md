@@ -44,12 +44,24 @@ class Retriever(ABC):
     def search(self, query: str, *, k: int | None = None) -> list[dict]:
         """Return [{"text": str, "metadata": dict}, ...]."""
 
+    async def asearch(self, query: str, *, k: int | None = None) -> list[dict]:
+        """Async search. Default bridges to search() in a thread; override for a
+        native async SDK (true non-blocking I/O)."""
+
     def write(self, texts: list[str], metadatas: list[dict] | None = None) -> list[str]:
         """Store documents. Raises if type_access is READ."""
 
     def as_tool(self, name=None, description=None, k=None) -> AgentTool:
         """Expose as a neutral AgentTool (same shape as Agent.as_tool())."""
 ```
+
+**Sync and async.** `search` is required; `asearch` is optional — its default
+runs `search` in a worker thread, so every retriever works on the async agent
+path without change, and the event loop is never blocked. A vendor retriever
+backed by an async SDK (Weaviate/Ragie/Tavily) **overrides `asearch`** for real
+non-blocking I/O. `as_tool()` returns a **dual** `AgentTool` (sync `func` →
+`search`, async `coroutine` → `asearch`), so the retriever tool runs on **both**
+`invoke` and `ainvoke`; under `ainvoke` it awaits `asearch`.
 
 ### TypeAccess
 

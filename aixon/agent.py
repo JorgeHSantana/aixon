@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Iterator
+from typing import AsyncIterator, Awaitable, Callable, Iterator
 
 from aixon.exceptions import NamingError
 from aixon.message import Chunk, Message
@@ -23,6 +23,11 @@ class AgentTool:
     name: str
     description: str
     func: Callable[[str], str]
+    # Optional async variant. When set, coerce_tools registers the LangChain tool
+    # with both a sync `func` and this `coroutine`, so the tool runs on BOTH the
+    # sync (`invoke`) and async (`ainvoke`) agent paths — the async path awaits
+    # the coroutine for true non-blocking I/O.
+    coroutine: Callable[[str], Awaitable[str]] | None = None
 
 
 class Agent(ABC):
@@ -146,8 +151,13 @@ class Agent(ABC):
             result = self.invoke([Message(role="user", content=text)])
             return result.content
 
+        async def _arun(text: str) -> str:
+            result = await self.ainvoke([Message(role="user", content=text)])
+            return result.content
+
         return AgentTool(
             name=name or self.name,
             description=description or self.description,
             func=_run,
+            coroutine=_arun,
         )

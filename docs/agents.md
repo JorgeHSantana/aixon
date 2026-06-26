@@ -177,6 +177,7 @@ class AgentTool:
     name: str
     description: str
     func: Callable[[str], str]
+    coroutine: Callable[[str], Awaitable[str]] | None = None  # optional async path
 ```
 
 ```python
@@ -186,7 +187,10 @@ tool = agent.as_tool(name="planner", description="Decomposes goals")
 
 `func` wraps `agent.invoke`: each call creates a fresh
 `[Message(role="user", content=text)]` — the agent's state never leaks between
-tool calls. The same `AgentTool` shape is returned by `Retriever.as_tool()`, so
+tool calls. `as_tool()` also sets `coroutine` (wrapping `ainvoke`), so the tool
+is **dual**: `coerce_tools` registers both, and the tool runs on the sync
+(`invoke` → `func`) and async (`ainvoke` → `coroutine`) paths. The same
+`AgentTool` shape is returned by `Retriever.as_tool()`, so
 `ToolAgent.tools` handles both uniformly.
 
 ---

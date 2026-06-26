@@ -40,13 +40,18 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
         if isinstance(entry, BaseTool):
             coerced.append(entry)
         elif isinstance(entry, AgentTool):
-            coerced.append(
-                StructuredTool.from_function(
-                    func=entry.func,
-                    name=entry.name,
-                    description=entry.description,
-                )
-            )
+            # When the AgentTool carries an async `coroutine`, register it too so
+            # the tool runs on both paths: sync `invoke` uses `func`, async
+            # `ainvoke` awaits `coroutine` (true non-blocking). Retriever/Agent
+            # as_tool() set both; a func-only AgentTool stays sync.
+            kwargs = {
+                "func": entry.func,
+                "name": entry.name,
+                "description": entry.description,
+            }
+            if entry.coroutine is not None:
+                kwargs["coroutine"] = entry.coroutine
+            coerced.append(StructuredTool.from_function(**kwargs))
         elif callable(entry):
             # An async callable MUST be registered via `coroutine=`, not as the
             # positional sync `func`. Passing a coroutine function as `func`
