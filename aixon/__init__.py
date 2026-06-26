@@ -30,6 +30,7 @@ from aixon.registry import Registry, get_registry, reset_registry
 from aixon.retriever import Retriever, TypeAccess
 from aixon.retrievers.ragie import RagieRetriever
 from aixon.retrievers.tavily import TavilyRetriever
+from aixon.retrievers.weaviate import WeaviateRetriever
 from aixon.state import END, GraphState
 
 __all__ = [
@@ -72,6 +73,7 @@ __all__ = [
     "TypeAccess",
     "TavilyRetriever",
     "RagieRetriever",
+    "WeaviateRetriever",
 ]
 
 # Plan 5 — server surface (optional; requires aixon[server]). Guard so

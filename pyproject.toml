@@ -46,6 +46,8 @@ openai-embedding = ["langchain-openai>=0.2"]
 tiktoken = ["tiktoken>=0.7"]
 tavily = ["tavily-python>=0.7"]
 ragie = ["ragie>=2"]
+weaviate = ["weaviate-client>=4", "langchain-weaviate>=0.0.7", "langchain-text-splitters>=1"]
+rerank = ["flashrank>=0.2"]
 all = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
@@ -59,6 +61,10 @@ all = [
     "tiktoken>=0.7",
     "tavily-python>=0.7",
     "ragie>=2",
+    "weaviate-client>=4",
+    "langchain-weaviate>=0.0.7",
+    "langchain-text-splitters>=1",
+    "flashrank>=0.2",
 ]
 
 [project.urls]
