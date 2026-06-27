@@ -7,8 +7,7 @@ Bearer auth, lazy ``httpx``).
 So the example runs with zero infrastructure, ``lookup_order`` falls back to a
 small in-memory fixture when ``ORDERS_API_URL`` is **not** set. Point that env
 var at a real service and the very same method issues a real HTTP GET — nothing
-else changes. The real HTTP path (``self.get``) is covered by the test suite
-with a mocked transport.
+else changes.
 """
 
 from __future__ import annotations

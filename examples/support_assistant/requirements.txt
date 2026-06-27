@@ -10,6 +10,3 @@ aixon[server,cli,openai,retrieval,openai-embedding,tiktoken]
 
 # Served by `python main.py`.
 uvicorn[standard]
-
-# For running the tests.
-pytest

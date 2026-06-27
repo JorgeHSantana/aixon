@@ -52,7 +52,6 @@ specialist `ToolAgent`, whose answer is the final reply.
 | `autodiscover` (drop a file in `agents/`, it goes live) | [main.py](main.py) |
 | `Server` — OpenAI wire protocol + Bearer auth | [main.py](main.py) |
 | Bare routes (`/chat/completions`, `/models`), `thought_stream_mode`, `usage`, per-request params | [main.py](main.py) + the curl examples below |
-| Dependency-injection / offline testing | [test_support_assistant.py](test_support_assistant.py) |
 
 ## Run it
 
@@ -152,13 +151,6 @@ reply = await get_registry().resolve("support").ainvoke(
 A retriever can override `asearch()` (and a connector can use `Connector.aget`)
 for real non-blocking I/O — the same retriever still works on the sync path via
 `search()`. Point a vendor SDK (Weaviate/Ragie/Tavily) at it for production.
-
-## Test it
-
-```bash
-cd examples/support_assistant
-python -m pytest          # forces offline mode — no server, no network, no key
-```
 
 ## Make it real
 
