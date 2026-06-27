@@ -51,9 +51,7 @@ specialist `ToolAgent`, whose answer is the final reply.
 | `hidden` workers + `aliases` on the public entry point | [agents/support.py](agents/support.py) |
 | `autodiscover` (drop a file in `agents/`, it goes live) | [main.py](main.py) |
 | `Server` — OpenAI wire protocol + Bearer auth | [main.py](main.py) |
-| Bare routes (`/chat/completions`, `/models`) for clients that omit `/v1` | [test_sp1_server_features.py](test_sp1_server_features.py) |
-| `thought_stream_mode` (`content` / `custom` / `hidden`) | [test_sp1_server_features.py](test_sp1_server_features.py) |
-| `usage` token counting + per-request generation params | [test_sp1_server_features.py](test_sp1_server_features.py) |
+| Bare routes (`/chat/completions`, `/models`), `thought_stream_mode`, `usage`, per-request params | [main.py](main.py) + the curl examples below |
 | Dependency-injection / offline testing | [test_support_assistant.py](test_support_assistant.py) |
 
 ## Run it
@@ -141,23 +139,19 @@ No other change.
 
 ## Async
 
-The same agents expose async `ainvoke`/`astream` (sync stays the default; async
-is additive). The server already `await`s them, so concurrent requests don't
-serialize. See it directly:
+Every agent exposes async `ainvoke`/`astream` alongside sync `invoke`/`stream`
+(sync is the default; async is additive). The server already `await`s them, so
+concurrent requests don't block each other.
 
-```bash
-python async_demo.py            # await ainvoke, async for astream, concurrent gather
-python async_retriever_demo.py  # native asearch() + dual tool: concurrent retrieval
+```python
+reply = await get_registry().resolve("support").ainvoke(
+    [Message(role="user", content="where is my order 1002?")]
+)
 ```
 
-`async_retriever_demo.py` shows a retriever with a **native** `asearch()`
-alongside its sync `search()`: the same retriever works on both paths (sync
-`aixon chat` and the async server), and concurrent retrievals **overlap**
-instead of serializing (5 × 0.2s → ~0.2s, measured). The latency is simulated;
-swap in a real async SDK (Weaviate/Ragie/Tavily) for production.
-
-`OrdersConnector.alookup_order` uses `Connector.aget` (httpx.AsyncClient) — a
-real orders backend would be reached without blocking the event loop.
+A retriever can override `asearch()` (and a connector can use `Connector.aget`)
+for real non-blocking I/O — the same retriever still works on the sync path via
+`search()`. Point a vendor SDK (Weaviate/Ragie/Tavily) at it for production.
 
 ## Test it
 

@@ -291,5 +291,5 @@ methods and having the server `await agent.ainvoke` / `agent.astream`:
 - `Connector` gains `aget`/`apost` (httpx.AsyncClient).
 - Covered by `test_async_agents.py`, `test_async_cancellation.py`,
   `test_connector_async.py`, and `test_server_async_nonblocking.py` (two
-  concurrent slow requests overlap instead of serializing). The example ships
-  `async_demo.py`.
+  concurrent slow requests overlap instead of serializing). The
+  support_assistant example serves all agents async through the server.
