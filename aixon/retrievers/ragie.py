@@ -36,18 +36,21 @@ class RagieRetriever(Retriever):
             raise AixonError(
                 f"{type(self).__name__} requires a 'partition' class attribute."
             )
+        # The API key is NOT validated here: instantiating a retriever (often in
+        # an agent's class body) must not require env vars at import/autodiscover
+        # time. The key is checked lazily, on first use (_get_client).
         self._api_key = api_key or os.getenv("RAGIE_API_KEY")
-        if client is None and not self._api_key:
-            raise AixonError(
-                "RagieRetriever requires an API key (pass api_key= or set "
-                "RAGIE_API_KEY)."
-            )
         if k is not None:
             self.max_query_results = k
         self._client = client
 
     def _get_client(self) -> Any:
         if self._client is None:
+            if not self._api_key:
+                raise AixonError(
+                    "RagieRetriever requires an API key (pass api_key= or set "
+                    "RAGIE_API_KEY)."
+                )
             try:
                 from ragie import Ragie
             except ImportError as exc:

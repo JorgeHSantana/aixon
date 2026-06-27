@@ -63,10 +63,13 @@ def test_read_only_write_raises():
         TavilyRetriever(client=_FakeSync()).write(["x"])
 
 
-def test_missing_api_key_raises(monkeypatch):
+def test_missing_api_key_is_lazy_raises_on_use(monkeypatch):
+    # Instantiating must NOT require the key (class-body / autodiscover safe);
+    # validated lazily on first use.
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    r = TavilyRetriever()  # no raise
     with pytest.raises(AixonError):
-        TavilyRetriever()
+        r.search("q")       # raises here (no key)
 
 
 def test_as_tool_dual():

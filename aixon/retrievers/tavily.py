@@ -29,12 +29,10 @@ class TavilyRetriever(Retriever):
 
     def __init__(self, *, api_key: str | None = None, k: int | None = None,
                  client: Any = None, aclient: Any = None) -> None:
+        # The API key is NOT validated here: instantiating a retriever (often in
+        # an agent's class body) must not require env vars at import/autodiscover
+        # time. The key is checked lazily, on first use (_get_client/_get_aclient).
         self._api_key = api_key or os.getenv("TAVILY_API_KEY")
-        if client is None and aclient is None and not self._api_key:
-            raise AixonError(
-                "TavilyRetriever requires an API key (pass api_key= or set "
-                "TAVILY_API_KEY)."
-            )
         if k is not None:
             self.max_web_results = k
         self._client = client
@@ -42,6 +40,11 @@ class TavilyRetriever(Retriever):
 
     def _get_client(self) -> Any:
         if self._client is None:
+            if not self._api_key:
+                raise AixonError(
+                    "TavilyRetriever requires an API key (pass api_key= or set "
+                    "TAVILY_API_KEY)."
+                )
             try:
                 from tavily import TavilyClient
             except ImportError as exc:
@@ -54,6 +57,11 @@ class TavilyRetriever(Retriever):
 
     def _get_aclient(self) -> Any:
         if self._aclient is None:
+            if not self._api_key:
+                raise AixonError(
+                    "TavilyRetriever requires an API key (pass api_key= or set "
+                    "TAVILY_API_KEY)."
+                )
             try:
                 from tavily import AsyncTavilyClient
             except ImportError as exc:

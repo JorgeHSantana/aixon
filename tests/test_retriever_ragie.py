@@ -121,11 +121,12 @@ def test_missing_partition_raises(monkeypatch):
         RagieRetriever()
 
 
-def test_missing_api_key_raises(monkeypatch):
+def test_missing_api_key_is_lazy_raises_on_use(monkeypatch):
     monkeypatch.delenv("RAGIE_API_KEY", raising=False)
 
     class _NoKeyRetriever(RagieRetriever):
         partition = "p"
 
+    r = _NoKeyRetriever()  # lazy: instantiation must NOT raise
     with pytest.raises(AixonError):
-        _NoKeyRetriever()
+        r.search("q")       # raises here (no key) — on first use
