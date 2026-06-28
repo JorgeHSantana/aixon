@@ -1,18 +1,44 @@
+# Byte-compiled / optimized
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.so
 .Python
+
+# Packaging / build
 *.egg
 *.egg-info/
+.eggs/
 dist/
 build/
-.eggs/
-.env
-.venv
+
+# Virtualenvs
 env/
 venv/
+.venv/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Tests / coverage
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
-*.so
+*.cover
+.tox/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
+# Internal scratch (SDD journal — not part of the package)
+.superpowers/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

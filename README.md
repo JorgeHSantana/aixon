@@ -2,6 +2,10 @@
 
 > One framework. Declarative agents, multi-agent orchestration, and a protocol-decoupled server.
 
+[![PyPI](https://img.shields.io/pypi/v/aixon.svg)](https://pypi.org/project/aixon/)
+[![Python](https://img.shields.io/pypi/pyversions/aixon.svg)](https://pypi.org/project/aixon/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 `aixon` is a Python framework for building AI-agent systems. Subclass an agent type,
 declare your LLM and tools as class attributes, and the agent self-registers — no
 wiring, no routing table. Connect agents into multi-agent graphs with
@@ -50,8 +54,13 @@ pip install "aixon[cli]"               # click + openai — the `aixon` command 
 pip install "aixon[openai]"            # OpenAI provider binding (langchain-openai)
 pip install "aixon[anthropic]"         # Anthropic provider binding
 pip install "aixon[google]"            # Google provider binding
-pip install "aixon[retrieval]"         # httpx — Connector HTTP client
+pip install "aixon[retrieval]"         # httpx — Connector / HttpToolConnector
 pip install "aixon[openai-embedding]"  # langchain-openai — OpenAIEmbedding
+pip install "aixon[weaviate]"          # Weaviate vector-store Retriever
+pip install "aixon[ragie]"             # Ragie managed-RAG Retriever
+pip install "aixon[tavily]"            # Tavily web-search Retriever
+pip install "aixon[rerank]"            # flashrank reranking (for Weaviate)
+pip install "aixon[tiktoken]"          # token counting for the server `usage` field
 pip install "aixon[all]"               # everything above
 ```
 
@@ -108,10 +117,16 @@ Everything in `aixon` is an `Agent` — a single callable unit with a uniform
 interface:
 
 ```python
-agent.invoke(messages: list[Message]) -> Message
-agent.stream(messages: list[Message]) -> Iterator[Chunk]
+agent.invoke(messages: list[Message])  -> Message
+agent.stream(messages: list[Message])  -> Iterator[Chunk]
+agent.ainvoke(messages: list[Message]) -> Message            # async
+agent.astream(messages: list[Message]) -> AsyncIterator[Chunk]
 agent.as_tool(name=None, description=None) -> AgentTool
 ```
+
+Sync is the default; `ainvoke`/`astream` are **additive** and run non-blocking
+(native for `LLMAgent`/`ToolAgent`/`Orchestrator`, a thread-bridge for custom
+sync agents). The server `await`s them, so concurrent requests don't serialize.
 
 Three concrete subtypes cover the common cases. Pick the one that matches what
 you need:
@@ -153,15 +168,15 @@ Attributes:
 | `llm` | `LLM` | **Required.** The language model to use. |
 | `prompt` | `str` | Optional system prompt prepended to every conversation. |
 | `description` | `str` | Human-readable purpose (shown in `aixon list`). |
+| `name` | `str` | Registry name (defaults to lowercased class name). |
+| `aliases` | `list[str]` | Alternate names for registry resolution. |
+| `hidden` | `bool` | Exclude from `aixon chat` menu and `public()` listing. |
 
 `aixon list` output (no header, one agent per line):
 
 ```
 greeteragent  [LLMAgent]  Friendly greeter
 ```
-| `name` | `str` | Registry name (defaults to lowercased class name). |
-| `aliases` | `list[str]` | Alternate names for registry resolution. |
-| `hidden` | `bool` | Exclude from `aixon chat` menu and `public()` listing. |
 
 See [docs/agents.md](docs/agents.md) for `ToolAgent` and full API reference.
 
@@ -195,24 +210,31 @@ class LibraryRetriever(Retriever):
     type_access = TypeAccess.READ
 ```
 
-`Connector` is an HTTP base class for wrapping external APIs. Declare
-`base_url_env` and optionally `auth_token_env` — the framework injects the
-values from environment variables at runtime.
+Every `Retriever` has a sync `search` and a native async `asearch`; `as_tool()`
+returns a dual tool that works on both the sync and async agent paths.
 
-`Embedding` is the vector-embedding ABC. The built-in implementation is
-`OpenAIEmbedding`. Install with:
+`Connector` is an HTTP base class for wrapping external APIs (`base_url_env` /
+`auth_token_env`, sync `get`/`post` and async `aget`/`apost`). `HttpToolConnector`
+builds on it for HTTP-JSON tool servers.
 
-```bash
-pip install 'aixon[openai,retrieval,openai-embedding]'
-```
+`Embedding` is the vector-embedding ABC; the built-in implementation is
+`OpenAIEmbedding`.
 
-Then import what you need:
+**Vendor retrievers** ship behind optional extras — each a neutral `Retriever`,
+lazy (the vendor SDK is imported only on use) and async-native:
+
+| Retriever | Extra | Backend |
+|---|---|---|
+| `WeaviateRetriever` | `aixon[weaviate]` | Weaviate vector store (+ `aixon[rerank]` for flashrank) |
+| `RagieRetriever` | `aixon[ragie]` | Ragie managed RAG |
+| `TavilyRetriever` | `aixon[tavily]` | Tavily web search |
 
 ```python
 from aixon import Retriever, TypeAccess, Connector, Embedding, OpenAIEmbedding
 ```
 
-See [docs/retrieval.md](docs/retrieval.md) for the full retrieval pipeline.
+See [docs/retrieval.md](docs/retrieval.md) (ABCs) and
+[docs/retrievers.md](docs/retrievers.md) (vendor backends).
 
 ---
 
@@ -274,28 +296,34 @@ never registered.
 ## Documentation
 
 - [Architecture](docs/architecture.md) — layers, neutral boundary, protocol decoupling
-- [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, declarative API, `as_tool`
+- [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, declarative API, `as_tool`, async
 - [Orchestrator](docs/orchestrator.md) — three tiers, entry/topology, branching, recursion guards
 - [Server](docs/server.md) — `ProtocolAdapter`, adapters, auth, SSE
 - [Retrieval](docs/retrieval.md) — `Retriever`, `Embedding`, `Connector`
+- [Vendor retrievers](docs/retrievers.md) — `Weaviate`, `Ragie`, `Tavily`
 - [CLI](docs/cli.md) — `chat`, `new`, `serve`, `list`
 - [Quickstart](docs/quickstart.md) — consumer project walkthrough
+- [Example](examples/support_assistant) — a complete multi-agent support assistant, runnable offline
 
 ---
 
 ## Dependencies
 
 ```
-langchain        >= 1.0    (core)
-langchain-core   >= 1.0    (core)
-langgraph        >= 1.0    (core)
-fastapi          >= 0.100  (server extra)
-uvicorn          >= 0.20   (server extra)
-pydantic         >= 2.0    (server extra)
-httpx            >= 0.27   (server / retrieval extra)
-click            >= 8.0    (cli extra)
-openai           >= 1.0    (cli extra — remote chat client)
-langchain-openai >= 0.2    (openai / openai-embedding extra)
+langchain             >= 1.0    (core)
+langchain-core        >= 1.0    (core)
+langgraph             >= 1.0    (core)
+fastapi / uvicorn / pydantic    (server extra)
+httpx                 >= 0.27   (server / retrieval extra)
+click / openai                  (cli extra — `aixon` command + remote chat)
+langchain-openai      >= 0.2    (openai / openai-embedding extra)
+langchain-anthropic   >= 0.2    (anthropic extra)
+langchain-google-genai >= 2.0   (google extra)
+weaviate-client / langchain-weaviate  (weaviate extra)
+ragie                 >= 2      (ragie extra)
+tavily-python         >= 0.7    (tavily extra)
+flashrank             >= 0.2    (rerank extra)
+tiktoken              >= 0.7    (tiktoken extra)
 ```
 
 ---
