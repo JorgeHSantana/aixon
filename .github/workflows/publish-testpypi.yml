@@ -1,12 +1,14 @@
-name: Publish to PyPI
+name: Publish to TestPyPI
 
-# Publishes on a GitHub Release. Tests must pass first, then the package is built
-# and uploaded via PyPI Trusted Publishing (OIDC) — no API token secret.
-# One-time setup: on PyPI add a trusted publisher for project `aixon` →
-# owner `JorgeHSantana`, repo `aixon`, workflow `publish.yml`, environment `pypi`.
+# Manual dry-run of the release flow against TestPyPI (test.pypi.org).
+# Trigger: Actions tab → "Publish to TestPyPI" → Run workflow.
+# One-time setup: on test.pypi.org add a trusted publisher for project `aixon` →
+# owner `JorgeHSantana`, repo `aixon`, workflow `publish-testpypi.yml`,
+# environment `testpypi`.
+# Note: TestPyPI rejects re-uploading an existing version — bump (e.g.
+# 0.1.0.dev1) to re-test the same release.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -21,10 +23,10 @@ jobs:
       - run: pip install -e ".[all,dev]"
       - run: pytest -q
 
-  publish:
-    needs: test          # do not publish if tests fail
+  publish-testpypi:
+    needs: test
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: testpypi
     permissions:
       id-token: write    # required for Trusted Publishing
     steps:
@@ -34,5 +36,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade build
       - run: python -m build
-      - name: Publish to PyPI
+      - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
