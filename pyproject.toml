@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aixon"
-version = "0.0.1"
+version = "0.1.0"
 description = "Declarative AI-agent framework — composable agents, multi-agent orchestration, and a protocol-decoupled server"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,7 +22,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Operating System :: OS Independent",
+    "Typing :: Typed",
 ]
 # langchain/langchain-core/langgraph are MANDATORY — every agent subtype and
 # the orchestrator require them, so they are core deps (not an optional extra).
