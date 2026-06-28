@@ -4,8 +4,8 @@
 
 [![Test & Publish](https://github.com/JorgeHSantana/aixon/actions/workflows/publish.yml/badge.svg)](https://github.com/JorgeHSantana/aixon/actions/workflows/publish.yml)
 [![codecov](https://codecov.io/gh/JorgeHSantana/aixon/branch/main/graph/badge.svg)](https://codecov.io/gh/JorgeHSantana/aixon)
-[![PyPI](https://img.shields.io/pypi/v/aixon.svg)](https://pypi.org/project/aixon/)
-[![Python](https://img.shields.io/pypi/pyversions/aixon.svg)](https://pypi.org/project/aixon/)
+[![PyPI](https://img.shields.io/pypi/v/aixon?logo=pypi&logoColor=white)](https://pypi.org/project/aixon/)
+[![Python](https://img.shields.io/pypi/pyversions/aixon?logo=python&logoColor=white)](https://pypi.org/project/aixon/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `aixon` is a Python framework for building AI-agent systems. Subclass an agent type,
