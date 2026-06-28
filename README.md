@@ -2,7 +2,8 @@
 
 > One framework. Declarative agents, multi-agent orchestration, and a protocol-decoupled server.
 
-[![CI](https://github.com/JorgeHSantana/aixon/actions/workflows/ci.yml/badge.svg)](https://github.com/JorgeHSantana/aixon/actions/workflows/ci.yml)
+[![Test & Publish](https://github.com/JorgeHSantana/aixon/actions/workflows/publish.yml/badge.svg)](https://github.com/JorgeHSantana/aixon/actions/workflows/publish.yml)
+[![codecov](https://codecov.io/gh/JorgeHSantana/aixon/branch/main/graph/badge.svg)](https://codecov.io/gh/JorgeHSantana/aixon)
 [![PyPI](https://img.shields.io/pypi/v/aixon.svg)](https://pypi.org/project/aixon/)
 [![Python](https://img.shields.io/pypi/pyversions/aixon.svg)](https://pypi.org/project/aixon/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
