@@ -105,3 +105,47 @@ def test_from_langchain_human_message():
     m = from_langchain(HumanMessage(content="Hi"))
     assert m.role == "user"
     assert m.content == "Hi"
+
+
+# ── from_langchain: structured (list) content flattening ──────────────────────
+# Some providers (e.g. Gemini 2.5) return AIMessage.content as a list of content
+# blocks instead of a plain string. The neutral Message.content must be flattened
+# to the visible text, not str()'d into a Python repr.
+
+def test_from_langchain_flattens_single_text_block():
+    lc = AIMessage(content=[{"type": "text", "text": "Olá", "extras": {"signature": "x"}}])
+    m = from_langchain(lc)
+    assert m.content == "Olá"
+
+
+def test_from_langchain_joins_multiple_text_blocks():
+    lc = AIMessage(
+        content=[
+            {"type": "text", "text": "Parte 1. "},
+            {"type": "text", "text": "Parte 2."},
+        ]
+    )
+    m = from_langchain(lc)
+    assert m.content == "Parte 1. Parte 2."
+
+
+def test_from_langchain_joins_plain_string_blocks():
+    lc = AIMessage(content=["ab", "cd"])
+    m = from_langchain(lc)
+    assert m.content == "abcd"
+
+
+def test_from_langchain_excludes_non_text_blocks_from_content():
+    lc = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "hmm", "signature": "s"},
+            {"type": "text", "text": "Resposta final."},
+        ]
+    )
+    m = from_langchain(lc)
+    assert m.content == "Resposta final."
+
+
+def test_from_langchain_empty_list_content_is_empty_string():
+    m = from_langchain(AIMessage(content=[]))
+    assert m.content == ""

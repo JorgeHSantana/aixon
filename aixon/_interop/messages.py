@@ -17,6 +17,30 @@ from langchain_core.messages import (
 from aixon.message import Message
 
 
+def _flatten_content(content: object) -> str:
+    """Flatten LangChain message content to plain visible text.
+
+    Some providers (e.g. Gemini 2.5) return ``content`` as a list of content
+    blocks (``[{"type": "text", "text": ...}, ...]``) rather than a plain
+    string. The neutral Message carries plain text, so join the text-bearing
+    blocks and drop non-text blocks (thinking/reasoning/tool_use). A plain
+    string is returned unchanged; any other shape falls back to ``str()``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content)
+
+
 def to_langchain(messages: list[Message]) -> list[BaseMessage]:
     """Convert neutral Message[] to LangChain message objects.
 
@@ -72,7 +96,7 @@ def from_langchain(msg: BaseMessage) -> Message:
     else:
         role = "assistant"  # safe fallback for unknown LangChain types
 
-    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+    content = _flatten_content(msg.content)
 
     tool_calls: list[dict] = []
     if isinstance(msg, AIMessage) and msg.tool_calls:
