@@ -49,6 +49,7 @@ class ToolAgent(Agent, abstract=True):
     tools: list = []
     max_iterations: int = 15
     max_execution_time: int = 600
+    tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
 
     @classmethod
     def _validate_subclass(cls) -> None:
@@ -84,16 +85,17 @@ class ToolAgent(Agent, abstract=True):
         config = {"recursion_limit": 2 * self.max_iterations + 1}
         return agent, lc_messages, config
 
-    @staticmethod
-    def _emit_tool_call_labels(message) -> None:
+    def _emit_tool_call_labels(self, message) -> None:
         """If an AI message carries tool calls, emit one reasoning label per
         call into the active ReasoningChannel (the langgraph-native equivalent
-        of olympus' on_agent_action callback)."""
+        of olympus' on_agent_action callback). The label text comes from
+        ``self.tool_call_label``, a ``{name}``-templated string subclasses may
+        override (e.g. for a friendlier phrase or i18n)."""
         tool_calls = getattr(message, "tool_calls", None) or []
         for call in tool_calls:
             name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
             if name:
-                emit_reasoning(f"Calling {name}...")
+                emit_reasoning(self.tool_call_label.format(name=name))
 
     # ---- neutral boundary: invoke ---------------------------------------
 

@@ -77,6 +77,40 @@ def test_stream_flattens_structured_list_content(monkeypatch):
     assert chunks[-1].done is True
 
 
+def test_default_tool_call_label(monkeypatch):
+    def adder(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    class DefaultLabelAgent(ToolAgent):
+        llm = LLM("fake-1", provider="fake")
+        tools = [adder]
+
+    agent = get_registry().resolve("defaultlabelagent")
+    _install(monkeypatch, agent.llm, [_tool_call("adder", {"a": 1, "b": 1}), AIMessage(content="2")])
+
+    reasoning = "".join(c.reasoning for c in agent.stream([Message(role="user", content="add")]) if c.reasoning)
+    assert "Calling adder..." in reasoning
+
+
+def test_custom_tool_call_label_is_used(monkeypatch):
+    def adder(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    class CustomLabelAgent(ToolAgent):
+        llm = LLM("fake-1", provider="fake")
+        tools = [adder]
+        tool_call_label = "Chamando {name} 🔧"
+
+    agent = get_registry().resolve("customlabelagent")
+    _install(monkeypatch, agent.llm, [_tool_call("adder", {"a": 1, "b": 1}), AIMessage(content="2")])
+
+    reasoning = "".join(c.reasoning for c in agent.stream([Message(role="user", content="add")]) if c.reasoning)
+    assert "Chamando adder 🔧" in reasoning
+    assert "Calling adder..." not in reasoning  # default phrase fully replaced
+
+
 def test_stream_no_tool_still_streams_content_and_done(monkeypatch):
     def noop(text: str) -> str:
         """noop"""
