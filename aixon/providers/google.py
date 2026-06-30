@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from aixon.providers.base import Provider, register_provider
+from aixon.providers.base import Provider, apply_resilience_defaults, register_provider
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
@@ -24,6 +24,7 @@ class GoogleProvider(Provider):
         from langchain_google_genai import ChatGoogleGenerativeAI  # lazy import
 
         api_key = os.getenv(self.env_key)
+        apply_resilience_defaults(params)
         return ChatGoogleGenerativeAI(model=model, google_api_key=api_key, **params)
 
 

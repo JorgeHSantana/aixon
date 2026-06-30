@@ -88,3 +88,32 @@ def test_sync_within_budget_still_works():
     cls = type("FastToolAgent", (ToolAgent,), {"name": "fasttool", "llm": make_llm()})
     out = asyncio.run(cls().ainvoke([Message(role="user", content="hi")]))
     assert out.role == "assistant"
+
+
+def test_astream_stops_at_deadline_on_stalled_stream():
+    # Regression for the indefinite-hang bug: a step that stalls mid-flight (the
+    # slow model sleeps 30s) must NOT hang the stream. With the hard-wall
+    # astream, wait_for cancels the stuck step at max_execution_time and emits a
+    # "(stopped: ...)" reasoning line. WITHOUT the fix this test runs ~30s and
+    # fails the elapsed assertion.
+    cls = type(
+        "StalledAstreamAgent",
+        (ToolAgent,),
+        {"name": "stalledastream", "llm": LLM("m", provider="slow-cancel"),
+         "max_execution_time": 0.05},
+    )
+    agent = cls()
+
+    async def _drain() -> tuple[list, float]:
+        chunks: list = []
+        t0 = time.monotonic()
+        async for ch in agent.astream([Message(role="user", content="hi")]):
+            chunks.append(ch)
+        return chunks, time.monotonic() - t0
+
+    chunks, elapsed = asyncio.run(_drain())
+    assert elapsed < 5  # stopped at the 0.05s deadline, not after the 30s sleep
+    assert any(
+        "max_execution_time" in (getattr(c, "reasoning", "") or "") for c in chunks
+    )
+    assert chunks[-1].done is True  # the stream still terminates cleanly

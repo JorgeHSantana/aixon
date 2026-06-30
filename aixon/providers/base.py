@@ -19,6 +19,31 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Network-resilience defaults
+# ---------------------------------------------------------------------------
+
+# Applied by every provider's build() unless the caller passes its own value.
+# WITHOUT a timeout, a stalled provider stream (e.g. a half-open HTTP response
+# that never delivers another byte) blocks the request FOREVER: the agent's
+# ``max_execution_time`` is only checked *between* graph updates, so it cannot
+# interrupt a read that is stuck mid-update. A client-side timeout turns that
+# stall into a finite error; ``max_retries`` reabsorbs transient stream drops.
+DEFAULT_TIMEOUT_S: float = 120.0
+DEFAULT_MAX_RETRIES: int = 2
+
+
+def apply_resilience_defaults(params: dict[str, Any]) -> None:
+    """Set ``timeout``/``max_retries`` in *params* in place if absent.
+
+    The caller always wins: passing ``LLM(model, timeout=...)`` overrides the
+    default. All three built-in chat models (OpenAI/Anthropic/Google) accept
+    both keyword arguments.
+    """
+    params.setdefault("timeout", DEFAULT_TIMEOUT_S)
+    params.setdefault("max_retries", DEFAULT_MAX_RETRIES)
+
+
+# ---------------------------------------------------------------------------
 # Provider ABC
 # ---------------------------------------------------------------------------
 
