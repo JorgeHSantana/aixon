@@ -38,6 +38,9 @@ htmlcov/
 # Internal scratch (SDD journal — not part of the package)
 .superpowers/
 
+# Claude Code local settings
+.claude/
+
 # Editors / OS
 .vscode/
 .idea/
