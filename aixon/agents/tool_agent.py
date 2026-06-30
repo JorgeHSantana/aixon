@@ -219,33 +219,63 @@ class ToolAgent(Agent, abstract=True):
         return final
 
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
-        """Async stream mirroring ``stream`` over the graph's ``astream``."""
+        """Async stream mirroring ``stream`` over the graph's ``astream``.
+
+        ``max_execution_time`` is a HARD wall here, not just a between-update
+        check: each step is awaited under ``asyncio.wait_for`` with the time
+        remaining until the deadline, so a step that stalls mid-flight (e.g. a
+        provider stream that stops delivering bytes) is cancelled at the
+        deadline instead of hanging the request forever. The underlying graph
+        stream is closed on the way out.
+        """
+        import asyncio
+
         from aixon._interop.messages import _flatten_content
 
         agent, lc_messages, config = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
+        timed_out = False
         with reasoning_channel() as channel:
-            async for update in agent.astream(
+            stream = agent.astream(
                 {"messages": lc_messages}, config=config, stream_mode="updates"
-            ):
-                for node_state in update.values():
-                    for m in node_state.get("messages", []) or []:
-                        if getattr(m, "type", "") == "ai":
-                            self._emit_tool_call_labels(m)
-                            content = _flatten_content(getattr(m, "content", ""))
-                            if content:
-                                final_content = content
-                for line in channel.drain():
-                    yield Chunk(reasoning=line + "\n")
-                if time.monotonic() > deadline:
-                    emit_reasoning(
-                        f"(stopped: exceeded max_execution_time "
-                        f"{self.max_execution_time}s)"
-                    )
+            )
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    try:
+                        update = await asyncio.wait_for(
+                            stream.__anext__(), timeout=remaining
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        timed_out = True
+                        break
+                    for node_state in update.values():
+                        for m in node_state.get("messages", []) or []:
+                            if getattr(m, "type", "") == "ai":
+                                self._emit_tool_call_labels(m)
+                                content = _flatten_content(getattr(m, "content", ""))
+                                if content:
+                                    final_content = content
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
-                    break
+            finally:
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception:
+                        pass
+            if timed_out:
+                emit_reasoning(
+                    f"(stopped: exceeded max_execution_time "
+                    f"{self.max_execution_time}s)"
+                )
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
         if final_content:

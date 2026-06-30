@@ -84,3 +84,46 @@ def test_google_provider_build():
     os.environ.setdefault("GOOGLE_API_KEY", "test-key")
     model = get_provider("google").build("gemini-2.0-flash")
     assert hasattr(model, "invoke")
+
+
+# ── Network-resilience defaults (timeout/max_retries) ────────────────────────
+
+from aixon.providers.base import (  # noqa: E402
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT_S,
+    apply_resilience_defaults,
+)
+
+
+def test_apply_resilience_defaults_fills_when_absent():
+    params: dict = {}
+    apply_resilience_defaults(params)
+    assert params["timeout"] == DEFAULT_TIMEOUT_S
+    assert params["max_retries"] == DEFAULT_MAX_RETRIES
+
+
+def test_apply_resilience_defaults_caller_wins():
+    params = {"timeout": 7, "max_retries": 0}
+    apply_resilience_defaults(params)
+    assert params["timeout"] == 7  # caller value preserved
+    assert params["max_retries"] == 0
+
+
+def test_google_build_applies_default_timeout():
+    pytest.importorskip("langchain_google_genai")
+    importlib.import_module("aixon.providers.google")
+    os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+    model = get_provider("google").build("gemini-2.0-flash")
+    # Without a timeout a stalled stream hangs forever; the provider now injects
+    # a finite default so the request fails fast instead.
+    assert model.timeout == DEFAULT_TIMEOUT_S
+    assert model.max_retries == DEFAULT_MAX_RETRIES
+
+
+def test_google_build_caller_timeout_overrides_default():
+    pytest.importorskip("langchain_google_genai")
+    importlib.import_module("aixon.providers.google")
+    os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+    model = get_provider("google").build("gemini-2.0-flash", timeout=5, max_retries=1)
+    assert model.timeout == 5
+    assert model.max_retries == 1
