@@ -83,3 +83,57 @@ def test_astream_bridge_still_propagates_producer_exception():
 
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(consume())
+
+
+def test_astream_bridge_accepts_non_generator_iterator():
+    class PlainIteratorAgent(Agent):
+        def invoke(self, messages: list[Message]) -> Message:
+            return Message(role="assistant", content="x")
+
+        def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+            return iter([Chunk(content="a"), Chunk(content="b"), Chunk(done=True)])
+
+    async def consume() -> list[Chunk]:
+        agent = PlainIteratorAgent()
+        return [c async for c in agent.astream([Message(role="user", content="hi")])]
+
+    chunks = asyncio.run(asyncio.wait_for(consume(), timeout=5))
+    assert "".join(c.content for c in chunks) == "ab"
+    assert chunks[-1].done is True
+
+
+def test_astream_bridge_non_generator_early_break():
+    class PlainIteratorAgent(Agent):
+        def invoke(self, messages: list[Message]) -> Message:
+            return Message(role="assistant", content="x")
+
+        def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+            return iter([Chunk(content=str(i)) for i in range(200)])
+
+    async def consume() -> int:
+        agent = PlainIteratorAgent()
+        got = 0
+        async for _ in agent.astream([Message(role="user", content="hi")]):
+            got += 1
+            if got == 1:
+                break
+        return got
+
+    assert asyncio.run(asyncio.wait_for(consume(), timeout=5)) == 1
+
+
+def test_astream_bridge_stream_raises_before_iteration():
+    class EagerRaiseAgent(Agent):
+        def invoke(self, messages: list[Message]) -> Message:
+            return Message(role="assistant", content="x")
+
+        def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+            raise RuntimeError("eager")
+
+    async def consume() -> None:
+        agent = EagerRaiseAgent()
+        async for _ in agent.astream([Message(role="user", content="hi")]):
+            pass
+
+    with pytest.raises(RuntimeError, match="eager"):
+        asyncio.run(asyncio.wait_for(consume(), timeout=5))
