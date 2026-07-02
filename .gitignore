@@ -35,8 +35,9 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
-# Internal scratch (SDD journal — not part of the package)
+# Internal scratch (SDD journal + plans — not part of the package)
 .superpowers/
+docs/superpowers/
 
 # Claude Code local settings
 .claude/
