@@ -8,6 +8,7 @@ LangGraph lives entirely inside this module and ``aixon.state``."""
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, AsyncIterator, Iterator
 
@@ -271,6 +272,13 @@ class Orchestrator(Agent, abstract=True):
         )
         reply = self.supervisor.complete([system, *messages])
         text = (reply.content or "").strip().lower()
+        # DONE wins BEFORE any name matching: a reply like "DONE — billing
+        # already answered this" must terminate, not substring-match a worker
+        # and re-dispatch an already-answered turn. Accept an exact "done" or
+        # "done" as a standalone leading word; a reply that merely names a
+        # worker (e.g. "billing should handle it") still routes below.
+        if re.match(r"done\b", text):
+            return ""
         for name in workers:                 # exact match wins
             if text == name.lower():
                 return name
@@ -400,7 +408,7 @@ class Orchestrator(Agent, abstract=True):
         with reasoning_channel() as channel:
             final = self.invoke(messages)
             for line in channel.drain():
-                yield Chunk(reasoning=line)
+                yield Chunk(reasoning=line + "\n")
         if final.reasoning:
             yield Chunk(reasoning=final.reasoning)
         yield Chunk(content=final.content)
@@ -450,7 +458,7 @@ class Orchestrator(Agent, abstract=True):
         with reasoning_channel() as channel:
             final = await self.ainvoke(messages)
             for line in channel.drain():
-                yield Chunk(reasoning=line)
+                yield Chunk(reasoning=line + "\n")
         if final.reasoning:
             yield Chunk(reasoning=final.reasoning)
         yield Chunk(content=final.content)

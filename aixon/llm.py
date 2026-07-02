@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
-from aixon._interop.messages import from_langchain, to_langchain
+from aixon._interop.messages import _flatten_content, from_langchain, to_langchain
 from aixon.message import Chunk, Message
 
 if TYPE_CHECKING:
@@ -70,8 +70,9 @@ class LLM:
         or a single AIMessage (the fake, which has no _stream).
         """
         for lc_chunk in self._bound_model().stream(to_langchain(messages)):
-            content = getattr(lc_chunk, "content", "")
-            if isinstance(content, str) and content:
+            # Some providers stream list-of-blocks deltas; flatten to text.
+            content = _flatten_content(getattr(lc_chunk, "content", ""))
+            if content:
                 yield Chunk(content=content)
         yield Chunk(done=True)
 
@@ -85,7 +86,8 @@ class LLM:
         """Async neutral streaming. Used by LLMAgent.astream. Mirrors stream()
         over the model's native ``astream``."""
         async for lc_chunk in self._bound_model().astream(to_langchain(messages)):
-            content = getattr(lc_chunk, "content", "")
-            if isinstance(content, str) and content:
+            # Some providers stream list-of-blocks deltas; flatten to text.
+            content = _flatten_content(getattr(lc_chunk, "content", ""))
+            if content:
                 yield Chunk(content=content)
         yield Chunk(done=True)

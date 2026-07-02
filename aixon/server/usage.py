@@ -25,9 +25,13 @@ def count_tokens(model: str, text: str) -> int | None:
     is unavailable."""
     try:
         enc = _encoding(model)
+        # disallowed_special=() treats special-token markers in user text
+        # (e.g. "<|endoftext|>") as plain text; tiktoken's default raises
+        # ValueError on them, which would break the graceful-degradation
+        # promise for user-controlled content.
+        return len(enc.encode(text or "", disallowed_special=()))
     except Exception:
         return None
-    return len(enc.encode(text or ""))
 
 
 def build_usage(model: str, prompt_text: str, completion_text: str) -> dict:

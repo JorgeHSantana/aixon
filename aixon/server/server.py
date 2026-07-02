@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hmac
+import json
 import os
 from typing import Optional
 
@@ -38,7 +39,9 @@ def _valid_token(raw: str) -> bool:
 class _AuthMiddleware:
     """Pure-ASGI Bearer middleware. No-op when AUTH_API_KEY is unset. Does not
     buffer the body, so SSE streaming is unaffected. ``public_paths`` are
-    matched by exact path."""
+    matched by exact path AND read-only method (GET/HEAD): the public set only
+    ever holds GET routes (/health + model lists), so an adapter that mounts a
+    POST on the same path keeps that POST guarded."""
 
     def __init__(self, app, public_paths):
         self.app = app
@@ -47,7 +50,8 @@ class _AuthMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not os.getenv("AUTH_API_KEY"):
             return await self.app(scope, receive, send)
-        if scope.get("path", "") in self.public:
+        if scope.get("method", "").upper() in ("GET", "HEAD") \
+                and scope.get("path", "") in self.public:
             return await self.app(scope, receive, send)
         headers = dict(scope.get("headers", []))
         auth = headers.get(b"authorization", b"").decode("utf-8", "ignore")
@@ -182,7 +186,20 @@ class Server:
         from starlette.responses import JSONResponse, StreamingResponse
 
         async def chat(request: Request):
-            body = await request.json()
+            try:
+                body = await request.json()
+            except Exception:
+                body = None
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": "Request body must be a JSON object.",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                    status_code=400,
+                )
             pr = adapter.parse_request(body, path=path)
             try:
                 agent = get_registry().resolve(pr.model)
@@ -198,23 +215,48 @@ class Server:
                 session = adapter.open_stream(model=model, request=pr)
 
                 async def gen():
-                    with generation_params(pr.params):
-                        async for chunk in agent.astream(pr.messages):
-                            line = session.chunk(chunk)
-                            if line:
-                                yield line
-                    tail = session.finish()
-                    if tail:
-                        yield tail
-                    yield session.done()
+                    # A mid-stream failure (provider hard-wall timeout, usage
+                    # counting, adapter bug) fires AFTER the 200/text/event-stream
+                    # headers went out, so it must not propagate into Starlette
+                    # (which would abort the response with a truncated stream).
+                    # Emit an error event instead, then still close the stream.
+                    try:
+                        with generation_params(pr.params):
+                            async for chunk in agent.astream(pr.messages):
+                                line = session.chunk(chunk)
+                                if line:
+                                    yield line
+                        tail = session.finish()
+                        if tail:
+                            yield tail
+                    except Exception as exc:
+                        _log.error(
+                            f"{adapter.name}: stream via agent '{agent.name}' "
+                            f"failed: {exc}"
+                        )
+                        payload = {
+                            "error": {"message": str(exc), "type": "server_error"}
+                        }
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    try:
+                        yield session.done()
+                    except Exception:
+                        pass  # never re-raise through Starlette mid-stream
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
             # await ainvoke (async-native or threaded bridge) so the LLM call
             # never blocks the event loop. Request generation params are active
             # for the duration of the call via the runtime contextvar.
-            with generation_params(pr.params):
-                message = await agent.ainvoke(pr.messages)
+            try:
+                with generation_params(pr.params):
+                    message = await agent.ainvoke(pr.messages)
+            except Exception as exc:
+                _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")
+                return JSONResponse(
+                    {"error": {"message": str(exc), "type": "server_error"}},
+                    status_code=500,
+                )
             prompt_text = "\n".join(m.content for m in pr.messages)
             completion_text = message.content
             if message.reasoning:

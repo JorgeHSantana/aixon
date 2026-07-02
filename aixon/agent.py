@@ -51,8 +51,15 @@ class Agent(ABC):
             cls._abstract = True
             return
         cls._abstract = False
+        # Declarative metadata is per-class, never inherited from a concrete
+        # parent: a subclass gets its own aliases, its own default name and its
+        # own registration (an inherited name/_registered would silently skip
+        # registration or collide in the registry).
+        cls._registered = False
         if "aliases" not in vars(cls):
             cls.aliases = []
+        if not vars(cls).get("name"):
+            cls.name = cls.__name__.lower()
         if not cls.__name__.endswith(cls._suffix):
             raise NamingError(
                 f"Agent subclass '{cls.__name__}' must end with '{cls._suffix}' "
@@ -84,10 +91,12 @@ class Agent(ABC):
         implementation is a no-op."""
 
     def __init__(self) -> None:
+        # Default name is set on the CLASS (before the register-once
+        # short-circuit) so every instance carries it, not just the first.
+        if not self.name:
+            type(self).name = type(self).__name__.lower()
         if type(self)._registered:
             return
-        if not self.name:
-            self.name = type(self).__name__.lower()
         get_registry().register(self)
         type(self)._registered = True
 
@@ -119,6 +128,7 @@ class Agent(ABC):
         (``break``), the background thread runs the sync ``stream`` to completion
         before this returns — fine for finite streams."""
         import asyncio
+        import contextvars
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue" = asyncio.Queue()
@@ -131,7 +141,12 @@ class Agent(ABC):
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, done)
 
-        fut = loop.run_in_executor(None, _producer)
+        # run_in_executor does not propagate contextvars (unlike asyncio.to_thread),
+        # so run the producer inside a copy of the caller's context — otherwise
+        # generation_params()/reasoning_channel() set around astream() are
+        # invisible to the bridged sync stream().
+        ctx = contextvars.copy_context()
+        fut = loop.run_in_executor(None, ctx.run, _producer)
         try:
             while True:
                 item = await queue.get()

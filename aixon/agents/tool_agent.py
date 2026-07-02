@@ -97,6 +97,17 @@ class ToolAgent(Agent, abstract=True):
             if name:
                 emit_reasoning(self.tool_call_label.format(name=name))
 
+    def _iteration_limit_error(self, exc: Exception) -> AixonError:
+        """AixonError for an exhausted iteration budget (LangGraph's recursion
+        limit), matching the Orchestrator's wrapping style: the neutral
+        boundary must not leak a raw GraphRecursionError naming an internal
+        recursion limit the user never set."""
+        return AixonError(
+            f"agent '{self.name}' hit its iteration limit (max_iterations="
+            f"{self.max_iterations}) without producing a final answer. Raise "
+            f"`max_iterations` or simplify the task. (LangGraph: {exc})"
+        )
+
     # ---- neutral boundary: invoke ---------------------------------------
 
     def invoke(self, messages: list[Message]) -> Message:
@@ -112,12 +123,17 @@ class ToolAgent(Agent, abstract=True):
         from aixon._interop.messages import from_langchain
         from contextlib import nullcontext
 
+        from langgraph.errors import GraphRecursionError
+
         agent, lc_messages, config = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         outer_channel = current_channel()
         cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
         with cm as channel:
-            result = agent.invoke({"messages": lc_messages}, config=config)
+            try:
+                result = agent.invoke({"messages": lc_messages}, config=config)
+            except GraphRecursionError as exc:
+                raise self._iteration_limit_error(exc) from exc
             # Derive parent tool-call labels from the AI messages in the result.
             for m in result["messages"]:
                 if getattr(m, "type", "") == "ai":
@@ -148,33 +164,43 @@ class ToolAgent(Agent, abstract=True):
         Chunk(done=True)."""
         from aixon._interop.messages import _flatten_content
 
+        from langgraph.errors import GraphRecursionError
+
         agent, lc_messages, config = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
         with reasoning_channel() as channel:
-            for update in agent.stream(
-                {"messages": lc_messages}, config=config, stream_mode="updates"
-            ):
-                # Each update is {node_name: {"messages": [...]}}.
-                for node_state in update.values():
-                    for m in node_state.get("messages", []) or []:
-                        if getattr(m, "type", "") == "ai":
-                            self._emit_tool_call_labels(m)
-                            content = _flatten_content(getattr(m, "content", ""))
-                            if content:
-                                final_content = content
-                # Surface reasoning accrued since the last update (parent labels
-                # + any nested-agent emit_reasoning) before yielding content.
-                for line in channel.drain():
-                    yield Chunk(reasoning=line + "\n")
-                if time.monotonic() > deadline:
-                    emit_reasoning(
-                        f"(stopped: exceeded max_execution_time "
-                        f"{self.max_execution_time}s)"
-                    )
+            try:
+                for update in agent.stream(
+                    {"messages": lc_messages}, config=config, stream_mode="updates"
+                ):
+                    # Each update is {node_name: {"messages": [...]}}.
+                    for node_state in update.values():
+                        for m in node_state.get("messages", []) or []:
+                            if getattr(m, "type", "") == "ai":
+                                self._emit_tool_call_labels(m)
+                                # Only an AI message WITHOUT tool calls is a
+                                # final answer; content on a tool-calling
+                                # message is preamble thought and must not be
+                                # surfaced as the answer on a deadline break.
+                                if not (getattr(m, "tool_calls", None) or []):
+                                    content = _flatten_content(getattr(m, "content", ""))
+                                    if content:
+                                        final_content = content
+                    # Surface reasoning accrued since the last update (parent labels
+                    # + any nested-agent emit_reasoning) before yielding content.
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
-                    break
+                    if time.monotonic() > deadline:
+                        emit_reasoning(
+                            f"(stopped: exceeded max_execution_time "
+                            f"{self.max_execution_time}s)"
+                        )
+                        for line in channel.drain():
+                            yield Chunk(reasoning=line + "\n")
+                        break
+            except GraphRecursionError as exc:
+                raise self._iteration_limit_error(exc) from exc
             # Any trailing reasoning emitted after the last update.
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
@@ -192,6 +218,8 @@ class ToolAgent(Agent, abstract=True):
         import asyncio
         from contextlib import nullcontext
 
+        from langgraph.errors import GraphRecursionError
+
         from aixon._interop.messages import from_langchain
 
         agent, lc_messages, config = self._build_agent(messages)
@@ -208,6 +236,8 @@ class ToolAgent(Agent, abstract=True):
                     f"agent '{self.name}' exceeded max_execution_time "
                     f"({self.max_execution_time}s); the run was cancelled."
                 )
+            except GraphRecursionError as exc:
+                raise self._iteration_limit_error(exc) from exc
             for m in result["messages"]:
                 if getattr(m, "type", "") == "ai":
                     self._emit_tool_call_labels(m)
@@ -229,6 +259,8 @@ class ToolAgent(Agent, abstract=True):
         stream is closed on the way out.
         """
         import asyncio
+
+        from langgraph.errors import GraphRecursionError
 
         from aixon._interop.messages import _flatten_content
 
@@ -255,13 +287,20 @@ class ToolAgent(Agent, abstract=True):
                     except asyncio.TimeoutError:
                         timed_out = True
                         break
+                    except GraphRecursionError as exc:
+                        raise self._iteration_limit_error(exc) from exc
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
                             if getattr(m, "type", "") == "ai":
                                 self._emit_tool_call_labels(m)
-                                content = _flatten_content(getattr(m, "content", ""))
-                                if content:
-                                    final_content = content
+                                # Only an AI message WITHOUT tool calls is a
+                                # final answer (see stream): preamble thought
+                                # on a tool-calling message must not become
+                                # the answer when the deadline breaks the run.
+                                if not (getattr(m, "tool_calls", None) or []):
+                                    content = _flatten_content(getattr(m, "content", ""))
+                                    if content:
+                                        final_content = content
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
             finally:

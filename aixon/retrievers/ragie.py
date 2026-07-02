@@ -100,6 +100,10 @@ class RagieRetriever(Retriever):
               source_ids: list[str] | None = None) -> list[str]:
         if self.type_access == TypeAccess.READ:
             return super().write(texts, metadatas)  # raises AixonError
+        if metadatas is not None and len(metadatas) != len(texts):
+            raise ValueError(
+                f"metadatas length ({len(metadatas)}) must match texts length "
+                f"({len(texts)}).")
         metadatas = metadatas or [{} for _ in texts]
         client = self._get_client()
         ids: list[str] = []

@@ -4,6 +4,7 @@ route requests and build menus."""
 
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from aixon.exceptions import AgentNotFoundError, RegistrationError
@@ -17,24 +18,28 @@ class Registry:
         self._agents: dict[str, object] = {}   # name -> agent
         self._aliases: dict[str, str] = {}      # alias -> name
         self._order: list[str] = []             # registration order of names
+        # Serializes register()'s check-then-insert so concurrent registrations
+        # cannot both pass the uniqueness check.
+        self._lock = threading.Lock()
 
     def register(self, agent: object) -> None:
-        name = agent.name
-        if name in self._agents or name in self._aliases:
-            raise RegistrationError(
-                f"Agent name '{name}' is already registered. Names and aliases "
-                f"must be unique across the registry."
-            )
-        for alias in agent.aliases:
-            if alias in self._agents or alias in self._aliases:
+        with self._lock:
+            name = agent.name
+            if name in self._agents or name in self._aliases:
                 raise RegistrationError(
-                    f"Alias '{alias}' (on agent '{name}') collides with an "
-                    f"existing name or alias."
+                    f"Agent name '{name}' is already registered. Names and aliases "
+                    f"must be unique across the registry."
                 )
-        self._agents[name] = agent
-        self._order.append(name)
-        for alias in agent.aliases:
-            self._aliases[alias] = name
+            for alias in agent.aliases:
+                if alias in self._agents or alias in self._aliases:
+                    raise RegistrationError(
+                        f"Alias '{alias}' (on agent '{name}') collides with an "
+                        f"existing name or alias."
+                    )
+            self._agents[name] = agent
+            self._order.append(name)
+            for alias in agent.aliases:
+                self._aliases[alias] = name
         hidden = " (hidden)" if agent.hidden else ""
         _log.info(f"registered agent '{name}'{hidden} aliases={agent.aliases}")
 
@@ -63,16 +68,35 @@ class Registry:
         self._agents.clear()
         self._aliases.clear()
         self._order.clear()
+        # Keep the class-side flags in sync with the emptied registry, otherwise
+        # Agent.__init__ would short-circuit forever and nothing could ever
+        # re-register (the same desync reset_registry guards against).
+        _reset_registered_flags()
+
+
+def _reset_registered_flags() -> None:
+    """Clear ``_registered`` on Agent and every subclass. Imported lazily to
+    avoid a registry<->agent import cycle."""
+    from aixon.agent import Agent
+
+    stack = [Agent]
+    while stack:
+        cls = stack.pop()
+        cls._registered = False
+        stack.extend(cls.__subclasses__())
 
 
 _registry: Optional[Registry] = None
+# Guards the lazy creation in get_registry() against concurrent first calls.
+_registry_lock = threading.Lock()
 
 
 def get_registry() -> Registry:
     global _registry
-    if _registry is None:
-        _registry = Registry()
-    return _registry
+    with _registry_lock:
+        if _registry is None:
+            _registry = Registry()
+        return _registry
 
 
 def reset_registry() -> None:
@@ -86,10 +110,4 @@ def reset_registry() -> None:
     registry<->agent import cycle."""
     global _registry
     _registry = Registry()
-    from aixon.agent import Agent
-
-    stack = [Agent]
-    while stack:
-        cls = stack.pop()
-        cls._registered = False
-        stack.extend(cls.__subclasses__())
+    _reset_registered_flags()

@@ -19,6 +19,20 @@ from aixon.server.protocol import Chunk, Message, ParsedRequest, ProtocolAdapter
 _TRANSPORT_FIELDS = frozenset({"model", "messages", "stream"})
 
 
+def _flatten_content(content) -> str:
+    """OpenAI content may be a string or a list of typed parts. Flatten the
+    text parts to neutral plain text (same shape as the Anthropic adapter)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
 class OpenAIAdapter(ProtocolAdapter):
     name = "openai"
 
@@ -30,7 +44,7 @@ class OpenAIAdapter(ProtocolAdapter):
             messages.append(
                 Message(
                     role=m.get("role", "user"),
-                    content=m.get("content") or "",
+                    content=_flatten_content(m.get("content")),
                     name=m.get("name"),
                     tool_call_id=m.get("tool_call_id"),
                 )
@@ -163,7 +177,9 @@ class _OpenAIStreamSession(StreamSession):
             if self.mode == "custom":
                 out += self._line({"reasoning": chunk.reasoning})
             elif self.mode == "content":
-                text = ("\n" if self._think_open else "<think>\n") + chunk.reasoning
+                # "<think>\n" once on open; later reasoning deltas are raw
+                # token-level fragments — no separator between them.
+                text = ("" if self._think_open else "<think>\n") + chunk.reasoning
                 self._think_open = True
                 out += self._line({"content": text})
             # hidden: drop reasoning

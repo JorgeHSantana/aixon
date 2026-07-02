@@ -85,6 +85,7 @@ class WeaviateRetriever(Retriever):
         self._owns_client = client is None
         self._vectorstore: Any = None
         self._splitter: Any = None
+        self._ranker: Any = None
 
     def _ensure(self) -> None:
         """Monta client + vectorstore + splitter uma vez (lazy)."""
@@ -139,7 +140,9 @@ class WeaviateRetriever(Retriever):
         if self.rerank:
             docs = self._vectorstore.similarity_search(
                 query, **self._search_kwargs(self.rerank_fetch_k, filters))
-            return self._rerank(query, docs)
+            # Rerank fetches rerank_fetch_k candidates for quality, but the
+            # result must respect the effective k (contract: k = max results).
+            return self._rerank(query, docs)[: k or self.max_query_results]
         docs = self._vectorstore.similarity_search(
             query, **self._search_kwargs(k, filters))
         return [self._to_dict(d) for d in docs]
@@ -154,7 +157,9 @@ class WeaviateRetriever(Retriever):
             ) from exc
         if not docs:
             return []
-        ranker = Ranker()
+        if self._ranker is None:  # lazy, cached (ONNX model load is expensive)
+            self._ranker = Ranker()
+        ranker = self._ranker
         passages = [{"id": str(i), "text": d.page_content, "meta": d.metadata}
                     for i, d in enumerate(docs)]
         ranked = ranker.rerank(RerankRequest(query=query, passages=passages))
@@ -169,6 +174,10 @@ class WeaviateRetriever(Retriever):
               source_ids: list[str] | None = None) -> list[str]:
         if self.type_access == TypeAccess.READ:
             return super().write(texts, metadatas)  # raises AixonError
+        if metadatas is not None and len(metadatas) != len(texts):
+            raise ValueError(
+                f"metadatas length ({len(metadatas)}) must match texts length "
+                f"({len(texts)}).")
         self._ensure()
         metadatas = metadatas or [{} for _ in texts]
         all_texts: list[str] = []
@@ -196,3 +205,7 @@ class WeaviateRetriever(Retriever):
     def close(self) -> None:
         if self._owns_client and self._client is not None:
             self._client.close()
+            self._client = None
+        # Reset lazy state so the next search/write reconnects via _ensure()
+        # instead of dying on a closed client.
+        self._vectorstore = None

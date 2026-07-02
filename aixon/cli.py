@@ -31,6 +31,25 @@ def _ensure_cwd_on_path() -> None:
     if cwd not in sys.path:
         sys.path.insert(0, cwd)
 
+
+def _autodiscover_quietly(package: str) -> None:
+    """Autodiscover ``package``, staying quiet ONLY when the package itself is
+    absent (the normal "no agents/ directory here" case). An ImportError raised
+    INSIDE a user's agent module (e.g. agents/weather.py importing a missing
+    lib) is surfaced — silently swallowing it would print "No agents
+    registered." with zero diagnostics or serve a partial agent list."""
+    try:
+        autodiscover(package)
+    except ModuleNotFoundError as exc:
+        name = exc.name or ""
+        if name and (package == name or package.startswith(name + ".")):
+            return  # graceful: no agents package in this directory
+        click.echo(f"Warning: error importing agents from '{package}': {exc}", err=True)
+    except ImportError as exc:
+        click.echo(f"Warning: error importing agents from '{package}': {exc}", err=True)
+    except ValueError:
+        pass  # graceful: name exists but is not a package
+
 # ---------------------------------------------------------------------------
 # OpenAI — module-level import so tests can patch aixon.cli.OpenAI
 # ---------------------------------------------------------------------------
@@ -76,10 +95,7 @@ def app() -> None:
 def list_command(package: str) -> None:
     """List registered agents."""
     _ensure_cwd_on_path()
-    try:
-        autodiscover(package)
-    except (ImportError, ModuleNotFoundError, ValueError):
-        pass  # graceful: no agents package in this directory
+    _autodiscover_quietly(package)
 
     agents = get_registry().public()
     if not agents:
@@ -156,6 +172,10 @@ def _stream_inprocess(agent: object, messages: list) -> str:
                 click.echo()  # final newline
     except KeyboardInterrupt:
         click.echo()  # ensure newline after interrupted output
+    except Exception as exc:
+        # A provider error must not crash the CLI and lose the conversation —
+        # report it and return to the prompt (same pattern as remote mode).
+        click.echo(f"\nError: {exc}", err=True)
     return "".join(parts)
 
 
@@ -163,10 +183,7 @@ def _chat_inprocess(package: str) -> None:
     from aixon.message import Message
 
     _ensure_cwd_on_path()
-    try:
-        autodiscover(package)
-    except (ImportError, ModuleNotFoundError, ValueError):
-        pass
+    _autodiscover_quietly(package)
 
     agent = _pick_agent()
     if agent is None:
@@ -239,63 +256,70 @@ def _chat_remote(url: str) -> None:
         return
 
     click.echo(f"\nConnected to {url}")
-    click.echo("--- Remote Agents ---")
-    for i, name in enumerate(remote_agents, 1):
-        click.echo(f"  {i}. {name}")
-    click.echo("  0. Exit\n")
 
+    # Outer loop: /menu breaks back here instead of recursing into
+    # _chat_remote (recursion grew a stack frame per /menu -> RecursionError
+    # in long sessions). Mirrors the in-process chat's loop pattern.
     while True:
-        raw = click.prompt("Choose", default="1")
-        if raw.strip() == "0":
-            return
-        try:
-            idx = int(raw.strip()) - 1
-            if 0 <= idx < len(remote_agents):
-                chosen_model = remote_agents[idx]
-                break
-        except ValueError:
-            pass
-        click.echo("Invalid choice, try again.")
+        click.echo("--- Remote Agents ---")
+        for i, name in enumerate(remote_agents, 1):
+            click.echo(f"  {i}. {name}")
+        click.echo("  0. Exit\n")
 
-    messages: list[dict] = []
+        while True:
+            raw = click.prompt("Choose", default="1")
+            if raw.strip() == "0":
+                return
+            try:
+                idx = int(raw.strip()) - 1
+                if 0 <= idx < len(remote_agents):
+                    chosen_model = remote_agents[idx]
+                    break
+            except ValueError:
+                pass
+            click.echo("Invalid choice, try again.")
 
-    while True:
-        try:
-            user_input = click.prompt("\nYou", prompt_suffix="> ")
-        except click.Abort:
+        messages: list[dict] = []
+        back_to_menu = False
+
+        while not back_to_menu:
+            try:
+                user_input = click.prompt("\nYou", prompt_suffix="> ")
+            except click.Abort:
+                click.echo()
+                return
+
+            stripped = user_input.strip()
+            if stripped == "/exit":
+                click.echo("Goodbye.")
+                return
+            if stripped == "/menu":
+                back_to_menu = True  # re-enter menu via the outer loop
+                continue
+            if not stripped:
+                continue
+
+            messages.append({"role": "user", "content": stripped})
+
             click.echo()
-            return
-
-        stripped = user_input.strip()
-        if stripped == "/exit":
-            click.echo("Goodbye.")
-            return
-        if stripped == "/menu":
-            return _chat_remote(url)  # re-enter menu
-        if not stripped:
-            continue
-
-        messages.append({"role": "user", "content": stripped})
-
-        click.echo()
-        try:
-            stream = client.chat.completions.create(
-                model=chosen_model,
-                messages=messages,
-                stream=True,
-            )
-            collected = []
-            for event in stream:
-                delta = event.choices[0].delta if event.choices else None
-                if delta and delta.content:
-                    click.echo(delta.content, nl=False)
-                    collected.append(delta.content)
-            click.echo()
-            messages.append({"role": "assistant", "content": "".join(collected)})
-        except KeyboardInterrupt:
-            click.echo()
-        except Exception as exc:
-            click.echo(f"\nError: {exc}", err=True)
+            try:
+                stream = client.chat.completions.create(
+                    model=chosen_model,
+                    messages=messages,
+                    stream=True,
+                )
+                collected = []
+                for event in stream:
+                    delta = event.choices[0].delta if event.choices else None
+                    if delta and delta.content:
+                        click.echo(delta.content, nl=False)
+                        collected.append(delta.content)
+                click.echo()
+                messages.append({"role": "assistant", "content": "".join(collected)})
+            except KeyboardInterrupt:
+                click.echo()
+            except Exception as exc:
+                click.echo(f"\nError: {exc}", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +426,22 @@ def new_command(name: str) -> None:
                    "(in addition to OpenAI at /v1).")
 def serve_command(host: str, port: int, package: str, anthropic: bool) -> None:
     """Start the aixon server."""
+    # Probe the extra's deps explicitly: aixon.server.server itself imports
+    # only stdlib at module level (fastapi/uvicorn are lazy), so the import
+    # below SUCCEEDS on a bare install and the user would otherwise get a raw
+    # ModuleNotFoundError traceback deep inside serve().
+    import importlib.util
+
+    missing = [m for m in ("fastapi", "uvicorn") if importlib.util.find_spec(m) is None]
+    if missing:
+        click.echo(
+            "The server extra is required for 'serve' "
+            f"(missing: {', '.join(missing)}). "
+            "Install with: pip install 'aixon[server]'",
+            err=True,
+        )
+        raise SystemExit(1)
+
     try:
         from aixon.server.server import Server
         from aixon.server.adapters.openai import OpenAIAdapter
