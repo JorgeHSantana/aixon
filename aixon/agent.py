@@ -124,22 +124,41 @@ class Agent(ABC):
         Async-native subtypes override this.
 
         A producer exception is re-raised to the consumer (via ``await fut``)
-        after any chunks produced before it. Note: if the consumer stops early
-        (``break``), the background thread runs the sync ``stream`` to completion
-        before this returns — fine for finite streams."""
+        after any chunks produced before it. If the consumer stops early
+        (``break``), a stop event makes the producer abandon the sync stream
+        within at most one further chunk and, if it is a generator, ``close()``
+        it (running its ``finally`` blocks) instead of draining it to
+        completion. ``stream()``'s contract is ``Iterator[Chunk]``, not
+        ``Generator``, so plain iterators (no ``close()``) are accepted too;
+        the done sentinel is always enqueued, even if ``close()`` raises or
+        ``stream()`` itself raises before returning."""
         import asyncio
         import contextvars
+        import threading
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue" = asyncio.Queue()
         done = object()
+        stop = threading.Event()
 
         def _producer() -> None:
             try:
-                for chunk in self.stream(messages):
+                gen = self.stream(messages)
+                for chunk in gen:
+                    if stop.is_set():
+                        break
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, done)
+                # stream() returns Iterator[Chunk], not necessarily a generator:
+                # only generators have close(). Guard it, and guarantee the done
+                # sentinel is enqueued even if close() raises, so the consumer
+                # never deadlocks waiting for a sentinel that never comes.
+                try:
+                    close = getattr(gen, "close", None) if "gen" in dir() else None
+                    if callable(close):
+                        close()
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, done)
 
         # run_in_executor does not propagate contextvars (unlike asyncio.to_thread),
         # so run the producer inside a copy of the caller's context — otherwise
@@ -154,6 +173,7 @@ class Agent(ABC):
                     break
                 yield item
         finally:
+            stop.set()
             await fut
 
     def as_tool(

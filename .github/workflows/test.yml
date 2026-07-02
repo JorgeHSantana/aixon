@@ -1,0 +1,19 @@
+name: Test
+
+# PR gate: publish.yml only runs on push to main, so without this a PR could
+# merge without the suite ever running on it. Install steps mirror publish.yml.
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[all,dev]"
+      - run: pytest -q
