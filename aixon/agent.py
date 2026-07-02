@@ -124,21 +124,30 @@ class Agent(ABC):
         Async-native subtypes override this.
 
         A producer exception is re-raised to the consumer (via ``await fut``)
-        after any chunks produced before it. Note: if the consumer stops early
-        (``break``), the background thread runs the sync ``stream`` to completion
-        before this returns — fine for finite streams."""
+        after any chunks produced before it. If the consumer stops early
+        (``break``), a stop event makes the producer abandon the sync stream
+        within at most one further chunk and ``close()`` the generator (running
+        its ``finally`` blocks) instead of draining it to completion."""
         import asyncio
         import contextvars
+        import threading
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue" = asyncio.Queue()
         done = object()
+        stop = threading.Event()
 
         def _producer() -> None:
+            gen = self.stream(messages)
             try:
-                for chunk in self.stream(messages):
+                for chunk in gen:
+                    if stop.is_set():
+                        break
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
             finally:
+                # close() is a no-op on an exhausted/raised generator; on an
+                # abandoned one it runs the generator's finally blocks.
+                gen.close()
                 loop.call_soon_threadsafe(queue.put_nowait, done)
 
         # run_in_executor does not propagate contextvars (unlike asyncio.to_thread),
@@ -154,6 +163,7 @@ class Agent(ABC):
                     break
                 yield item
         finally:
+            stop.set()
             await fut
 
     def as_tool(
