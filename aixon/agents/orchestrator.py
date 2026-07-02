@@ -251,9 +251,11 @@ class Orchestrator(Agent, abstract=True):
     def _supervisor_choose(self, messages: list[Message], workers: dict) -> str:
         """Run the supervisor LLM and return a worker name, or ``""`` for DONE.
 
-        Matches the reply against worker names (exact first, then substring,
-        since models add punctuation/words). Requires ``self.supervisor`` to be
-        an ``LLM`` (or anything exposing ``complete(list[Message]) -> Message``)."""
+        Parsing requires the reply to name exactly ONE worker (whole-word
+        match; exact reply wins; DONE always wins). A reply naming zero or
+        several workers gets one strict retry; if that also fails, ``""`` is
+        returned and ``_route``'s safety net decides. Requires
+        ``self.supervisor`` to expose ``complete(list[Message]) -> Message``."""
         roster = "\n".join(
             f"- {name}: {inst.description or 'no description'}"
             for name, inst in workers.items()
@@ -271,23 +273,47 @@ class Orchestrator(Agent, abstract=True):
             ),
         )
         reply = self.supervisor.complete([system, *messages])
-        text = (reply.content or "").strip().lower()
+        choice = self._parse_choice(reply.content, workers)
+        if choice is not None:
+            return choice
+        # One strict retry for a reply that names zero or several workers:
+        # cheaper than mis-routing, and a supervisor that still can't comply
+        # falls through to _route's safety net ("" -> DONE / first worker).
+        strict = Message(
+            role="system",
+            content=(
+                f"Your previous reply ({(reply.content or '').strip()!r}) did "
+                f"not name exactly one worker. Reply with EXACTLY one of: "
+                f"{', '.join(workers)} — or the single word DONE."
+            ),
+        )
+        reply = self.supervisor.complete([system, *messages, strict])
+        choice = self._parse_choice(reply.content, workers)
+        return choice if choice is not None else ""
+
+    def _parse_choice(self, content: str | None, workers: dict) -> str | None:
+        """Parse one supervisor reply: a worker name, ``""`` for DONE, or
+        ``None`` when the reply names zero or several workers (caller re-asks
+        once). Name matching is whole-word — bounded by anything that is not a
+        word character or hyphen — so a name never fires inside a longer token
+        ("order" does not match inside "order-history", "billing" does not
+        match inside "billings")."""
+        text = (content or "").strip().lower()
         # DONE wins BEFORE any name matching: a reply like "DONE — billing
-        # already answered this" must terminate, not substring-match a worker
-        # and re-dispatch an already-answered turn. Accept an exact "done" or
-        # "done" as a standalone leading word; a reply that merely names a
-        # worker (e.g. "billing should handle it") still routes below.
+        # already answered this" must terminate, not re-dispatch billing.
         if re.match(r"done\b", text):
             return ""
         for name in workers:                 # exact match wins
             if text == name.lower():
                 return name
-        # Substring fallback, longest name first so a more specific worker
-        # (e.g. "order-history") wins over a shorter one it contains ("order").
-        for name in sorted(workers, key=len, reverse=True):
-            if name.lower() in text:
-                return name
-        return ""  # DONE / unparseable
+        matched = [
+            name
+            for name in workers
+            if re.search(rf"(?<![\w-]){re.escape(name.lower())}(?![\w-])", text)
+        ]
+        if len(matched) == 1:
+            return matched[0]
+        return None  # zero or ambiguous — not a routing decision
 
     def _build_supervisor_graph(self, node_factory=None):
         node_factory = node_factory or self._make_worker_node
