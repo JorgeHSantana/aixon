@@ -25,10 +25,22 @@ class ReasoningChannel:
 
     def __init__(self) -> None:
         self._lines: list[str] = []
+        self._last: Optional[str] = None
 
     def emit(self, text: str) -> None:
         """Append one reasoning line."""
         self._lines.append(text)
+        self._last = text
+
+    @property
+    def last(self) -> Optional[str]:
+        """The most recent line ever emitted on this channel (or None).
+
+        Unlike ``lines``, survives ``drain()`` — consumers that dedupe against
+        the previous line (e.g. ToolAgent's tool-call labels) need the memory
+        to span drain boundaries, or a streaming loop that drains between graph
+        updates would let consecutive duplicates through."""
+        return self._last
 
     def drain(self) -> list[str]:
         """Return all buffered lines and clear the buffer."""

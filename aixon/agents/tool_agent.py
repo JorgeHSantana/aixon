@@ -90,12 +90,25 @@ class ToolAgent(Agent, abstract=True):
         call into the active ReasoningChannel (the langgraph-native equivalent
         of olympus' on_agent_action callback). The label text comes from
         ``self.tool_call_label``, a ``{name}``-templated string subclasses may
-        override (e.g. for a friendlier phrase or i18n)."""
+        override (e.g. for a friendlier phrase or i18n).
+
+        Consecutive duplicates are skipped: a run that calls the same tool N
+        times in a row (or a label that doesn't interpolate ``{name}``) would
+        otherwise spam N identical lines, which reads as noise — or a hang —
+        in chat UIs that render reasoning. The comparison is against the
+        channel's last line ever emitted (``ReasoningChannel.last``), so the
+        dedupe also holds across streaming drain boundaries and across
+        parent/nested agents sharing one channel."""
         tool_calls = getattr(message, "tool_calls", None) or []
         for call in tool_calls:
             name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
-            if name:
-                emit_reasoning(self.tool_call_label.format(name=name))
+            if not name:
+                continue
+            label = self.tool_call_label.format(name=name)
+            channel = current_channel()
+            if channel is not None and channel.last == label:
+                continue
+            emit_reasoning(label)
 
     def _iteration_limit_error(self, exc: Exception) -> AixonError:
         """AixonError for an exhausted iteration budget (LangGraph's recursion

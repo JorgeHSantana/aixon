@@ -138,7 +138,7 @@ class ResearchAgent(ToolAgent):
 | `tools` | `list` | `[]` | Mix of `AgentTool`, `Retriever`, LangChain `@tool` functions, or any callable. All are coerced to `BaseTool` internally via `coerce_tools`. |
 | `max_iterations` | `int` | `15` | Maximum tool-call rounds before the loop stops. |
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds. |
-| `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. |
+| `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
 
 **Tool coercion:** anything in `tools` is normalized at runtime:
 - An `AgentTool` (from `Agent.as_tool()` or `Retriever.as_tool()`) → `StructuredTool`

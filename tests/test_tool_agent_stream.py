@@ -127,3 +127,70 @@ def test_stream_no_tool_still_streams_content_and_done(monkeypatch):
 
     assert any("immediate answer" in c.content for c in chunks if c.content)
     assert chunks[-1].done is True
+
+
+def test_consecutive_duplicate_labels_are_deduped(monkeypatch):
+    # A run that calls the same tool repeatedly (or any tools sharing one
+    # label) must not spam the reasoning stream with identical consecutive
+    # lines: 8x "Calling schema_search..." reads as noise (or a hang) in
+    # chat UIs that render reasoning. Only the first of a consecutive run
+    # of identical labels is emitted.
+    def adder(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    class RepeatedCallsAgent(ToolAgent):
+        llm = LLM("fake-1", provider="fake")
+        tools = [adder]
+        tool_call_label = "Consultando o banco..."  # no {name}: same label every call
+
+    agent = get_registry().resolve("repeatedcallsagent")
+    _install(
+        monkeypatch,
+        agent.llm,
+        [
+            # two calls in one AI message + one more in the next round: three
+            # identical labels, across a drain boundary in stream().
+            AIMessage(content="", tool_calls=[
+                {"name": "adder", "args": {"a": 1, "b": 1}, "id": "c1"},
+                {"name": "adder", "args": {"a": 2, "b": 2}, "id": "c2"},
+            ]),
+            _tool_call("adder", {"a": 3, "b": 3}, id="c3"),
+            AIMessage(content="done"),
+        ],
+    )
+
+    reasoning = [c.reasoning for c in agent.stream([Message(role="user", content="add")]) if c.reasoning]
+    joined = "".join(reasoning)
+    assert joined.count("Consultando o banco...") == 1
+
+
+def test_distinct_labels_are_all_emitted(monkeypatch):
+    # Dedupe is only for CONSECUTIVE duplicates: distinct labels (default
+    # template interpolates the tool name) must all come through.
+    def adder(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    def multiplier(a: int, b: int) -> int:
+        """Multiply two integers."""
+        return a * b
+
+    class TwoToolsAgent(ToolAgent):
+        llm = LLM("fake-1", provider="fake")
+        tools = [adder, multiplier]
+
+    agent = get_registry().resolve("twotoolsagent")
+    _install(
+        monkeypatch,
+        agent.llm,
+        [
+            _tool_call("adder", {"a": 1, "b": 1}, id="c1"),
+            _tool_call("multiplier", {"a": 2, "b": 2}, id="c2"),
+            AIMessage(content="done"),
+        ],
+    )
+
+    reasoning = "".join(c.reasoning for c in agent.stream([Message(role="user", content="go")]) if c.reasoning)
+    assert "Calling adder..." in reasoning
+    assert "Calling multiplier..." in reasoning
