@@ -185,7 +185,7 @@ class ReflectiveAgent(Agent, abstract=True):
                 break
             emit_reasoning(self.retry_label.format(round=round_ + 1,
                                                    max=self.max_rounds))
-            msgs = self._retry_messages(messages, answer, verdict)
+            msgs = self._retry_messages(msgs, answer, verdict)
             answer = self._worker.invoke(msgs)
         emit_reasoning(self.exhausted_label)
         _log.info(
@@ -201,6 +201,43 @@ class ReflectiveAgent(Agent, abstract=True):
 
         with reasoning_channel() as channel:
             final = self.invoke(messages)
+            for line in channel.drain():
+                yield Chunk(reasoning=line + "\n")
+        if final.reasoning:
+            yield Chunk(reasoning=final.reasoning)
+        yield Chunk(content=final.content)
+        yield Chunk(done=True)
+
+    # ----- async neutral interface (native — no thread bridge) ----------------
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        msgs = list(messages)
+        answer = await self._worker.ainvoke(msgs)
+        for round_ in range(1, self.max_rounds + 1):
+            emit_reasoning(self.judge_label)
+            verdict = (
+                await self.judge_llm.acomplete(self._judge_messages(messages, answer))
+            ).content
+            if self._approved(verdict):
+                return answer
+            if round_ == self.max_rounds:
+                break
+            emit_reasoning(self.retry_label.format(round=round_ + 1,
+                                                   max=self.max_rounds))
+            msgs = self._retry_messages(msgs, answer, verdict)
+            answer = await self._worker.ainvoke(msgs)
+        emit_reasoning(self.exhausted_label)
+        _log.info(
+            f"reflective '{self.name}': rounds exhausted "
+            f"(max_rounds={self.max_rounds}); returning last attempt"
+        )
+        return answer
+
+    async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
+        from aixon.reasoning import reasoning_channel
+
+        with reasoning_channel() as channel:
+            final = await self.ainvoke(messages)
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
         if final.reasoning:

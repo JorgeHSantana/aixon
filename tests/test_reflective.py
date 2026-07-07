@@ -206,3 +206,13 @@ def test_as_tool_interface_uniforme():
     tool = r.as_tool(name="revisado")
     assert tool.name == "revisado"
     assert tool.func("pergunta") == "resposta via tool"
+
+
+def test_retries_acumulam_historico():
+    gen, calls = make_scripted_agent("gen15", ["v1", "v2", "v3"])
+    r = make_reflective("ref-hist", gen,
+                        ["1. Critica A.", "2. Critica B.", "APROVADO"])
+    r.invoke(USER)
+    # a 3ª chamada do worker vê AMBAS as críticas anteriores
+    third = "\n".join(m.content for m in calls[2])
+    assert "Critica A" in third and "Critica B" in third
