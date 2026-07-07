@@ -27,11 +27,13 @@ graph LR
     A --> LLM["LLM<br/>(Provider)"]
     A --> T["Tools<br/>(Retriever · Connector · Agent)"]
     A --> O["Orchestrator<br/>→ nodes (Agents)"]
+    A --> RF["ReflectiveAgent<br/>→ agent + judge_llm"]
 
     style SA fill:#4f46e5,color:#fff,stroke:none
     style A fill:#7c3aed,color:#fff,stroke:none
     style LLM fill:#9333ea,color:#fff,stroke:none
     style T fill:#a855f7,color:#fff,stroke:none
+    style RF fill:#a855f7,color:#fff,stroke:none
 ```
 
 The **neutral boundary** is the key design principle: every agent speaks only
@@ -130,7 +132,7 @@ Sync is the default; `ainvoke`/`astream` are **additive** and run non-blocking
 (native for `LLMAgent`/`ToolAgent`/`Orchestrator`, a thread-bridge for custom
 sync agents). The server `await`s them, so concurrent requests don't serialize.
 
-Three concrete subtypes cover the common cases. Pick the one that matches what
+Four concrete subtypes cover the common cases. Pick the one that matches what
 you need:
 
 | Subtype | When to use | Suffix required |
@@ -138,6 +140,7 @@ you need:
 | `LLMAgent` | Direct LLM call — no tools, no loop | `*Agent` |
 | `ToolAgent` | LLM + tool-calling loop (LangGraph `create_agent`) | `*Agent` |
 | `Orchestrator` | Multiple agents coordinated by a graph | `*Orchestrator` |
+| `ReflectiveAgent` | Wrap a worker agent in a generate → judge → retry review loop | `*Agent` |
 
 **Suffix rule:** every concrete subclass name must end with its declared suffix.
 Violating it raises `NamingError` at import time — before the server starts.
@@ -195,6 +198,25 @@ class SupportOrchestrator(Orchestrator):
 ```
 
 Three tiers — pick by complexity. See [docs/orchestrator.md](docs/orchestrator.md).
+
+---
+
+## ReflectiveAgent — evaluator-optimizer loop
+
+```python
+from aixon import ReflectiveAgent, LLM
+
+class ReviewedWriterAgent(ReflectiveAgent):
+    agent         = WriterAgent                  # worker: any Agent, class or instance
+    judge_llm     = LLM("gpt-4o-mini", temperature=0)
+    judge_rubric  = "The answer must cite a source for every fact it states."
+    max_rounds    = 3
+```
+
+Generate → judge against an objective rubric → on rejection, retry with the
+critique — up to `max_rounds`. Exhausting the rounds returns the last attempt
+rather than raising. See [docs/agents.md](docs/agents.md#reflectiveagent--evaluator-optimizer-loop)
+and the runnable [examples/reflective_review](examples/reflective_review).
 
 ---
 
@@ -287,6 +309,7 @@ with a mis-named class.
 | `LLMAgent` | `*Agent` | `PlannerAgent` |
 | `ToolAgent` | `*Agent` | `DiagnosisAgent` |
 | `Orchestrator` | `*Orchestrator` | `SupportOrchestrator` |
+| `ReflectiveAgent` | `*Agent` | `ReviewedWriterAgent` |
 | `Retriever` | `*Retriever` | `LibraryRetriever` |
 | `Connector` | `*Connector` | `CRMConnector` |
 
@@ -298,7 +321,7 @@ never registered.
 ## Documentation
 
 - [Architecture](docs/architecture.md) — layers, neutral boundary, protocol decoupling
-- [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, declarative API, `as_tool`, async
+- [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, `ReflectiveAgent`, declarative API, `as_tool`, async
 - [Orchestrator](docs/orchestrator.md) — three tiers, entry/topology, branching, recursion guards
 - [Server](docs/server.md) — `ProtocolAdapter`, adapters, auth, SSE
 - [Retrieval](docs/retrieval.md) — `Retriever`, `Embedding`, `Connector`
@@ -306,6 +329,7 @@ never registered.
 - [CLI](docs/cli.md) — `chat`, `new`, `serve`, `list`
 - [Quickstart](docs/quickstart.md) — consumer project walkthrough
 - [Example](examples/support_assistant) — a complete multi-agent support assistant, runnable offline
+- [Example: Reflective Review](examples/reflective_review) — the `ReflectiveAgent` loop, runnable offline
 
 ---
 

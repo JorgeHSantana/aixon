@@ -1,0 +1,3 @@
+# This example needs only the framework core (no server, no provider SDK —
+# the demo provider is defined inline and everything runs offline).
+aixon

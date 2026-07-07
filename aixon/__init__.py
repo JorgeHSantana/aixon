@@ -10,6 +10,7 @@ except PackageNotFoundError:  # not installed (e.g. running from a source checko
 from aixon.agent import Agent, AgentTool
 from aixon.agents.llm_agent import LLMAgent
 from aixon.agents.orchestrator import Orchestrator
+from aixon.agents.reflective import ReflectiveAgent
 from aixon.agents.tool_agent import ToolAgent
 from aixon.connector import Connector, HttpToolConnector
 from aixon.discovery import autodiscover
@@ -62,6 +63,7 @@ __all__ = [
     "ToolAgent",
     # Plan 4 — orchestrator + graph state
     "Orchestrator",
+    "ReflectiveAgent",
     "GraphState",
     "END",
     # Plan 7 — retriever + embedding + connector
