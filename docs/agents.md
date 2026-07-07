@@ -170,6 +170,84 @@ across nesting levels.
 
 ---
 
+## ReflectiveAgent — evaluator-optimizer loop
+
+Use `ReflectiveAgent` when a single generation pass isn't reliable enough:
+it wraps a worker `Agent` in a review loop — a judge LLM scores each answer
+against an objective rubric, and a rejected answer goes back to the worker
+together with the judge's critique, up to `max_rounds` attempts.
+
+```python
+from aixon import LLM, ReflectiveAgent
+from agents.gerente import GerenteAgent
+
+class GerenteRevisadoAgent(ReflectiveAgent):
+    name = "gerente-revisado"
+    agent = GerenteAgent                 # class OR instance (like Orchestrator nodes)
+    judge_llm = LLM("gpt-5.4-mini", temperature=0)
+    judge_rubric = (
+        "1. Every SQL statement returned was validated (no non-existent column).\n"
+        "2. Any number quoted matches what the tools returned.\n"
+        "3. The answer addresses the entire question."
+    )
+    max_rounds = 3
+```
+
+**`ReflectiveAgent` attributes:**
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `agent` | `Agent` (class or instance) | **Yes** | The worker that produces answers. Resolved once, at `__init__`, with the same `_instantiate` helper `Orchestrator` uses for its nodes. |
+| `judge_llm` | `LLM` | **Yes** | The model that grades each answer. Often a cheaper/faster model than the worker's — judging is a classification task, not generation. |
+| `judge_rubric` | `str` | **Yes** | Objective approval criteria, non-empty. See "Write an objective rubric" below. |
+| `max_rounds` | `int` | No (default `3`) | Worker attempts before giving up, `>= 1`. |
+| `judge_label` | `str` | No | Reasoning-channel label emitted before each judge call. Default: `"Avaliando a resposta…"`. |
+| `retry_label` | `str` | No | Reasoning-channel label emitted before a retry. `{round}`/`{max}` are interpolated. Default: `"Refinando a resposta (rodada {round}/{max})…"`. |
+| `exhausted_label` | `str` | No | Reasoning-channel label emitted when `max_rounds` is reached without approval. Default: `"Rodadas esgotadas — entregando a melhor tentativa."`. |
+
+Missing `agent`/`judge_llm`, an empty `judge_rubric`, or `max_rounds < 1` on a
+concrete subclass raises `AixonError` at import time — before registration
+(the same validate-before-register precept as every other subtype), so a
+misconfigured `ReflectiveAgent` never leaves a ghost entry in the registry.
+
+**How it works — the loop:**
+
+1. `invoke` runs the worker (`agent.invoke`) to get a first answer.
+2. `emit_reasoning(judge_label)`, then the judge grades it: `judge_llm.complete`
+   is called with the rubric and the question/answer pair.
+3. The verdict is a text sentinel, following the `DELEGAR`/`END` precedent: if
+   its first line (after `strip()`) is exactly `APROVADO`, the answer is
+   returned as-is.
+4. Otherwise the verdict IS the critique. If rounds remain,
+   `emit_reasoning(retry_label)` and the worker is re-invoked with the
+   critique appended to the conversation (a new message list — the caller's
+   is never mutated).
+5. If `max_rounds` is reached without an `APROVADO`, `exhausted_label` is
+   emitted and the **last attempt is returned** — exhausting the rounds is
+   *not* an exception. A quality shortfall must not crash a run that produced
+   an answer; the caller decides what to do with a possibly-imperfect result.
+
+`stream`/`astream` mirror `Orchestrator`: they run the loop under a fresh
+reasoning channel, drain it as `Chunk(reasoning=...)` deltas, then yield the
+final `Chunk(content=...)` and `Chunk(done=True)`. `ainvoke`/`astream` are
+native (`agent.ainvoke` + `judge_llm.acomplete`), not thread-bridged.
+
+**Cost and latency.** Each round re-runs the full worker call (and, on
+rejection, a fresh judge call too) — a `max_rounds=3` run can cost up to 3×
+the worker's tokens/latency plus the judge overhead. Keep `max_rounds` as low
+as the rubric allows, and prefer a cheap `judge_llm`.
+
+**Write an objective rubric.** `judge_rubric` should state checkable facts,
+not vibes — "does it cite a source?", "do the numbers match the tool
+results?", "is every requested field present?". A vague rubric ("sounds
+right", "is helpful") degenerates into the judge approving on the first pass
+regardless of quality, defeating the point of the loop.
+
+A complete runnable example (scripted judge + worker, no API key needed) is
+at [examples/reflective_review](../examples/reflective_review).
+
+---
+
 ## Agent.as_tool — the neutral tool descriptor
 
 ```python
