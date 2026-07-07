@@ -27,8 +27,12 @@ cd examples/reflective_review
 python main.py
 ```
 
-(No `requirements.txt` — this example only needs `aixon` itself, already on
-your `PYTHONPATH`/environment when working in this repo.)
+Install the single dependency first (or use the repo venv, where `aixon`
+is already importable):
+
+```bash
+pip install -r requirements.txt   # just `aixon` — everything else is inline
+```
 
 ## What to expect
 
