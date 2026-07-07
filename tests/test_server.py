@@ -166,6 +166,36 @@ def test_auth_on_rejects_missing_and_bad_bearer(monkeypatch):
     ).status_code == 401
 
 
+def test_cors_preflight_bypasses_auth(monkeypatch):
+    # Browsers never send Authorization on preflight; CORS must answer it
+    # before auth can 401 it.
+    monkeypatch.setenv("AUTH_API_KEY", "secret123")
+    make_echo("echo")
+    c = TestClient(Server(adapters=[OpenAIAdapter()]).app)
+    r = c.options("/v1/chat/completions", headers={
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type",
+    })
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "*"
+
+
+def test_401_carries_cors_headers(monkeypatch):
+    # Without CORS headers on the 401, the browser reports an opaque network
+    # error instead of the auth failure.
+    monkeypatch.setenv("AUTH_API_KEY", "secret123")
+    make_echo("echo")
+    c = TestClient(Server(adapters=[OpenAIAdapter()]).app)
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "echo", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Origin": "http://localhost:3000"},
+    )
+    assert r.status_code == 401
+    assert r.headers.get("access-control-allow-origin") == "*"
+
+
 def test_auth_on_accepts_good_bearer_and_keeps_public_routes_open(monkeypatch):
     monkeypatch.setenv("AUTH_API_KEY", "secret123")
     make_echo("echo")

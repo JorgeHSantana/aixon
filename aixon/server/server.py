@@ -126,10 +126,6 @@ class Server:
         from starlette.middleware.cors import CORSMiddleware
 
         app = FastAPI()
-        cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
-        app.add_middleware(
-            CORSMiddleware, allow_origins=cors, allow_methods=["*"], allow_headers=["*"]
-        )
 
         @app.get("/health")
         def health():
@@ -146,7 +142,16 @@ class Server:
         # Wrap unconditionally so the middleware can react to AUTH_API_KEY set
         # AFTER construction (tests, hot-reload). The middleware is a no-op when
         # the env is unset, so this is safe and matches restmcp's per-request check.
-        return _AuthMiddleware(app, public_paths=self._public_paths())
+        guarded = _AuthMiddleware(app, public_paths=self._public_paths())
+        # CORS must be OUTSIDE auth: preflight OPTIONS never carries
+        # Authorization (per spec), so with auth outermost every preflight
+        # would 401 and browsers would block the real request. Outermost CORS
+        # also stamps allow-origin onto 401s, so the browser surfaces the auth
+        # error instead of an opaque network failure.
+        cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
+        return CORSMiddleware(
+            guarded, allow_origins=cors, allow_methods=["*"], allow_headers=["*"]
+        )
 
     def _check_route_collisions(self) -> None:
         """Fail loudly if two adapters claim the same (method, mounted path).
