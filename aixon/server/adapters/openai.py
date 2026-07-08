@@ -85,6 +85,16 @@ def _flatten_content(content) -> str:
 class OpenAIAdapter(ProtocolAdapter):
     name = "openai"
 
+    def __init__(self, *, mount_prefix: str = "",
+                 default_thought_mode: str = "custom") -> None:
+        """``default_thought_mode`` sets the server-side default for
+        ``thought_stream_mode`` (``custom`` | ``content`` | ``hidden``) when a
+        request doesn't specify one — e.g. a deploy that serves chat UIs which
+        render ``<think>`` blocks passes ``default_thought_mode="content"``.
+        A per-request ``thought_stream_mode`` always wins."""
+        super().__init__(mount_prefix=mount_prefix)
+        self.default_thought_mode = default_thought_mode
+
     # --- inbound ---------------------------------------------------------
     def parse_request(self, body: dict, *, path: str) -> ParsedRequest:
         raw_messages = body.get("messages") or []
@@ -257,7 +267,8 @@ class _OpenAIStreamSession(StreamSession):
     def __init__(self, adapter, *, model, request):
         super().__init__(adapter, model=model, request=request)
         params = request.params or {}
-        self.mode = params.get("thought_stream_mode") or "custom"
+        self.mode = params.get("thought_stream_mode") \
+            or getattr(adapter, "default_thought_mode", "custom")
         stream_options = params.get("stream_options") or {}
         self.include_usage = bool(stream_options.get("include_usage"))
         self._think_open = False

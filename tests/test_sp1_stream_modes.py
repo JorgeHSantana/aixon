@@ -90,6 +90,25 @@ def test_default_mode_is_custom(client):
     assert "thinking..." in reasoning
 
 
+def test_adapter_default_thought_mode_is_configurable():
+    # A deploy that serves chat UIs rendering <think> flips the SERVER-side
+    # default; a per-request thought_stream_mode still wins.
+    _register_reasoning("rz2")
+    client = TestClient(
+        Server(adapters=[OpenAIAdapter(default_thought_mode="content")]).app
+    )
+    raw = _stream(client, {"model": "rz2", "messages": [{"role": "user", "content": "q"}]})
+    content = "".join(d["choices"][0]["delta"].get("content", "")
+                      for d in _deltas(raw) if d["choices"])
+    assert "<think>" in content
+
+    raw = _stream(client, {"model": "rz2", "messages": [{"role": "user", "content": "q"}],
+                           "thought_stream_mode": "hidden"})
+    content = "".join(d["choices"][0]["delta"].get("content", "")
+                      for d in _deltas(raw) if d["choices"])
+    assert "<think>" not in content
+
+
 def test_include_usage_emits_usage_chunk(client):
     pytest.importorskip("tiktoken")
     raw = _stream(client, {"model": "rz", "messages": [{"role": "user", "content": "q"}],

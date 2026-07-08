@@ -148,6 +148,10 @@ Full OpenAI-compatible wire format. Served routes:
 > - `content` — reasoning wrapped in a `<think>...</think>` block inside
 >   `delta.content` (opt-in for chat UIs that render think-blocks).
 > - `hidden` — reasoning dropped; content only.
+>
+> The server-side default is configurable per deploy:
+> `OpenAIAdapter(default_thought_mode="content")` for chat UIs that render
+> think-blocks. A per-request `thought_stream_mode` always wins.
 
 > **Generation params.** Per-request `temperature`, `top_p`, `max_tokens`,
 > `presence_penalty`, `frequency_penalty`, and `stop` are forwarded to the model
