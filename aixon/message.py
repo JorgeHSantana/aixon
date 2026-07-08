@@ -39,8 +39,14 @@ class Message:
 @dataclass
 class Chunk:
     """A streamed delta from an Agent. ``content`` and ``reasoning`` are
-    additive text deltas; ``done`` marks the final chunk of a stream."""
+    additive text deltas; ``done`` marks the final chunk of a stream.
+
+    ``tool_calls`` carries neutral tool-call dicts (``{"name", "args", "id"}``,
+    the same shape as ``Message.tool_calls``) that the agent wants surfaced to
+    the CLIENT for execution — adapters translate them to the wire dialect
+    (e.g. OpenAI ``delta.tool_calls``)."""
 
     content: str = ""
     reasoning: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False

@@ -28,14 +28,19 @@ class ParsedRequest:
     - ``messages``: neutral conversation handed straight to ``Agent.invoke``.
     - ``params``: passthrough knobs (temperature, max_tokens, ...) minus the
       transport-level fields the adapter already consumed (model, messages,
-      stream, system).
+      stream, system, tools).
     - ``stream``: whether the client asked for an SSE stream.
+    - ``tools``: tool definitions the CLIENT declared on the request (OpenAI
+      function-tool dicts, passed through verbatim), or ``None``. The Server
+      publishes them via ``aixon.runtime.client_tools`` so agents that support
+      client-executed tools can read them; agents that don't simply ignore.
     """
 
     model: str
     messages: list[Message]
     params: dict
     stream: bool
+    tools: list[dict] | None = None
 
 
 class StreamSession:

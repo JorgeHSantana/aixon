@@ -162,7 +162,10 @@ def test_content_mode_multi_reasoning_deltas_are_raw():
     from aixon.server.protocol import ParsedRequest
 
     adapter = OpenAIAdapter()
-    request = ParsedRequest(model="m", messages=[], params={}, stream=True)
+    request = ParsedRequest(
+        model="m", messages=[],
+        params={"thought_stream_mode": "content"}, stream=True,
+    )
     session = adapter.open_stream(model="m", request=request)
     raw = session.chunk(Chunk(reasoning="thin"))
     raw += session.chunk(Chunk(reasoning="king"))

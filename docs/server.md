@@ -143,15 +143,27 @@ Full OpenAI-compatible wire format. Served routes:
 
 > **`thought_stream_mode`** (request body, OpenAI adapter) controls how an
 > agent's reasoning reaches the wire on a stream:
-> - `content` (default) — reasoning wrapped in a `<think>...</think>` block inside
->   `delta.content`.
-> - `custom` — reasoning on a separate `delta.reasoning` field.
+> - `custom` (default) — reasoning on a separate `delta.reasoning` field;
+>   `delta.content` is never mutated, so programmatic consumers parse it safely.
+> - `content` — reasoning wrapped in a `<think>...</think>` block inside
+>   `delta.content` (opt-in for chat UIs that render think-blocks).
 > - `hidden` — reasoning dropped; content only.
 
 > **Generation params.** Per-request `temperature`, `top_p`, `max_tokens`,
 > `presence_penalty`, `frequency_penalty`, and `stop` are forwarded to the model
 > automatically (allow-listed), overriding the agent's class-level `LLM(...)`
 > defaults for that request.
+
+> **Client tools.** Agentic clients (editors, IDEs) may send OpenAI `tools` on
+> the request; the adapter extracts them into `ParsedRequest.tools` and the
+> Server publishes them per request via `aixon.runtime.client_tools` — agents
+> that support client-executed tools read them with
+> `aixon.runtime.current_client_tools()` and answer with `Message.tool_calls`
+> (or `Chunk.tool_calls` on a stream). The adapter emits OpenAI-shaped
+> `tool_calls` with `finish_reason: "tool_calls"`, and parses the follow-up
+> history (`assistant.tool_calls` + `role: "tool"` results) back into neutral
+> form. Agents that ignore client tools keep working unchanged. Runnable demo:
+> `examples/client_tools/`.
 
 > **Non-blocking.** The server `await`s `agent.ainvoke` / `agent.astream`, so an
 > in-flight LLM call does not block the event loop — concurrent requests overlap

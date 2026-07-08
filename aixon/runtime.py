@@ -56,3 +56,31 @@ def generation_params(params: dict | None) -> Iterator[dict]:
         yield filtered
     finally:
         _gen_params.reset(token)
+
+
+# Tool definitions the CLIENT declared on the request (agentic clients bring
+# their own tools and expect tool_calls back — e.g. editors, IDEs). Published
+# per request like generation params; agents that support client-executed
+# tools read them via current_client_tools(), everyone else ignores them.
+_client_tools: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "aixon_client_tools", default=None
+)
+
+
+def current_client_tools() -> list[dict]:
+    """Return the client-declared tool definitions for the current request
+    (or ``[]``). Always a fresh copy: mutating the result never pollutes the
+    ContextVar state."""
+    tools = _client_tools.get()
+    return [dict(t) for t in tools] if tools else []
+
+
+@contextmanager
+def client_tools(tools: list[dict] | None) -> Iterator[list[dict]]:
+    """Publish the client's tool definitions for the duration of the block."""
+    value = [dict(t) for t in tools if isinstance(t, dict)] if tools else None
+    token = _client_tools.set(value)
+    try:
+        yield value or []
+    finally:
+        _client_tools.reset(token)

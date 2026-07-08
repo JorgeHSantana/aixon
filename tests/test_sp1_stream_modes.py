@@ -77,11 +77,17 @@ def test_hidden_mode_drops_reasoning(client):
     assert content == "answer"
 
 
-def test_default_mode_is_content(client):
+def test_default_mode_is_custom(client):
+    # The default must NOT mutate delta.content: reasoning goes to the
+    # separate delta.reasoning field, so programmatic consumers (agentic
+    # clients, parsers) see the payload untouched. <think> is opt-in.
     raw = _stream(client, {"model": "rz", "messages": [{"role": "user", "content": "q"}]})
-    content = "".join(d["choices"][0]["delta"].get("content", "")
-                      for d in _deltas(raw) if d["choices"])
-    assert "<think>" in content
+    deltas = [d["choices"][0]["delta"] for d in _deltas(raw) if d["choices"]]
+    content = "".join(d.get("content", "") for d in deltas)
+    reasoning = "".join(d.get("reasoning", "") for d in deltas)
+    assert "<think>" not in content
+    assert content == "answer"
+    assert "thinking..." in reasoning
 
 
 def test_include_usage_emits_usage_chunk(client):

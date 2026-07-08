@@ -1,0 +1,3 @@
+# The framework with the server extra (FastAPI app + TestClient); the agent
+# is scripted inline, so no provider SDK and no API key are needed.
+aixon[server]
