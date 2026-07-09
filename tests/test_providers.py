@@ -145,13 +145,22 @@ def test_zai_provider_build():
     assert hasattr(model, "invoke")
 
 
+def test_zai_build_returns_base_chat_model():
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.zai")
+    os.environ.setdefault("ZAI_API_KEY", "test-key")
+    from langchain_core.language_models.chat_models import BaseChatModel
+    model = get_provider("zai").build("glm-5.2")
+    assert isinstance(model, BaseChatModel)
+
+
 def test_zai_build_points_to_zai_base_url_and_resilience():
     pytest.importorskip("langchain_openai")
     importlib.import_module("aixon.providers.zai")
     os.environ.setdefault("ZAI_API_KEY", "test-key")
     model = get_provider("zai").build("glm-5.2")
     assert "api.z.ai" in str(model.openai_api_base)
-    assert model.timeout == DEFAULT_TIMEOUT_S
+    assert model.request_timeout == DEFAULT_TIMEOUT_S
     assert model.max_retries == DEFAULT_MAX_RETRIES
 
 
