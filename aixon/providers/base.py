@@ -36,7 +36,7 @@ def apply_resilience_defaults(params: dict[str, Any]) -> None:
     """Set ``timeout``/``max_retries`` in *params* in place if absent.
 
     The caller always wins: passing ``LLM(model, timeout=...)`` overrides the
-    default. All three built-in chat models (OpenAI/Anthropic/Google) accept
+    default. All built-in chat models (OpenAI/Anthropic/Google/z.AI) accept
     both keyword arguments.
     """
     params.setdefault("timeout", DEFAULT_TIMEOUT_S)
@@ -54,7 +54,7 @@ class Provider(ABC):
     providers live in aixon/providers/<vendor>.py.
     """
 
-    name: str       # "openai" | "anthropic" | "google"
+    name: str       # "openai" | "anthropic" | "google" | "zai"
     env_key: str    # e.g. "OPENAI_API_KEY"
 
     @abstractmethod
