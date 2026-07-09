@@ -109,7 +109,7 @@ def test_write_creates_raw_with_external_id():
         ["doc text"], [{"a": 1}], source_ids=["ext1"])
     assert ids == ["doc-1"]
     req = fake.documents.created[0]
-    assert req["content"] == "doc text"
+    assert req["data"] == "doc text"
     assert req["partition"] == "p1"
     assert req["metadata"] == {"a": 1}
     assert req["external_id"] == "ext1"

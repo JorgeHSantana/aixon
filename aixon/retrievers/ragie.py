@@ -109,7 +109,7 @@ class RagieRetriever(Retriever):
         ids: list[str] = []
         for i, (text, meta) in enumerate(zip(texts, metadatas)):
             params: dict[str, Any] = {
-                "content": text, "partition": self.partition, "metadata": meta,
+                "data": text, "partition": self.partition, "metadata": meta,
             }
             if source_ids and i < len(source_ids):
                 params["external_id"] = source_ids[i]
