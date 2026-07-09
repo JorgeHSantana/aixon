@@ -127,3 +127,38 @@ def test_google_build_caller_timeout_overrides_default():
     model = get_provider("google").build("gemini-2.0-flash", timeout=5, max_retries=1)
     assert model.timeout == 5
     assert model.max_retries == 1
+
+
+# ── z.AI (GLM) ────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("model", ["glm-5.2", "glm-4.6"])
+def test_resolve_zai_models(model):
+    importlib.import_module("aixon.providers.zai")  # self-registers
+    assert resolve_provider_for_model(model).name == "zai"
+
+
+def test_zai_provider_build():
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.zai")
+    os.environ.setdefault("ZAI_API_KEY", "test-key")
+    model = get_provider("zai").build("glm-5.2")
+    assert hasattr(model, "invoke")
+
+
+def test_zai_build_points_to_zai_base_url_and_resilience():
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.zai")
+    os.environ.setdefault("ZAI_API_KEY", "test-key")
+    model = get_provider("zai").build("glm-5.2")
+    assert "api.z.ai" in str(model.openai_api_base)
+    assert model.timeout == DEFAULT_TIMEOUT_S
+    assert model.max_retries == DEFAULT_MAX_RETRIES
+
+
+def test_zai_base_url_env_override(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.zai")
+    monkeypatch.setenv("ZAI_API_KEY", "test-key")
+    monkeypatch.setenv("ZAI_BASE_URL", "https://proxy.example.com/v4")
+    model = get_provider("zai").build("glm-5.2")
+    assert "proxy.example.com" in str(model.openai_api_base)
