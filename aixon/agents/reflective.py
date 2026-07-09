@@ -195,17 +195,43 @@ class ReflectiveAgent(Agent, abstract=True):
         return answer
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
-        # Mirrors Orchestrator.stream: run the loop under a fresh channel,
-        # drain it as reasoning, then emit the final content.
-        from aixon.reasoning import reasoning_channel
+        """LIVE evaluator-optimizer stream.
 
-        with reasoning_channel() as channel:
-            final = self.invoke(messages)
-            for line in channel.drain():
-                yield Chunk(reasoning=line + "\n")
-        if final.reasoning:
-            yield Chunk(reasoning=final.reasoning)
-        yield Chunk(content=final.content)
+        The worker is streamed natively each round: its reasoning chunks pass
+        through AS THEY ARRIVE (tool labels, nested-agent thoughts), so the
+        client sees activity from the first step instead of a mute wait for
+        the whole loop. Candidate CONTENT is buffered — an answer must never
+        reach the user before the judge approves it — and only the approved
+        (or last, on exhaustion) answer is emitted as content."""
+        msgs = list(messages)
+        answer = Message(role="assistant", content="")
+        for round_ in range(1, self.max_rounds + 1):
+            parts: list[str] = []
+            for chunk in self._worker.stream(msgs):
+                if chunk.reasoning:
+                    yield Chunk(reasoning=chunk.reasoning)
+                if chunk.content:
+                    parts.append(chunk.content)
+            answer = Message(role="assistant", content="".join(parts))
+            yield Chunk(reasoning=self.judge_label + "\n")
+            verdict = self.judge_llm.complete(
+                self._judge_messages(messages, answer)
+            ).content
+            if self._approved(verdict):
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
+            if round_ == self.max_rounds:
+                break
+            yield Chunk(reasoning=self.retry_label.format(round=round_ + 1,
+                                                          max=self.max_rounds) + "\n")
+            msgs = self._retry_messages(msgs, answer, verdict)
+        yield Chunk(reasoning=self.exhausted_label + "\n")
+        _log.info(
+            f"reflective '{self.name}': rounds exhausted "
+            f"(max_rounds={self.max_rounds}); returning last attempt"
+        )
+        yield Chunk(content=answer.content)
         yield Chunk(done=True)
 
     # ----- async neutral interface (native — no thread bridge) ----------------
@@ -234,13 +260,34 @@ class ReflectiveAgent(Agent, abstract=True):
         return answer
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
-        from aixon.reasoning import reasoning_channel
-
-        with reasoning_channel() as channel:
-            final = await self.ainvoke(messages)
-            for line in channel.drain():
-                yield Chunk(reasoning=line + "\n")
-        if final.reasoning:
-            yield Chunk(reasoning=final.reasoning)
-        yield Chunk(content=final.content)
+        """Async mirror of ``stream`` — same live pass-through/buffering."""
+        msgs = list(messages)
+        answer = Message(role="assistant", content="")
+        for round_ in range(1, self.max_rounds + 1):
+            parts: list[str] = []
+            async for chunk in self._worker.astream(msgs):
+                if chunk.reasoning:
+                    yield Chunk(reasoning=chunk.reasoning)
+                if chunk.content:
+                    parts.append(chunk.content)
+            answer = Message(role="assistant", content="".join(parts))
+            yield Chunk(reasoning=self.judge_label + "\n")
+            verdict = (
+                await self.judge_llm.acomplete(self._judge_messages(messages, answer))
+            ).content
+            if self._approved(verdict):
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
+            if round_ == self.max_rounds:
+                break
+            yield Chunk(reasoning=self.retry_label.format(round=round_ + 1,
+                                                          max=self.max_rounds) + "\n")
+            msgs = self._retry_messages(msgs, answer, verdict)
+        yield Chunk(reasoning=self.exhausted_label + "\n")
+        _log.info(
+            f"reflective '{self.name}': rounds exhausted "
+            f"(max_rounds={self.max_rounds}); returning last attempt"
+        )
+        yield Chunk(content=answer.content)
         yield Chunk(done=True)

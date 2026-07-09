@@ -123,6 +123,38 @@ def test_exhausted_label_emitido():
     assert r.exhausted_label in lines
 
 
+# ── scriptable STREAMING agent (reasoning antes do conteúdo) ─────────────────
+
+def make_streaming_agent(name: str, rounds: list[tuple[list[str], str]]):
+    """Concrete Agent cujo stream() emite Chunk(reasoning=...) por linha e só
+    então o conteúdo — como um ToolAgent real (labels de tool ao vivo).
+    `rounds` é uma lista de (linhas_de_reasoning, resposta) por chamada."""
+    from typing import Iterator
+
+    from aixon.agent import Agent
+
+    calls: list[list[Message]] = []
+
+    def invoke(self, messages: list[Message]) -> Message:
+        calls.append(list(messages))
+        i = min(len(calls) - 1, len(rounds) - 1)
+        return Message(role="assistant", content=rounds[i][1])
+
+    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+        calls.append(list(messages))
+        i = min(len(calls) - 1, len(rounds) - 1)
+        reasoning_lines, answer = rounds[i]
+        for line in reasoning_lines:
+            yield Chunk(reasoning=line + "\n")
+        yield Chunk(content=answer)
+        yield Chunk(done=True)
+
+    cls = type(f"{name.capitalize()}Agent", (Agent,),
+               {"invoke": invoke, "stream": stream, "name": name})
+    from aixon.registry import get_registry
+    return get_registry().resolve(name), calls
+
+
 # ── stream ───────────────────────────────────────────────────────────────────
 
 def test_stream_reasoning_e_conteudo():
@@ -133,6 +165,48 @@ def test_stream_reasoning_e_conteudo():
     content = "".join(c.content for c in chunks)
     assert r.judge_label in reasoning
     assert content == "resposta final"
+    assert chunks[-1].done is True
+
+
+def test_stream_e_vivo_reasoning_do_worker_sai_antes_do_juiz():
+    # O reasoning do worker deve fluir ENQUANTO ele trabalha — antes de o juiz
+    # rodar — e não ser drenado só no fim do loop (streaming mudo).
+    gen, _ = make_streaming_agent(
+        "gen-live", [(["Consultando o banco…"], "resposta (fonte: IBGE)")])
+    r = make_reflective("ref-live", gen, ["APROVADO"])
+    it = r.stream(USER)
+    first = next(it)
+    assert first.reasoning == "Consultando o banco…\n"
+    # juiz ainda não consumiu o script: nada foi julgado até aqui
+    assert r.judge_llm.chat_model._idx == 0
+    rest = list(it)
+    assert "".join(c.content for c in rest) == "resposta (fonte: IBGE)"
+    assert rest[-1].done is True
+
+
+def test_stream_reprova_conteudo_reprovado_nao_vaza():
+    # Rodada 1 reprovada: o conteúdo v1 NÃO pode sair como content; o reasoning
+    # das DUAS rodadas aparece, com o retry label entre elas.
+    gen, _ = make_streaming_agent(
+        "gen-2r", [(["passo A"], "v1"), (["passo B"], "v2 (fonte: IBGE)")])
+    r = make_reflective("ref-2r", gen, ["1. Falta fonte.", "APROVADO"])
+    chunks = list(r.stream(USER))
+    reasoning = "".join(c.reasoning for c in chunks)
+    content = "".join(c.content for c in chunks)
+    assert "passo A" in reasoning and "passo B" in reasoning
+    assert any("rodada 2/3" in (c.reasoning or "") for c in chunks)
+    assert content == "v2 (fonte: IBGE)"   # v1 não vazou
+    assert chunks[-1].done is True
+
+
+def test_stream_esgota_emite_exhausted_e_ultima_tentativa():
+    gen, _ = make_streaming_agent(
+        "gen-ex", [(["p1"], "v1"), (["p2"], "v2")])
+    r = make_reflective("ref-ex", gen, ["1. Ruim.", "1. Ainda ruim."], rounds=2)
+    chunks = list(r.stream(USER))
+    reasoning = "".join(c.reasoning for c in chunks)
+    assert r.exhausted_label in reasoning
+    assert "".join(c.content for c in chunks) == "v2"
     assert chunks[-1].done is True
 
 

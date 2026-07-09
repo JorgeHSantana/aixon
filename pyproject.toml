@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aixon"
-version = "0.1.9"
+version = "0.1.10"
 description = "Declarative AI-agent framework — composable agents, multi-agent orchestration, and a protocol-decoupled server"
 readme = "README.md"
 requires-python = ">=3.11"
