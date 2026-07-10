@@ -187,6 +187,35 @@ def test_weaviate_write_rejects_duplicate_source_ids(monkeypatch):
         r.write(["a", "b"], source_ids=["dup", "dup"])
 
 
+def test_weaviate_write_empty_source_ids_are_not_duplicates(monkeypatch):
+    # "" means "no source" in the namespace-assignment path (`if src:`), so
+    # the duplicate check must use the same predicate and let ["", ""] pass.
+    monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
+
+    r = _WritableRetriever(client=object())
+    ids = r.write(["a", "b"], source_ids=["", ""])
+    assert ids == ["id-0", "id-1"]
+    # No deterministic ids were assigned (no source), so no purge either.
+    assert _FakeVS.last.added[0][2] is None
+
+
+def test_weaviate_write_survives_purge_failure(monkeypatch):
+    # add_texts has already committed when the purge runs; a raising
+    # delete_by_id (transient connection/query error — distinct from the
+    # boolean not-found return) must NOT turn the successful write into a
+    # hard failure: write() logs a warning and returns the new ids.
+    monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
+
+    class _RaisingData:
+        def delete_by_id(self, id_):
+            raise RuntimeError("weaviate connection dropped")
+
+    client = _FakeWeaviateClient(_RaisingData())
+    r = _WritableRetriever(client=client)
+    ids = r.write(["hi"], source_ids=["doc1"])  # must not raise
+    assert ids == ["id-0"]
+
+
 # ─────────────────────── R4: ragie computed fields win ─────────────────────
 
 class _Chunk:

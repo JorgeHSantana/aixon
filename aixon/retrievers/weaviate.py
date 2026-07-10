@@ -17,7 +17,10 @@ from langchain_core.embeddings import Embeddings
 
 from aixon.embedding import Embedding
 from aixon.exceptions import AixonError
+from aixon.logging import Logger
 from aixon.retriever import Retriever, TypeAccess
+
+_log = Logger("aixon.retrievers.weaviate")
 
 
 class _LangchainEmbeddings(Embeddings):
@@ -193,7 +196,7 @@ class WeaviateRetriever(Retriever):
         if source_ids:
             seen: set[str] = set()
             for sid in source_ids:
-                if sid is None:
+                if not sid:  # None/"" = no source (same predicate as below)
                     continue
                 if sid in seen:
                     raise ValueError(
@@ -207,9 +210,9 @@ class WeaviateRetriever(Retriever):
         all_texts: list[str] = []
         all_metas: list[dict] = []
         all_ids: list[str | None] = []
-        # (namespace, new_chunk_count) per source_id, to purge any stale tail
-        # left over from a previous write() where the document had more chunks.
-        purge_specs: list[tuple[uuid.UUID, int]] = []
+        # (source_id, namespace, new_chunk_count) per source_id, to purge any
+        # stale tail left over from a previous write() with more chunks.
+        purge_specs: list[tuple[str, uuid.UUID, int]] = []
         for i, (text, meta) in enumerate(zip(texts, metadatas)):
             chunks = self._splitter.create_documents([text], [meta])
             src = source_ids[i] if source_ids and i < len(source_ids) else None
@@ -224,7 +227,7 @@ class WeaviateRetriever(Retriever):
                 all_metas.append(chunk.metadata)
                 all_ids.append(str(uuid.uuid5(ns, str(ci))) if ns else None)
             if ns is not None:
-                purge_specs.append((ns, len(chunks)))
+                purge_specs.append((src, ns, len(chunks)))
         if any(all_ids):
             result = self._vectorstore.add_texts(
                 texts=all_texts, metadatas=all_metas, ids=all_ids)
@@ -232,11 +235,22 @@ class WeaviateRetriever(Retriever):
             result = self._vectorstore.add_texts(
                 texts=all_texts, metadatas=all_metas)
         if purge_specs:
-            collection = self._client.collections.get(self.collection_name)
-            for ns, n in purge_specs:
-                ci = n
-                while collection.data.delete_by_id(uuid.uuid5(ns, str(ci))):
-                    ci += 1
+            # Best-effort: add_texts has already committed, so a transient
+            # delete error must not surface the successful write as a failure.
+            # Worst case some stale tail chunks linger until the next rewrite.
+            for src, ns, n in purge_specs:
+                try:
+                    collection = self._client.collections.get(
+                        self.collection_name)
+                    ci = n
+                    while collection.data.delete_by_id(uuid.uuid5(ns, str(ci))):
+                        ci += 1
+                except Exception as exc:
+                    _log.warning(
+                        "stale-chunk purge failed for source_id %r in "
+                        "collection %r (new content WAS indexed; stale tail "
+                        "chunks may linger until the next rewrite): %s",
+                        src, self.collection_name, exc)
         return result
 
     def close(self) -> None:
