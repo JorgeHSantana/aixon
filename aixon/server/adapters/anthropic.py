@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 import uuid
 
-from aixon.server.protocol import Chunk, Message, ParsedRequest, ProtocolAdapter
+from aixon.server.protocol import Chunk, Message, ParsedRequest, ProtocolAdapter, StreamSession
 
-_TRANSPORT_FIELDS = frozenset({"model", "messages", "stream", "system"})
+_TRANSPORT_FIELDS = frozenset({"model", "messages", "stream", "system", "tools"})
 
 
 def _flatten_content(content) -> str:
@@ -55,6 +55,7 @@ class AnthropicAdapter(ProtocolAdapter):
             messages=messages,
             params=params,
             stream=bool(body.get("stream", False)),
+            tools=body.get("tools") or None,
         )
 
     # --- outbound (non-stream) ------------------------------------------
@@ -105,6 +106,16 @@ class AnthropicAdapter(ProtocolAdapter):
     def format_stream_done(self, *, model: str) -> str:
         return _event("message_stop", {"type": "message_stop"})
 
+    def format_stream_error(self, exc: Exception) -> str:
+        return _event("error", {"type": "error",
+                                "error": {"type": "api_error",
+                                          "message": "The server encountered an "
+                                                     "error while generating the "
+                                                     "response."}})
+
+    def open_stream(self, *, model: str, request: ParsedRequest) -> StreamSession:
+        return _AnthropicStreamSession(self, model=model, request=request)
+
     # --- model listing ---------------------------------------------------
     def format_models(self, agents: list) -> dict:
         data = []
@@ -117,3 +128,99 @@ class AnthropicAdapter(ProtocolAdapter):
     # --- routing ---------------------------------------------------------
     def routes(self) -> list[tuple[str, str]]:
         return [("POST", "/v1/messages"), ("GET", "/v1/models")]
+
+
+class _AnthropicStreamSession(StreamSession):
+    """Anthropic streaming with the full Messages-API SSE envelope: a real
+    Anthropic SDK parses ``message_start``/``content_block_start``/
+    ``content_block_stop`` and tracks per-block indices — it cannot parse the
+    bare ``content_block_delta`` stream the stateless ``format_stream_chunk``
+    emits (kept for compat; no longer used by the server route).
+
+    Block sequencing: thinking (if any) opens first, closes when content
+    starts; text opens next. Indices are assigned by an incrementing counter
+    so thinking and text never share one, matching real multi-block Claude
+    streams."""
+
+    def __init__(self, adapter, *, model, request):
+        super().__init__(adapter, model=model, request=request)
+        self._started = False
+        self._next_index = 0
+        self._thinking_index: int | None = None
+        self._text_index: int | None = None
+        self._open_index: int | None = None  # currently open content block, if any
+        self._content_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
+
+    def _message_start(self) -> str:
+        if self._started:
+            return ""
+        self._started = True
+        return _event("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "type": "message",
+                "role": "assistant",
+                "model": self.model,
+                "content": [],
+                "stop_reason": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        })
+
+    def _close_open_block(self) -> str:
+        if self._open_index is None:
+            return ""
+        out = _event("content_block_stop",
+                     {"type": "content_block_stop", "index": self._open_index})
+        self._open_index = None
+        return out
+
+    def chunk(self, chunk: Chunk) -> str:
+        out = self._message_start()
+        if chunk.reasoning:
+            self._reasoning_parts.append(chunk.reasoning)
+            if self._thinking_index is None:
+                self._thinking_index = self._next_index
+                self._next_index += 1
+                out += _event("content_block_start", {
+                    "type": "content_block_start", "index": self._thinking_index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                })
+                self._open_index = self._thinking_index
+            out += _event("content_block_delta", {
+                "type": "content_block_delta", "index": self._thinking_index,
+                "delta": {"type": "thinking_delta", "thinking": chunk.reasoning},
+            })
+        if chunk.content:
+            self._content_parts.append(chunk.content)
+            if self._open_index == self._thinking_index and self._open_index is not None:
+                out += self._close_open_block()
+            if self._text_index is None:
+                self._text_index = self._next_index
+                self._next_index += 1
+                out += _event("content_block_start", {
+                    "type": "content_block_start", "index": self._text_index,
+                    "content_block": {"type": "text", "text": ""},
+                })
+                self._open_index = self._text_index
+            out += _event("content_block_delta", {
+                "type": "content_block_delta", "index": self._text_index,
+                "delta": {"type": "text_delta", "text": chunk.content},
+            })
+        if chunk.done:
+            out += self._close_open_block()
+            from aixon.server.usage import build_usage
+
+            completion_text = "".join(self._content_parts)
+            if self._reasoning_parts:
+                completion_text += "\n" + "".join(self._reasoning_parts)
+            usage = build_usage(self.model, "", completion_text)
+            output_tokens = usage.get("completion_tokens", 0) if usage else 0
+            out += _event("message_delta", {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": output_tokens},
+            })
+        return out

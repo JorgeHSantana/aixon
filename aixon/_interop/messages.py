@@ -53,7 +53,10 @@ def to_langchain(messages: list[Message]) -> list[BaseMessage]:
     result: list[BaseMessage] = []
     for msg in messages:
         role = msg.role
-        if role == "system":
+        if role in ("system", "developer"):
+            # OpenAI's modern spec adds "developer" as a system-role alias
+            # (superseding "system" for newer models); aixon has no separate
+            # LangChain concept for it, so it collapses to SystemMessage.
             result.append(SystemMessage(content=msg.content))
         elif role == "user":
             result.append(HumanMessage(content=msg.content))

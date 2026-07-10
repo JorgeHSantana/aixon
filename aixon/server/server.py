@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import datetime as dt
 import hmac
-import json
 import os
 from typing import Optional
 
@@ -205,7 +204,13 @@ class Server:
                     },
                     status_code=400,
                 )
-            pr = adapter.parse_request(body, path=path)
+            try:
+                pr = adapter.parse_request(body, path=path)
+            except Exception as exc:
+                return JSONResponse(
+                    {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                    status_code=400,
+                )
             try:
                 agent = get_registry().resolve(pr.model)
             except AgentNotFoundError as exc:
@@ -239,10 +244,7 @@ class Server:
                             f"{adapter.name}: stream via agent '{agent.name}' "
                             f"failed: {exc}"
                         )
-                        payload = {
-                            "error": {"message": str(exc), "type": "server_error"}
-                        }
-                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        yield adapter.format_stream_error(exc)
                     try:
                         yield session.done()
                     except Exception:
@@ -259,7 +261,8 @@ class Server:
             except Exception as exc:
                 _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")
                 return JSONResponse(
-                    {"error": {"message": str(exc), "type": "server_error"}},
+                    {"error": {"message": "The agent failed to process the request.",
+                              "type": "server_error"}},
                     status_code=500,
                 )
             prompt_text = "\n".join(m.content for m in pr.messages)

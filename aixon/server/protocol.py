@@ -9,6 +9,7 @@ and testable on a bare install."""
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -112,3 +113,12 @@ class ProtocolAdapter(ABC):
         """Return a per-request StreamSession. Default = stateless passthrough;
         override to add dialect-specific per-request stream state."""
         return StreamSession(self, model=model, request=request)
+
+    def format_stream_error(self, exc: Exception) -> str:
+        """Terminal SSE error event for a mid-stream failure. Adapters override
+        to match their wire dialect. The payload is deliberately generic — the
+        full exception goes to the server log, not to the client."""
+        payload = {"error": {"message": "The server encountered an error while "
+                                        "generating the response.",
+                             "type": "server_error"}}
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"

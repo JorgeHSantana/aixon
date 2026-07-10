@@ -104,7 +104,13 @@ def test_stream_error_emits_error_event_and_done():
     payloads = [json.loads(d) for d in datas if d != "[DONE]"]
     errors = [p for p in payloads if "error" in p]
     assert errors, f"no error event in stream: {payloads}"
-    assert "provider exploded" in errors[0]["error"]["message"]
+    # bug-sweep S9: the internal exception text must NOT leak to the client —
+    # only a generic message crosses the wire; the full exception stays in
+    # the server log.
+    assert "provider exploded" not in errors[0]["error"]["message"]
+    assert errors[0]["error"]["message"] == (
+        "The server encountered an error while generating the response."
+    )
     assert errors[0]["error"]["type"] == "server_error"
     # Chunks produced before the failure are still delivered.
     contents = "".join(
@@ -123,7 +129,9 @@ def test_non_stream_error_returns_500_envelope():
     })
     assert r.status_code == 500
     err = r.json()["error"]
-    assert "provider exploded" in err["message"]
+    # bug-sweep S9: the internal exception text must NOT leak to the client.
+    assert "provider exploded" not in err["message"]
+    assert err["message"] == "The agent failed to process the request."
     assert err["type"] == "server_error"
 
 
