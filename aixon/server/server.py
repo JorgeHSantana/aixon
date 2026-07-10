@@ -244,7 +244,7 @@ class Server:
                             f"{adapter.name}: stream via agent '{agent.name}' "
                             f"failed: {exc}"
                         )
-                        yield adapter.format_stream_error(exc)
+                        yield session.error(exc)
                     try:
                         yield session.done()
                     except Exception:

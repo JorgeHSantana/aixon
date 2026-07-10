@@ -1,6 +1,7 @@
 # aixon/server/adapters/anthropic.py
-"""Anthropic Messages-API ProtocolAdapter — the thin PROOF that aixon's neutral
-types are not OpenAI-in-disguise.
+"""Anthropic Messages-API ProtocolAdapter — a full production dialect served
+from the SAME neutral Message/Chunk aixon's OpenAI adapter uses, proof that
+the neutral types are not OpenAI-in-disguise.
 
 Structural differences from OpenAI, served from the SAME neutral Message/Chunk:
 - ``system`` is a top-level request field, hoisted into a neutral system Message.
@@ -164,18 +165,20 @@ class _AnthropicStreamSession(StreamSession):
     bare ``content_block_delta`` stream the stateless ``format_stream_chunk``
     emits (kept for compat; no longer used by the server route).
 
-    Block sequencing: thinking (if any) opens first, closes when content
-    starts; text opens next. Indices are assigned by an incrementing counter
-    so thinking and text never share one, matching real multi-block Claude
-    streams."""
+    Block sequencing: blocks are a SEQUENCE, not a fixed thinking-then-text
+    pair. Whichever modality (reasoning vs content) is NOT the currently open
+    block closes the open one (``content_block_stop``) and opens a fresh block
+    at the next index when it needs to emit — so thinking -> text -> thinking
+    (an interleave real providers don't produce today, but the wire format
+    allows) still yields a valid, ever-increasing index per block instead of a
+    delta against an already-closed one."""
 
     def __init__(self, adapter, *, model, request):
         super().__init__(adapter, model=model, request=request)
         self._started = False
         self._next_index = 0
-        self._thinking_index: int | None = None
-        self._text_index: int | None = None
         self._open_index: int | None = None  # currently open content block, if any
+        self._open_kind: str | None = None  # "thinking" | "text" | None
         self._content_parts: list[str] = []
         self._reasoning_parts: list[str] = []
 
@@ -202,46 +205,43 @@ class _AnthropicStreamSession(StreamSession):
         out = _event("content_block_stop",
                      {"type": "content_block_stop", "index": self._open_index})
         self._open_index = None
+        self._open_kind = None
+        return out
+
+    def _open_block(self, kind: str, content_block: dict) -> str:
+        """Ensure a block of ``kind`` ("thinking"/"text") is open at
+        ``self._open_index``. If a DIFFERENT kind is currently open, close it
+        first (``content_block_stop``) and allocate a brand-new index for the
+        one being opened — indices are never reused, matching how a real
+        Claude stream never reopens a closed block."""
+        out = ""
+        if self._open_kind is not None and self._open_kind != kind:
+            out += self._close_open_block()
+        if self._open_index is None:
+            index = self._next_index
+            self._next_index += 1
+            out += _event("content_block_start", {
+                "type": "content_block_start", "index": index,
+                "content_block": content_block,
+            })
+            self._open_index = index
+            self._open_kind = kind
         return out
 
     def chunk(self, chunk: Chunk) -> str:
         out = self._message_start()
         if chunk.reasoning:
-            # KNOWN LIMITATION: if reasoning arrives AFTER the text block has
-            # already opened (and therefore closed the thinking block — see
-            # the `chunk.content` branch below), this re-enters here with
-            # `_thinking_index` already set and emits a thinking_delta against
-            # that now-CLOSED block instead of reopening a new one. Real
-            # providers stream all reasoning before any text, so this
-            # interleave is rare; accepted rather than adding block-reopen
-            # bookkeeping for a case that shouldn't occur in practice.
             self._reasoning_parts.append(chunk.reasoning)
-            if self._thinking_index is None:
-                self._thinking_index = self._next_index
-                self._next_index += 1
-                out += _event("content_block_start", {
-                    "type": "content_block_start", "index": self._thinking_index,
-                    "content_block": {"type": "thinking", "thinking": ""},
-                })
-                self._open_index = self._thinking_index
+            out += self._open_block("thinking", {"type": "thinking", "thinking": ""})
             out += _event("content_block_delta", {
-                "type": "content_block_delta", "index": self._thinking_index,
+                "type": "content_block_delta", "index": self._open_index,
                 "delta": {"type": "thinking_delta", "thinking": chunk.reasoning},
             })
         if chunk.content:
             self._content_parts.append(chunk.content)
-            if self._open_index == self._thinking_index and self._open_index is not None:
-                out += self._close_open_block()
-            if self._text_index is None:
-                self._text_index = self._next_index
-                self._next_index += 1
-                out += _event("content_block_start", {
-                    "type": "content_block_start", "index": self._text_index,
-                    "content_block": {"type": "text", "text": ""},
-                })
-                self._open_index = self._text_index
+            out += self._open_block("text", {"type": "text", "text": ""})
             out += _event("content_block_delta", {
-                "type": "content_block_delta", "index": self._text_index,
+                "type": "content_block_delta", "index": self._open_index,
                 "delta": {"type": "text_delta", "text": chunk.content},
             })
         if chunk.done:
@@ -258,4 +258,15 @@ class _AnthropicStreamSession(StreamSession):
                 "delta": {"stop_reason": "end_turn", "stop_sequence": None},
                 "usage": {"output_tokens": output_tokens},
             })
+        return out
+
+    def error(self, exc: Exception) -> str:
+        """A mid-stream failure must close whatever block is open BEFORE the
+        error event — the client's SDK tracks block state and would choke on
+        a delta/stop it never sees after an `error` event closes the request
+        conceptually. `_message_start` is idempotent, so this stays safe even
+        if the agent raised before yielding a single chunk."""
+        out = self._message_start()
+        out += self._close_open_block()
+        out += self.adapter.format_stream_error(exc)
         return out

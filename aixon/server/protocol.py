@@ -71,6 +71,15 @@ class StreamSession:
         """Terminal SSE line(s)."""
         return self.adapter.format_stream_done(model=self.model)
 
+    def error(self, exc: Exception) -> str:
+        """SSE line(s) for a mid-stream failure. Base is stateless: delegates
+        straight to the adapter's dialect-shaped, exception-detail-free event.
+        Stateful sessions (e.g. Anthropic's block envelope) override this to
+        close any open per-request state (a dangling content block) BEFORE the
+        error event, so the wire never sees a delta or stop against a block
+        the client doesn't know is still open."""
+        return self.adapter.format_stream_error(exc)
+
 
 class ProtocolAdapter(ABC):
     """Translates one wire dialect <-> neutral types. New wire styles = new
