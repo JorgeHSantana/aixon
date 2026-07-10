@@ -213,3 +213,52 @@ def test_chat_error_removes_orphan_user_message(runner):
     # (whose turn raised) must have been popped before the retry.
     for i in range(len(roles) - 1):
         assert not (roles[i] == "user" and roles[i + 1] == "user"), roles
+
+
+def test_chat_error_after_partial_content_appends_no_assistant_message(runner):
+    """When a turn raises AFTER partial content was streamed, neither the
+    popped user turn nor an assistant message built from the truncated
+    output may survive in history — the next call must see only the new
+    user message (plus prior successful turns, none here)."""
+    from aixon.agent import Agent
+    from aixon.message import Message, Chunk
+    from unittest.mock import patch
+
+    received_histories = []
+    call_count = {"n": 0}
+
+    def _stream(self, messages):
+        received_histories.append(list(messages))
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            yield Chunk(content="partial")
+            raise RuntimeError("boom mid-stream")
+        yield Chunk(content="ok now")
+        yield Chunk(done=True)
+
+    type(
+        "PartialErrorAgent",
+        (Agent,),
+        {
+            "invoke": lambda self, m: Message(role="assistant", content="x"),
+            "stream": _stream,
+        },
+    )
+
+    from aixon.cli import app
+
+    with patch("aixon.cli.autodiscover"):
+        runner.invoke(
+            app,
+            ["chat"],
+            input="1\nfirst\nsecond\n/exit\n",
+            catch_exceptions=False,
+        )
+
+    assert len(received_histories) == 2
+    second_call_messages = received_histories[1]
+    # Only the second user message: the errored turn's user message was
+    # popped AND no bogus assistant("partial") entry was appended.
+    assert [(m.role, m.content) for m in second_call_messages] == [
+        ("user", "second")
+    ]

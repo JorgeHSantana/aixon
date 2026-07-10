@@ -156,9 +156,9 @@ def _pick_agent() -> object | None:
         click.echo("Invalid choice, try again.")
 
 
-def _stream_inprocess(agent: object, messages: list) -> str:
+def _stream_inprocess(agent: object, messages: list) -> str | None:
     """Stream agent.stream(messages) to the terminal and RETURN the assistant
-    content collected from the stream.
+    content collected from the stream, or None when the turn errored.
 
     Returning the streamed content (rather than re-running the agent via
     invoke() to build the history message) means the saved history is exactly
@@ -183,6 +183,10 @@ def _stream_inprocess(agent: object, messages: list) -> str:
         # drop it so a retry does not send two consecutive 'user' messages.
         if messages and messages[-1].role == "user":
             messages.pop()
+        # None, NOT the partial parts: the caller must not append an
+        # assistant message built from truncated error output — especially
+        # now that its matching user turn was just popped.
+        return None
     return "".join(parts)
 
 
