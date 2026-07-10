@@ -80,7 +80,7 @@ class ToolAgent(Agent, abstract=True):
             messages = messages[1:]
 
         lc_tools = coerce_tools(list(self.tools))
-        agent = create_agent(self.llm.chat_model, lc_tools, system_prompt=system_prompt)
+        agent = create_agent(self.llm.request_chat_model(), lc_tools, system_prompt=system_prompt)
         lc_messages = to_langchain(messages)
         config = {"recursion_limit": 2 * self.max_iterations + 1}
         return agent, lc_messages, config
@@ -147,8 +147,12 @@ class ToolAgent(Agent, abstract=True):
                 result = agent.invoke({"messages": lc_messages}, config=config)
             except GraphRecursionError as exc:
                 raise self._iteration_limit_error(exc) from exc
-            # Derive parent tool-call labels from the AI messages in the result.
-            for m in result["messages"]:
+            # Derive parent tool-call labels from the AI messages produced by
+            # THIS run only. LangGraph's add_messages reducer preserves the
+            # input prefix in result["messages"], so iterating the full list
+            # would re-emit a label for an AI(tool_calls) message that already
+            # belongs to a prior turn in the caller's history.
+            for m in result["messages"][len(lc_messages):]:
                 if getattr(m, "type", "") == "ai":
                     self._emit_tool_call_labels(m)
             if time.monotonic() > deadline:
@@ -251,7 +255,8 @@ class ToolAgent(Agent, abstract=True):
                 )
             except GraphRecursionError as exc:
                 raise self._iteration_limit_error(exc) from exc
-            for m in result["messages"]:
+            # See the sync invoke() comment: only THIS run's new messages.
+            for m in result["messages"][len(lc_messages):]:
                 if getattr(m, "type", "") == "ai":
                     self._emit_tool_call_labels(m)
             reasoning_lines = [] if outer_channel is not None else channel.drain()

@@ -75,6 +75,10 @@ class Orchestrator(Agent, abstract=True):
         cls._tier = cls._detect_tier()
         # Composition-cycle guard (A) — always on (full impl in Task 7).
         cls._check_composition_cycle()
+        # Tier-1 structural validation: a worker named "supervisor" collides
+        # with the internal supervisor node LangGraph builds for this tier.
+        if cls._tier == 1:
+            cls._validate_tier1()
         # Tier-2 structural validation (full impl in Task 5).
         if cls._tier == 2:
             cls._validate_tier2()
@@ -141,6 +145,24 @@ class Orchestrator(Agent, abstract=True):
             path.pop()
 
         walk(cls)
+
+    # ----- Tier-1 validation -------------------------------------------------
+
+    @classmethod
+    def _validate_tier1(cls) -> None:
+        """A Tier-1 worker named 'supervisor' collides with the internal
+        supervisor node LangGraph builds for this graph (_SUPERVISOR), which
+        surfaces as an opaque LangGraph error on the first invoke rather than
+        a clear message at definition time. Workers are already instantiated
+        here (concrete Agent subclasses auto-instantiate at definition), so
+        this can resolve names without building the graph."""
+        for raw in cls.agents:
+            inst = _instantiate(raw)
+            if inst.name == _SUPERVISOR:
+                raise AixonError(
+                    f"Tier-1 worker name 'supervisor' collides with the "
+                    f"internal supervisor node — rename the agent."
+                )
 
     # ----- Tier-2 validation (contract §3.2) -------------------------------
 

@@ -28,6 +28,16 @@ class LLM:
         self._provider_name = provider          # None → inferred from model name
         self._chat_model: "BaseChatModel | None" = None  # lazy
 
+    def _provider(self):
+        """Resolve this LLM's provider: explicit name, or inferred from the
+        model name. Shared by ``chat_model`` and ``request_chat_model`` so both
+        use the exact same resolution rule."""
+        from aixon.providers.base import get_provider, resolve_provider_for_model
+
+        if self._provider_name is not None:
+            return get_provider(self._provider_name)
+        return resolve_provider_for_model(self.model)
+
     @property
     def chat_model(self) -> "BaseChatModel":
         """Lazily build and cache the LangChain model.
@@ -37,17 +47,27 @@ class LLM:
         register_provider() call).
         """
         if self._chat_model is None:
-            from aixon.providers.base import (
-                get_provider,
-                resolve_provider_for_model,
-            )
-
-            if self._provider_name is not None:
-                provider = get_provider(self._provider_name)
-            else:
-                provider = resolve_provider_for_model(self.model)
-            self._chat_model = provider.build(self.model, **self.params)
+            self._chat_model = self._provider().build(self.model, **self.params)
         return self._chat_model
+
+    def request_chat_model(self) -> "BaseChatModel":
+        """chat_model with the current request's generation params applied.
+
+        Builds a FRESH provider model with the params merged in as constructor
+        kwargs — ``.bind()`` would return a RunnableBinding, which
+        ``langchain.agents.create_agent`` does not accept as a model. Used by
+        ToolAgent (and any other agent that builds a langgraph agent from
+        ``self.llm``) instead of the bare ``chat_model`` so per-request
+        generation params (temperature, max_tokens, ...) reach the provider.
+
+        No active params -> the cached ``chat_model`` (cache preserved, no
+        rebuild)."""
+        from aixon.runtime import current_generation_params
+
+        params = current_generation_params()
+        if not params:
+            return self.chat_model
+        return self._provider().build(self.model, **{**self.params, **params})
 
     def _bound_model(self) -> "BaseChatModel":
         """Chat model with the current request's generation params bound on top

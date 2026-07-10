@@ -68,8 +68,13 @@ class LLMAgent(Agent, abstract=True):
     def _with_prompt(self, messages: list[Message]) -> list[Message]:
         """Return a new list with the system prompt prepended if set.
 
-        Never mutates the caller's list.
+        Aligned with ToolAgent's contract: a leading client system message
+        WINS over the class-level ``self.prompt`` (the class prompt is not
+        prepended on top of it) rather than both reaching the provider as two
+        separate system messages. Never mutates the caller's list.
         """
+        if messages and messages[0].role == "system":
+            return list(messages)
         if self.prompt:
             return [Message(role="system", content=self.prompt), *messages]
         return list(messages)

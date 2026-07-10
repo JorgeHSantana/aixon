@@ -10,6 +10,7 @@ with async + LangGraph, mirroring aixon.reasoning."""
 from __future__ import annotations
 
 import contextvars
+import copy
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -69,16 +70,18 @@ _client_tools: contextvars.ContextVar[list | None] = contextvars.ContextVar(
 
 def current_client_tools() -> list[dict]:
     """Return the client-declared tool definitions for the current request
-    (or ``[]``). Always a fresh copy: mutating the result never pollutes the
-    ContextVar state."""
+    (or ``[]``). Always a DEEP copy: a shallow ``dict(t)`` still shares the
+    nested ``function`` dict with the ContextVar's stored value, so mutating
+    ``result[0]["function"]`` would silently corrupt state seen by later reads
+    (and by concurrent requests/tasks sharing the same underlying tool def)."""
     tools = _client_tools.get()
-    return [dict(t) for t in tools] if tools else []
+    return copy.deepcopy(tools) if tools else []
 
 
 @contextmanager
 def client_tools(tools: list[dict] | None) -> Iterator[list[dict]]:
     """Publish the client's tool definitions for the duration of the block."""
-    value = [dict(t) for t in tools if isinstance(t, dict)] if tools else None
+    value = copy.deepcopy([t for t in tools if isinstance(t, dict)]) if tools else None
     token = _client_tools.set(value)
     try:
         yield value or []

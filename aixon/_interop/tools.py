@@ -36,6 +36,8 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
     from langchain_core.tools import BaseTool, StructuredTool
 
     coerced: list[BaseTool] = []
+    seen_names: set[str] = set()
+    dups: set[str] = set()
     for entry in tools:
         if isinstance(entry, BaseTool):
             coerced.append(entry)
@@ -77,4 +79,13 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
                 f"retriever.as_tool()), a LangChain BaseTool / @tool function, "
                 f"or a plain callable."
             )
+        added = coerced[-1]
+        if added.name in seen_names:
+            dups.add(added.name)
+        seen_names.add(added.name)
+    if dups:
+        raise AixonError(
+            f"Duplicate tool name(s): {sorted(dups)}. Pass as_tool(name=...) "
+            f"to disambiguate."
+        )
     return coerced
