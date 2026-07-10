@@ -265,11 +265,16 @@ class Server:
                               "type": "server_error"}},
                     status_code=500,
                 )
-            prompt_text = "\n".join(m.content for m in pr.messages)
-            completion_text = message.content
-            if message.reasoning:
-                completion_text += "\n" + message.reasoning
-            usage = build_usage(model, prompt_text, completion_text)
+            # Provider-real usage (Message.usage, already OpenAI-shaped) wins;
+            # the tiktoken estimate is the fallback for agents whose provider
+            # reported none. Streaming keeps the estimate-only path.
+            usage = message.usage
+            if not usage:
+                prompt_text = "\n".join(m.content for m in pr.messages)
+                completion_text = message.content
+                if message.reasoning:
+                    completion_text += "\n" + message.reasoning
+                usage = build_usage(model, prompt_text, completion_text)
             return adapter.format_response(model=model, message=message, usage=usage)
 
         # `from __future__ import annotations` (module-level) turns

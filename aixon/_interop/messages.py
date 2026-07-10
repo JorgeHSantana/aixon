@@ -87,6 +87,9 @@ def from_langchain(msg: BaseMessage) -> Message:
     - Role inferred from the LangChain type.
     - tool_calls: forwarded from AIMessage.tool_calls (list of dicts).
     - reasoning: read from additional_kwargs['reasoning_content'] if present.
+    - usage: converted from AIMessage.usage_metadata (provider-real counts,
+      LangChain naming input/output_tokens) to the neutral OpenAI shape
+      (prompt/completion/total_tokens); None when the provider reported none.
     """
     if isinstance(msg, AIMessage):
         role = "assistant"
@@ -115,6 +118,9 @@ def from_langchain(msg: BaseMessage) -> Message:
     tool_call_id = getattr(msg, "tool_call_id", None)
     name = getattr(msg, "name", None)
 
+    usage = usage_from_metadata(getattr(msg, "usage_metadata", None)) \
+        if isinstance(msg, AIMessage) else None
+
     return Message(
         role=role,
         content=content,
@@ -122,4 +128,21 @@ def from_langchain(msg: BaseMessage) -> Message:
         tool_call_id=tool_call_id,
         tool_calls=tool_calls,
         reasoning=reasoning or None,
+        usage=usage,
     )
+
+
+def usage_from_metadata(usage_metadata: object) -> dict[str, int] | None:
+    """LangChain ``usage_metadata`` (input/output/total_tokens) -> neutral
+    OpenAI-shaped usage (prompt/completion/total_tokens). ``None``/empty/
+    non-dict metadata -> None (no usage reported by the provider)."""
+    if not isinstance(usage_metadata, dict) or not usage_metadata:
+        return None
+    prompt = int(usage_metadata.get("input_tokens", 0) or 0)
+    completion = int(usage_metadata.get("output_tokens", 0) or 0)
+    total = int(usage_metadata.get("total_tokens", 0) or 0) or (prompt + completion)
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }

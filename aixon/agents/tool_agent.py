@@ -111,6 +111,27 @@ class ToolAgent(Agent, abstract=True):
                 continue
             emit_reasoning(label)
 
+    @staticmethod
+    def _sum_usage(new_messages) -> dict | None:
+        """Sum provider-real usage over the AI messages produced by THIS run
+        (a multi-step run bills every model turn, not just the final answer).
+        Returns a neutral OpenAI-shaped dict, or None when no AI message
+        carried ``usage_metadata`` (the server then falls back to estimating)."""
+        from aixon._interop.messages import usage_from_metadata
+
+        totals: dict | None = None
+        for m in new_messages:
+            if getattr(m, "type", "") != "ai":
+                continue
+            usage = usage_from_metadata(getattr(m, "usage_metadata", None))
+            if usage is None:
+                continue
+            if totals is None:
+                totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            for key in totals:
+                totals[key] += usage[key]
+        return totals
+
     def _iteration_limit_error(self, exc: Exception) -> AixonError:
         """AixonError for an exhausted iteration budget (LangGraph's recursion
         limit), matching the Orchestrator's wrapping style: the neutral
@@ -169,6 +190,9 @@ class ToolAgent(Agent, abstract=True):
             # nested, leave them in the outer channel for its owner to drain.
             reasoning_lines = [] if outer_channel is not None else channel.drain()
         final = from_langchain(result["messages"][-1])
+        # Usage must cover the WHOLE run (every model turn), not just the
+        # final message that from_langchain converted above.
+        final.usage = self._sum_usage(result["messages"][len(lc_messages):])
         if reasoning_lines:
             final.reasoning = "\n".join(reasoning_lines)
         _log.info(f"agent '{self.name}' completed ({len(reasoning_lines)} step(s))")
@@ -262,6 +286,8 @@ class ToolAgent(Agent, abstract=True):
                     self._emit_tool_call_labels(m)
             reasoning_lines = [] if outer_channel is not None else channel.drain()
         final = from_langchain(result["messages"][-1])
+        # See the sync invoke() comment: usage covers the WHOLE run.
+        final.usage = self._sum_usage(result["messages"][len(lc_messages):])
         if reasoning_lines:
             final.reasoning = "\n".join(reasoning_lines)
         _log.info(f"agent '{self.name}' completed async ({len(reasoning_lines)} step(s))")

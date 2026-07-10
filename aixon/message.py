@@ -13,7 +13,10 @@ Role = Literal["system", "developer", "user", "assistant", "tool"]
 @dataclass
 class Message:
     """A single neutral message. ``tool_calls`` carries provider-agnostic
-    tool-call dicts; ``reasoning`` carries model reasoning when present."""
+    tool-call dicts; ``reasoning`` carries model reasoning when present.
+    ``usage``, when present, carries the provider's REAL token usage in
+    OpenAI shape ({"prompt_tokens", "completion_tokens", "total_tokens"});
+    ``None`` means the provider reported none (consumers may estimate)."""
 
     role: Role
     content: str = ""
@@ -21,6 +24,7 @@ class Message:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: Optional[str] = None
     reasoning: Optional[str] = None
+    usage: Optional[dict[str, int]] = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict, omitting empty optional fields."""
@@ -33,6 +37,8 @@ class Message:
             data["tool_call_id"] = self.tool_call_id
         if self.reasoning is not None:
             data["reasoning"] = self.reasoning
+        if self.usage is not None:
+            data["usage"] = self.usage
         return data
 
 
