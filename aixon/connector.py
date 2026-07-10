@@ -21,7 +21,9 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from typing import Any
 
 from aixon.exceptions import AixonError, NamingError
@@ -73,6 +75,9 @@ class Connector:
         )
 
         self.timeout = timeout
+        self._aclient = None
+        self._aclient_loop: asyncio.AbstractEventLoop | None = None
+        self._aclient_lock = threading.Lock()
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {
@@ -147,11 +152,40 @@ class Connector:
         response.raise_for_status()
         return response.json()
 
+    def _aclient_needs_rebuild(self, loop: asyncio.AbstractEventLoop) -> bool:
+        """True when the cached client is missing/closed, or was built for a
+        DIFFERENT event loop than the one currently running."""
+        client = self._aclient
+        stored_loop = self._aclient_loop
+        return (
+            client is None
+            or client.is_closed
+            or stored_loop is None
+            or stored_loop is not loop
+            or stored_loop.is_closed()
+        )
+
     def _async_client(self):
-        """Lazily-created pooled AsyncClient (keep-alive across tool calls)."""
-        if getattr(self, "_aclient", None) is None or self._aclient.is_closed:
-            httpx = self._httpx()
-            self._aclient = httpx.AsyncClient(timeout=self.timeout)
+        """Lazily-created pooled AsyncClient (keep-alive across tool calls
+        made from the SAME event loop).
+
+        ``httpx.AsyncClient``'s connection pool is bound to the event loop
+        that created it. Caching one instance across separate ``asyncio.run()``
+        calls (each of which spins up a brand-new loop) eventually raises
+        "Event loop is closed" — and ``client.is_closed`` alone does not catch
+        this, since the client itself was never closed, only orphaned from a
+        loop that has since gone away. Rebuild whenever the running loop
+        differs from the one that built the cached client (or that loop is
+        closed, or the client itself is closed). Double-checked locking
+        guards concurrent first-builds (same pattern as
+        ``WeaviateRetriever._ensure``)."""
+        loop = asyncio.get_running_loop()
+        if self._aclient_needs_rebuild(loop):
+            with self._aclient_lock:
+                if self._aclient_needs_rebuild(loop):
+                    httpx = self._httpx()
+                    self._aclient = httpx.AsyncClient(timeout=self.timeout)
+                    self._aclient_loop = loop
         return self._aclient
 
     async def aclose(self) -> None:
@@ -159,6 +193,7 @@ class Connector:
         if getattr(self, "_aclient", None) is not None:
             await self._aclient.aclose()
             self._aclient = None
+            self._aclient_loop = None
 
     async def aget(self, path: str, **kwargs: Any) -> dict:
         """Async GET via a pooled ``httpx.AsyncClient`` (does not block the

@@ -18,6 +18,12 @@ from aixon.message import Chunk, Message
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
 
+# Bound on LLM._request_model_cache: a per-request model is a full provider
+# SDK client (HTTP connection pool and all), so the cache must not grow
+# unbounded across arbitrarily many distinct param combinations. Eviction is
+# oldest-inserted-first (a plain dict preserves insertion order).
+_REQUEST_MODEL_CACHE_MAX = 8
+
 
 class LLM:
     """Declarative handle for a LangChain chat model behind a neutral boundary."""
@@ -27,6 +33,7 @@ class LLM:
         self.params = params
         self._provider_name = provider          # None → inferred from model name
         self._chat_model: "BaseChatModel | None" = None  # lazy
+        self._request_model_cache: dict[tuple, "BaseChatModel"] = {}
 
     def _provider(self):
         """Resolve this LLM's provider: explicit name, or inferred from the
@@ -42,9 +49,13 @@ class LLM:
     def chat_model(self) -> "BaseChatModel":
         """Lazily build and cache the LangChain model.
 
-        Used directly by ToolAgent and Orchestrator (Plan 3+). The provider
-        must already be registered (via importing its module or a custom
-        register_provider() call).
+        Used directly when no per-request generation params are active
+        (LLMAgent's ``_bound_model``, and ``request_chat_model`` itself as its
+        no-params fast path). ToolAgent goes through ``request_chat_model()``
+        instead, which applies per-request params via a fresh/cached provider
+        model rather than this bare cached one. The provider must already be
+        registered (via importing its module or a custom register_provider()
+        call).
         """
         if self._chat_model is None:
             self._chat_model = self._provider().build(self.model, **self.params)
@@ -53,7 +64,7 @@ class LLM:
     def request_chat_model(self) -> "BaseChatModel":
         """chat_model with the current request's generation params applied.
 
-        Builds a FRESH provider model with the params merged in as constructor
+        Builds a provider model with the params merged in as constructor
         kwargs — ``.bind()`` would return a RunnableBinding, which
         ``langchain.agents.create_agent`` does not accept as a model. Used by
         ToolAgent (and any other agent that builds a langgraph agent from
@@ -61,13 +72,31 @@ class LLM:
         generation params (temperature, max_tokens, ...) reach the provider.
 
         No active params -> the cached ``chat_model`` (cache preserved, no
-        rebuild)."""
+        rebuild). Otherwise, models are cached by the exact param combination
+        (bounded, oldest-evicted-first) so repeated requests with the SAME
+        params reuse one provider model (and its HTTP connection pool)
+        instead of rebuilding a fresh SDK client every time."""
         from aixon.runtime import current_generation_params
 
         params = current_generation_params()
         if not params:
             return self.chat_model
-        return self._provider().build(self.model, **{**self.params, **params})
+
+        # `stop` arrives as a list (unhashable) — normalize to a tuple so the
+        # cache key is hashable. Other generation params are already scalars.
+        key = tuple(sorted(
+            (k, tuple(v) if isinstance(v, list) else v) for k, v in params.items()
+        ))
+        cached = self._request_model_cache.get(key)
+        if cached is not None:
+            return cached
+
+        model = self._provider().build(self.model, **{**self.params, **params})
+        if len(self._request_model_cache) >= _REQUEST_MODEL_CACHE_MAX:
+            oldest_key = next(iter(self._request_model_cache))
+            del self._request_model_cache[oldest_key]
+        self._request_model_cache[key] = model
+        return model
 
     def _bound_model(self) -> "BaseChatModel":
         """Chat model with the current request's generation params bound on top

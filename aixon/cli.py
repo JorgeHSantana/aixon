@@ -238,7 +238,12 @@ def _chat_inprocess(package: str) -> None:
         # the agent (a second call would double cost/latency and could diverge
         # from the shown output under temperature > 0).
         content = _stream_inprocess(agent, messages)
-        if content:
+        # None means the turn errored (the matching user message was already
+        # popped by _stream_inprocess) — NOT the same as "" (a successful turn
+        # that simply produced no content). Conflating them via `if content:`
+        # left an empty successful turn with no assistant reply appended, so
+        # the NEXT user message became a second consecutive 'user' entry.
+        if content is not None:
             messages.append(Message(role="assistant", content=content))
 
 

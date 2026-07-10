@@ -70,12 +70,13 @@ class ToolAgent(Agent, abstract=True):
 
     def _build_agent(self, messages: list[Message]):
         """Return (compiled_agent, lc_messages, config). A leading neutral
-        system message overrides self.prompt."""
+        system (or developer — OpenAI's system-role alias) message overrides
+        self.prompt."""
         from langchain.agents import create_agent
         from aixon._interop.messages import to_langchain
 
         system_prompt = self.prompt or None
-        if messages and messages[0].role == "system":
+        if messages and messages[0].role in ("system", "developer"):
             system_prompt = messages[0].content or system_prompt
             messages = messages[1:]
 

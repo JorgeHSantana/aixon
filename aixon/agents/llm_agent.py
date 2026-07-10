@@ -68,12 +68,20 @@ class LLMAgent(Agent, abstract=True):
     def _with_prompt(self, messages: list[Message]) -> list[Message]:
         """Return a new list with the system prompt prepended if set.
 
-        Aligned with ToolAgent's contract: a leading client system message
-        WINS over the class-level ``self.prompt`` (the class prompt is not
-        prepended on top of it) rather than both reaching the provider as two
-        separate system messages. Never mutates the caller's list.
+        Aligned with ToolAgent's contract: a leading client system (or
+        developer — OpenAI's system-role alias) message WINS over the
+        class-level ``self.prompt`` (the class prompt is not prepended on top
+        of it) rather than both reaching the provider as two separate system
+        messages. If that leading message's content is empty, it falls back
+        to the class prompt instead of sending an empty system instruction
+        (mirrors ToolAgent's ``messages[0].content or system_prompt``). Never
+        mutates the caller's list.
         """
-        if messages and messages[0].role == "system":
+        if messages and messages[0].role in ("system", "developer"):
+            if messages[0].content:
+                return list(messages)
+            if self.prompt:
+                return [Message(role=messages[0].role, content=self.prompt), *messages[1:]]
             return list(messages)
         if self.prompt:
             return [Message(role="system", content=self.prompt), *messages]

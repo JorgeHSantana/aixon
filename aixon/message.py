@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
-Role = Literal["system", "user", "assistant", "tool"]
+Role = Literal["system", "developer", "user", "assistant", "tool"]
 
 
 @dataclass

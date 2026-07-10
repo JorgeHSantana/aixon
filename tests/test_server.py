@@ -132,6 +132,18 @@ def test_anthropic_messages_non_stream(anthropic_client):
     assert body["stop_reason"] == "end_turn"
 
 
+def test_anthropic_non_dict_message_entry_is_clean_400(anthropic_client):
+    # Mirrors the OpenAI adapter's S3 guard (see test_bug_sweep_server.py):
+    # a non-dict 'messages' entry must produce a clean 400, not a raw
+    # AttributeError from `m.get(...)` bubbling up as a 500/ugly message.
+    r = anthropic_client.post("/v1/messages", json={
+        "model": "echo",
+        "messages": ["hi"],
+    })
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == "Each entry in 'messages' must be a JSON object."
+
+
 def test_anthropic_messages_stream_named_events(anthropic_client):
     r = anthropic_client.post("/v1/messages", json={
         "model": "echo",

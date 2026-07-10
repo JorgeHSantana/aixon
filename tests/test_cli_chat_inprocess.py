@@ -82,6 +82,44 @@ def test_chat_empty_input_ignored(runner):
     assert result.exit_code == 0
 
 
+def test_empty_successful_turn_preserves_history_alternation(runner):
+    """A turn that streams zero content chunks (but doesn't error) must still
+    append an assistant message (even if empty) — otherwise the NEXT user
+    message becomes a second consecutive 'user' entry in the history sent to
+    the agent, breaking user/assistant alternation."""
+    from aixon.agent import Agent
+    from aixon.message import Chunk, Message
+
+    calls: list[list[Message]] = []
+
+    def _invoke(self, messages):
+        return Message(role="assistant", content="")
+
+    def _stream(self, messages):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            yield Chunk(done=True)  # zero content chunks: empty SUCCESS
+        else:
+            yield Chunk(content="second reply")
+            yield Chunk(done=True)
+
+    type(
+        "EmptyTurnAgent",
+        (Agent,),
+        {"invoke": _invoke, "stream": _stream},
+    )
+
+    result = _invoke_chat(runner, ["1", "first", "second", "/exit"])
+    assert result.exit_code == 0
+
+    assert len(calls) == 2
+    second_call_roles = [m.role for m in calls[1]]
+    assert second_call_roles == ["user", "assistant", "user"]
+    assert calls[1][0].content == "first"
+    assert calls[1][1].content == ""
+    assert calls[1][2].content == "second"
+
+
 def test_chat_streams_reasoning_before_content(runner):
     from tests._cli_fakes import make_cli_echo_agent
     from aixon.message import Chunk

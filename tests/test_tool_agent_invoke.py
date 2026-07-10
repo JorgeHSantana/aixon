@@ -91,6 +91,42 @@ def test_toolagent_invoke_sets_reasoning_on_message(monkeypatch):
     assert "adder" in result.reasoning
 
 
+def test_toolagent_developer_role_overrides_class_prompt(monkeypatch):
+    """A leading 'developer' message (OpenAI's system-role alias) must win
+    over the class-level prompt exactly like a leading 'system' message
+    already does — otherwise the model sees BOTH the class prompt (as
+    create_agent's system_prompt) and the developer message (converted to a
+    second SystemMessage by to_langchain), i.e. duplicated system
+    instructions."""
+    class DevAgent(ToolAgent):
+        llm = LLM("fake-1", provider="fake")
+        prompt = "class prompt must not reach the model"
+        tools = []
+
+    agent = get_registry().resolve("devagent")
+
+    captured: list[list] = []
+    fake = FakeChatModel(script=[AIMessage(content="ok")])
+    original_generate = fake._generate
+
+    def capturing_generate(messages, stop=None, run_manager=None, **kwargs):
+        captured.append(list(messages))
+        return original_generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    fake._generate = capturing_generate
+    monkeypatch.setattr(type(agent.llm), "chat_model", property(lambda self: fake))
+
+    agent.invoke([
+        Message(role="developer", content="dev wins"),
+        Message(role="user", content="hi"),
+    ])
+
+    assert len(captured) >= 1
+    system_msgs = [m for m in captured[0] if type(m).__name__ == "SystemMessage"]
+    assert len(system_msgs) == 1
+    assert system_msgs[0].content == "dev wins"
+
+
 def test_toolagent_is_neutral_in_and_out(monkeypatch):
     def noop(text: str) -> str:
         """noop"""

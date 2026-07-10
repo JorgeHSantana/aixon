@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from tests._fakes import FakeChatModel, make_llm  # registers fake provider
+from tests._fakes import FakeChatModel, FakeProvider, make_llm  # registers fake provider
 from aixon.llm import LLM
 from aixon.message import Chunk, Message
+from aixon.runtime import generation_params
 
 
 # ── Construction + lazy build ─────────────────────────────────────────────────
@@ -73,3 +74,44 @@ def test_stream_final_chunk_has_done_true():
     assert chunks[-1].done is True
     for c in chunks[:-1]:
         assert c.done is False
+
+
+# ── request_chat_model caching ────────────────────────────────────────────────
+
+def test_request_chat_model_reuses_model_for_same_params(monkeypatch):
+    build_calls: list[dict] = []
+    original_build = FakeProvider.build
+
+    def counting_build(self, model, **params):
+        build_calls.append(params)
+        return original_build(self, model, **params)
+
+    monkeypatch.setattr(FakeProvider, "build", counting_build)
+
+    llm = LLM("fake-1", provider="fake")
+    with generation_params({"temperature": 0.3}):
+        m1 = llm.request_chat_model()
+        m2 = llm.request_chat_model()
+
+    assert m1 is m2
+    assert len(build_calls) == 1
+
+
+def test_request_chat_model_rebuilds_for_different_params(monkeypatch):
+    build_calls: list[dict] = []
+    original_build = FakeProvider.build
+
+    def counting_build(self, model, **params):
+        build_calls.append(params)
+        return original_build(self, model, **params)
+
+    monkeypatch.setattr(FakeProvider, "build", counting_build)
+
+    llm = LLM("fake-1", provider="fake")
+    with generation_params({"temperature": 0.3}):
+        m1 = llm.request_chat_model()
+    with generation_params({"temperature": 0.9}):
+        m2 = llm.request_chat_model()
+
+    assert m1 is not m2
+    assert len(build_calls) == 2

@@ -46,6 +46,8 @@ class AnthropicAdapter(ProtocolAdapter):
         if isinstance(system, str) and system:
             messages.append(Message(role="system", content=system))
         for m in body.get("messages") or []:
+            if not isinstance(m, dict):
+                raise ValueError("Each entry in 'messages' must be a JSON object.")
             messages.append(
                 Message(role=m.get("role", "user"), content=_flatten_content(m.get("content")))
             )
@@ -55,6 +57,12 @@ class AnthropicAdapter(ProtocolAdapter):
             messages=messages,
             params=params,
             stream=bool(body.get("stream", False)),
+            # TODO: this is Anthropic-shaped tool defs (input_schema, ...),
+            # while the OpenAI adapter publishes OpenAI-shaped ones (type:
+            # "function", function: {...}) through the same ParsedRequest.tools
+            # field. Any consumer reading current_client_tools() must not
+            # assume one dialect — normalize to a single shape before a
+            # consumer that supports BOTH adapters reads this.
             tools=body.get("tools") or None,
         )
 
@@ -180,6 +188,14 @@ class _AnthropicStreamSession(StreamSession):
     def chunk(self, chunk: Chunk) -> str:
         out = self._message_start()
         if chunk.reasoning:
+            # KNOWN LIMITATION: if reasoning arrives AFTER the text block has
+            # already opened (and therefore closed the thinking block — see
+            # the `chunk.content` branch below), this re-enters here with
+            # `_thinking_index` already set and emits a thinking_delta against
+            # that now-CLOSED block instead of reopening a new one. Real
+            # providers stream all reasoning before any text, so this
+            # interleave is rare; accepted rather than adding block-reopen
+            # bookkeeping for a case that shouldn't occur in practice.
             self._reasoning_parts.append(chunk.reasoning)
             if self._thinking_index is None:
                 self._thinking_index = self._next_index

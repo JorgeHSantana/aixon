@@ -89,6 +89,55 @@ def test_prompt_does_not_mutate_caller_list(prompted_agent):
     assert len(msgs) == 1
 
 
+def test_developer_role_overrides_class_prompt(prompted_agent):
+    """A leading 'developer' message (OpenAI's system-role alias) must win
+    over the class-level prompt exactly like 'system' already does."""
+    agent = prompted_agent
+    seen: list[list[Message]] = []
+    original = agent.llm.complete
+
+    def capturing(messages):
+        seen.append(list(messages))
+        return original(messages)
+
+    agent.llm.complete = capturing
+    agent.invoke([
+        Message(role="developer", content="dev wins"),
+        Message(role="user", content="hi"),
+    ])
+    agent.llm.complete = original
+
+    assert len(seen) == 1
+    system_like = [m for m in seen[0] if m.role in ("system", "developer")]
+    assert len(system_like) == 1
+    assert system_like[0].content == "dev wins"
+
+
+def test_empty_system_content_falls_back_to_class_prompt(prompted_agent):
+    """A leading client system message with EMPTY content must not suppress
+    the class prompt (that would send an empty system instruction and drop
+    self.prompt entirely) — it falls back to self.prompt instead."""
+    agent = prompted_agent
+    seen: list[list[Message]] = []
+    original = agent.llm.complete
+
+    def capturing(messages):
+        seen.append(list(messages))
+        return original(messages)
+
+    agent.llm.complete = capturing
+    agent.invoke([
+        Message(role="system", content=""),
+        Message(role="user", content="hi"),
+    ])
+    agent.llm.complete = original
+
+    assert len(seen) == 1
+    system_like = [m for m in seen[0] if m.role in ("system", "developer")]
+    assert len(system_like) == 1
+    assert system_like[0].content == "You are a helpful assistant."
+
+
 def test_no_prompt_does_not_prepend(echo_agent):
     agent = echo_agent
     assert agent.prompt == ""

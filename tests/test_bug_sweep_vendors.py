@@ -19,15 +19,12 @@ Each test targets exactly one finding from the bug-sweep plan (Task 3):
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import uuid
 
 import httpx
 import pytest
-
-pytest.importorskip("weaviate")
-pytest.importorskip("langchain_weaviate")
-pytest.importorskip("langchain_text_splitters")
 
 from aixon.connector import Connector
 from aixon.embedding import Embedding
@@ -35,6 +32,16 @@ from aixon.exceptions import AixonError
 from aixon.retriever import Retriever, TypeAccess
 from aixon.retrievers.ragie import RagieRetriever
 from aixon.retrievers.weaviate import WeaviateRetriever
+
+
+def _require_weaviate() -> None:
+    """Skip ONLY the tests that actually exercise the weaviate/langchain-
+    weaviate/langchain-text-splitters extras (module-level importorskip here
+    used to skip ALL tests in this file — including P1/R4/R6/C1/C2, which
+    need none of them — whenever the weaviate extra wasn't installed)."""
+    pytest.importorskip("weaviate")
+    pytest.importorskip("langchain_weaviate")
+    pytest.importorskip("langchain_text_splitters")
 
 
 # ─────────────────────────── P1: zai.py key guard ───────────────────────────
@@ -83,6 +90,7 @@ class _FakeVS:
 # ───────────────────── R1/R2: lazy init is thread-safe ─────────────────────
 
 def test_weaviate_lazy_init_is_thread_safe(monkeypatch):
+    _require_weaviate()
     import weaviate
 
     monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
@@ -156,6 +164,7 @@ class _WritableRetriever(WeaviateRetriever):
 
 
 def test_weaviate_rewrite_purges_stale_tail_chunks(monkeypatch):
+    _require_weaviate()
     monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
 
     src = "doc1"
@@ -180,6 +189,7 @@ def test_weaviate_rewrite_purges_stale_tail_chunks(monkeypatch):
 
 
 def test_weaviate_write_rejects_duplicate_source_ids(monkeypatch):
+    _require_weaviate()
     monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
 
     r = _WritableRetriever(client=object())
@@ -190,6 +200,7 @@ def test_weaviate_write_rejects_duplicate_source_ids(monkeypatch):
 def test_weaviate_write_empty_source_ids_are_not_duplicates(monkeypatch):
     # "" means "no source" in the namespace-assignment path (`if src:`), so
     # the duplicate check must use the same predicate and let ["", ""] pass.
+    _require_weaviate()
     monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
 
     r = _WritableRetriever(client=object())
@@ -199,11 +210,12 @@ def test_weaviate_write_empty_source_ids_are_not_duplicates(monkeypatch):
     assert _FakeVS.last.added[0][2] is None
 
 
-def test_weaviate_write_survives_purge_failure(monkeypatch):
+def test_weaviate_write_survives_purge_failure(monkeypatch, caplog):
     # add_texts has already committed when the purge runs; a raising
     # delete_by_id (transient connection/query error — distinct from the
     # boolean not-found return) must NOT turn the successful write into a
     # hard failure: write() logs a warning and returns the new ids.
+    _require_weaviate()
     monkeypatch.setattr("langchain_weaviate.WeaviateVectorStore", _FakeVS)
 
     class _RaisingData:
@@ -212,8 +224,13 @@ def test_weaviate_write_survives_purge_failure(monkeypatch):
 
     client = _FakeWeaviateClient(_RaisingData())
     r = _WritableRetriever(client=client)
-    ids = r.write(["hi"], source_ids=["doc1"])  # must not raise
+    # aixon.logging.Logger sets propagate=False on its underlying logger, so
+    # the root logger never sees these records — caplog must attach directly
+    # to the named logger (not rely on root propagation) to capture them.
+    with caplog.at_level(logging.WARNING, logger="aixon.retrievers.weaviate"):
+        ids = r.write(["hi"], source_ids=["doc1"])  # must not raise
     assert ids == ["id-0"]
+    assert any("stale-chunk purge failed" in m for m in caplog.messages)
 
 
 # ─────────────────────── R4: ragie computed fields win ─────────────────────
@@ -333,8 +350,15 @@ def test_connector_async_client_is_pooled(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _fake_async_client_cls(created, closed))
 
     conn = _ApiConnector(base_url="http://x.com")
-    asyncio.run(conn.aget("/a"))
-    asyncio.run(conn.aget("/b"))
+
+    # Both calls inside the SAME event loop: pooling means one instance is
+    # reused across both. (A cached client is per-loop — see
+    # test_connector_async.py for the cross-`asyncio.run()` rebuild case.)
+    async def _both():
+        await conn.aget("/a")
+        await conn.aget("/b")
+
+    asyncio.run(_both())
     assert created["n"] == 1  # one instance reused across both calls
 
     asyncio.run(conn.aclose())

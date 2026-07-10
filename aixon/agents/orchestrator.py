@@ -155,7 +155,14 @@ class Orchestrator(Agent, abstract=True):
         surfaces as an opaque LangGraph error on the first invoke rather than
         a clear message at definition time. Workers are already instantiated
         here (concrete Agent subclasses auto-instantiate at definition), so
-        this can resolve names without building the graph."""
+        this can resolve names without building the graph.
+
+        NOT symmetric with ``_validate_tier2``: this validation instantiates
+        every worker to read its resolved ``.name`` (cheap and side-effect-
+        free, since concrete Agent subclasses already auto-instantiate at
+        class-definition time). Tier-2 validation never instantiates
+        anything — it only inspects the declarative ``nodes``/``edges``
+        dicts and ``route_<node>`` method names on the class."""
         for raw in cls.agents:
             inst = _instantiate(raw)
             if inst.name == _SUPERVISOR:
