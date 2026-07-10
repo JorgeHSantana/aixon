@@ -36,6 +36,28 @@ def _event(name: str, data: dict) -> str:
     return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _openai_tools(tools) -> list[dict] | None:
+    """Anthropic tool defs ({name, description, input_schema}) -> the OpenAI
+    wire shape, so ParsedRequest.tools is dialect-neutral (always
+    OpenAI-shaped) no matter which adapter parsed the request."""
+    out = []
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        if "function" in t:            # already OpenAI-shaped: pass through
+            out.append(t)
+            continue
+        out.append({
+            "type": "function",
+            "function": {
+                "name": t.get("name", ""),
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema") or {},
+            },
+        })
+    return out or None
+
+
 class AnthropicAdapter(ProtocolAdapter):
     name = "anthropic"
 
@@ -57,13 +79,10 @@ class AnthropicAdapter(ProtocolAdapter):
             messages=messages,
             params=params,
             stream=bool(body.get("stream", False)),
-            # TODO: this is Anthropic-shaped tool defs (input_schema, ...),
-            # while the OpenAI adapter publishes OpenAI-shaped ones (type:
-            # "function", function: {...}) through the same ParsedRequest.tools
-            # field. Any consumer reading current_client_tools() must not
-            # assume one dialect — normalize to a single shape before a
-            # consumer that supports BOTH adapters reads this.
-            tools=body.get("tools") or None,
+            # ParsedRequest.tools is always OpenAI-shaped (see _openai_tools);
+            # this converts the Anthropic wire dialect (input_schema, ...) so
+            # current_client_tools() is dialect-neutral for every consumer.
+            tools=_openai_tools(body.get("tools")),
         )
 
     # --- outbound (non-stream) ------------------------------------------

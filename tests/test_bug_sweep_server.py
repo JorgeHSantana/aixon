@@ -223,5 +223,7 @@ def test_anthropic_parse_request_extracts_tools_not_params():
     from aixon.server.adapters.anthropic import AnthropicAdapter
     pr = AnthropicAdapter().parse_request(
         {"model": "m", "messages": [], "tools": [{"name": "t"}]}, path="/v1/messages")
-    assert pr.tools == [{"name": "t"}]
+    # M2: ParsedRequest.tools is always OpenAI-shaped, regardless of adapter.
+    assert pr.tools == [{"type": "function",
+                         "function": {"name": "t", "description": "", "parameters": {}}}]
     assert "tools" not in pr.params

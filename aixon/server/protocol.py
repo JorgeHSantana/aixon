@@ -31,10 +31,14 @@ class ParsedRequest:
       transport-level fields the adapter already consumed (model, messages,
       stream, system, tools).
     - ``stream``: whether the client asked for an SSE stream.
-    - ``tools``: tool definitions the CLIENT declared on the request (OpenAI
-      function-tool dicts, passed through verbatim), or ``None``. The Server
-      publishes them via ``aixon.runtime.client_tools`` so agents that support
-      client-executed tools can read them; agents that don't simply ignore.
+    - ``tools``: tool definitions the CLIENT declared on the request, ALWAYS
+      normalized to the OpenAI wire shape (``{"type": "function", "function":
+      {"name", "description", "parameters"}}``) regardless of which adapter
+      parsed the request — e.g. AnthropicAdapter converts its
+      ``{name, description, input_schema}`` defs before returning this — or
+      ``None``. The Server publishes them via ``aixon.runtime.client_tools``
+      so agents that support client-executed tools can read a single dialect
+      via ``current_client_tools()``; agents that don't simply ignore.
     """
 
     model: str
