@@ -96,6 +96,14 @@ class Retriever(ABC):
             f"but does not implement write(). Override write() in your subclass."
         )
 
+    async def awrite(self, texts: list[str],
+                      metadatas: list[dict] | None = None) -> list[str]:
+        """Async write. Default bridges the sync ``write`` to a worker thread
+        (mirrors ``asearch``); vendor retrievers with an async SDK may override."""
+        import asyncio
+
+        return await asyncio.to_thread(self.write, texts, metadatas)
+
     def as_tool(
         self,
         name: str | None = None,

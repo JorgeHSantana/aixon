@@ -98,6 +98,10 @@ class Connector:
     def get(self, path: str, **kwargs: Any) -> dict:
         """Issue a GET request to ``base_url + path``.
 
+        ``headers``/``timeout`` in ``kwargs`` are merged with (not clobbered
+        by) the defaults: extra headers add to ``_headers()`` and an explicit
+        timeout overrides ``self.timeout``.
+
         Raises:
             httpx.HTTPStatusError: on non-2xx response.
 
@@ -106,10 +110,12 @@ class Connector:
         """
         httpx = self._httpx()
         url = self.base_url + path
+        headers = {**self._headers(), **(kwargs.pop("headers", None) or {})}
+        timeout = kwargs.pop("timeout", self.timeout)
         response = httpx.get(
             url,
-            headers=self._headers(),
-            timeout=self.timeout,
+            headers=headers,
+            timeout=timeout,
             **kwargs,
         )
         response.raise_for_status()
@@ -118,6 +124,9 @@ class Connector:
     def post(self, path: str, json: dict | None = None, **kwargs: Any) -> dict:
         """Issue a POST request to ``base_url + path`` with a JSON body.
 
+        ``headers``/``timeout`` in ``kwargs`` are merged with the defaults
+        (see ``get``).
+
         Raises:
             httpx.HTTPStatusError: on non-2xx response.
 
@@ -126,34 +135,55 @@ class Connector:
         """
         httpx = self._httpx()
         url = self.base_url + path
+        headers = {**self._headers(), **(kwargs.pop("headers", None) or {})}
+        timeout = kwargs.pop("timeout", self.timeout)
         response = httpx.post(
             url,
             json=json,
-            headers=self._headers(),
-            timeout=self.timeout,
+            headers=headers,
+            timeout=timeout,
             **kwargs,
         )
         response.raise_for_status()
         return response.json()
 
+    def _async_client(self):
+        """Lazily-created pooled AsyncClient (keep-alive across tool calls)."""
+        if getattr(self, "_aclient", None) is None or self._aclient.is_closed:
+            httpx = self._httpx()
+            self._aclient = httpx.AsyncClient(timeout=self.timeout)
+        return self._aclient
+
+    async def aclose(self) -> None:
+        """Close the pooled async client (idempotent)."""
+        if getattr(self, "_aclient", None) is not None:
+            await self._aclient.aclose()
+            self._aclient = None
+
     async def aget(self, path: str, **kwargs: Any) -> dict:
-        """Async GET via ``httpx.AsyncClient`` (does not block the event loop).
-        Same contract as ``get``. Use from an async tool / ``ainvoke`` path."""
-        httpx = self._httpx()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                self.base_url + path, headers=self._headers(), **kwargs
-            )
+        """Async GET via a pooled ``httpx.AsyncClient`` (does not block the
+        event loop; the client is kept alive across calls — see ``aclose``).
+        Same contract as ``get``, including the ``headers``/``timeout`` merge.
+        Use from an async tool / ``ainvoke`` path."""
+        client = self._async_client()
+        headers = {**self._headers(), **(kwargs.pop("headers", None) or {})}
+        timeout = kwargs.pop("timeout", self.timeout)
+        response = await client.get(
+            self.base_url + path, headers=headers, timeout=timeout, **kwargs
+        )
         response.raise_for_status()
         return response.json()
 
     async def apost(self, path: str, json: dict | None = None, **kwargs: Any) -> dict:
-        """Async POST via ``httpx.AsyncClient``. Same contract as ``post``."""
-        httpx = self._httpx()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                self.base_url + path, json=json, headers=self._headers(), **kwargs
-            )
+        """Async POST via a pooled ``httpx.AsyncClient``. Same contract as
+        ``post`` (see ``aget`` for the pooling/merge behavior)."""
+        client = self._async_client()
+        headers = {**self._headers(), **(kwargs.pop("headers", None) or {})}
+        timeout = kwargs.pop("timeout", self.timeout)
+        response = await client.post(
+            self.base_url + path, json=json, headers=headers, timeout=timeout,
+            **kwargs
+        )
         response.raise_for_status()
         return response.json()
 

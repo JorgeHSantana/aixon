@@ -77,11 +77,11 @@ class RagieRetriever(Retriever):
         for chunk in response.scored_chunks:
             chunk_meta = getattr(chunk, "metadata", None) or {}
             metadata = {
+                **(getattr(chunk, "document_metadata", None) or {}),
+                **chunk_meta,
                 "document_id": chunk.document_id,
                 "document_name": getattr(chunk, "document_name", None),
                 "score": chunk.score,
-                **(getattr(chunk, "document_metadata", None) or {}),
-                **chunk_meta,
             }
             docs.append({"text": chunk.text, "metadata": metadata})
         return docs

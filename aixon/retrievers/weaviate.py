@@ -9,6 +9,7 @@ aixon.Embedding neutro, embrulhado no langchain via _LangchainEmbeddings."""
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from typing import Any
 
@@ -54,7 +55,7 @@ class WeaviateRetriever(Retriever):
     collection_name: str = ""
     embedding: Embedding | None = None
     text_key: str = "content"
-    metadata_fields: list[str] = []
+    metadata_fields: tuple[str, ...] | list[str] = ()
     max_query_results: int = 5
     chunk_size: int = 1000
     chunk_overlap: int = 200
@@ -86,38 +87,47 @@ class WeaviateRetriever(Retriever):
         self._vectorstore: Any = None
         self._splitter: Any = None
         self._ranker: Any = None
+        self._init_lock = threading.Lock()
 
     def _ensure(self) -> None:
-        """Monta client + vectorstore + splitter uma vez (lazy)."""
+        """Monta client + vectorstore + splitter uma vez (lazy, thread-safe).
+
+        Double-checked locking: the fast path (already initialized) never
+        touches the lock; concurrent first-callers race into the lock but
+        only one of them actually builds the client/vectorstore — the rest
+        see ``_vectorstore is not None`` once inside and return."""
         if self._vectorstore is not None:
             return
-        if self._client is None:
+        with self._init_lock:
+            if self._vectorstore is not None:
+                return
+            if self._client is None:
+                try:
+                    import weaviate
+                except ImportError as exc:
+                    raise ImportError(
+                        "WeaviateRetriever needs weaviate-client. Install with "
+                        "'pip install aixon[weaviate]'."
+                    ) from exc
+                self._client = weaviate.connect_to_local(
+                    host=self._host, port=self._port,
+                    skip_init_checks=self._skip_init_checks)
             try:
-                import weaviate
+                from langchain_text_splitters import RecursiveCharacterTextSplitter
+                from langchain_weaviate import WeaviateVectorStore
             except ImportError as exc:
                 raise ImportError(
-                    "WeaviateRetriever needs weaviate-client. Install with "
+                    "WeaviateRetriever needs langchain-weaviate and "
+                    "langchain-text-splitters. Install with "
                     "'pip install aixon[weaviate]'."
                 ) from exc
-            self._client = weaviate.connect_to_local(
-                host=self._host, port=self._port,
-                skip_init_checks=self._skip_init_checks)
-        try:
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-            from langchain_weaviate import WeaviateVectorStore
-        except ImportError as exc:
-            raise ImportError(
-                "WeaviateRetriever needs langchain-weaviate and "
-                "langchain-text-splitters. Install with "
-                "'pip install aixon[weaviate]'."
-            ) from exc
-        self._vectorstore = WeaviateVectorStore(
-            client=self._client, index_name=self.collection_name,
-            text_key=self.text_key,
-            embedding=_LangchainEmbeddings(self.embedding),
-            attributes=self.metadata_fields)
-        self._splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
+            self._vectorstore = WeaviateVectorStore(
+                client=self._client, index_name=self.collection_name,
+                text_key=self.text_key,
+                embedding=_LangchainEmbeddings(self.embedding),
+                attributes=list(self.metadata_fields))
+            self._splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
 
     def _search_kwargs(self, k: int | None, filters: Any) -> dict:
         kwargs: dict[str, Any] = {"k": k or self.max_query_results}
@@ -158,7 +168,9 @@ class WeaviateRetriever(Retriever):
         if not docs:
             return []
         if self._ranker is None:  # lazy, cached (ONNX model load is expensive)
-            self._ranker = Ranker()
+            with self._init_lock:
+                if self._ranker is None:
+                    self._ranker = Ranker()
         ranker = self._ranker
         passages = [{"id": str(i), "text": d.page_content, "meta": d.metadata}
                     for i, d in enumerate(docs)]
@@ -178,29 +190,54 @@ class WeaviateRetriever(Retriever):
             raise ValueError(
                 f"metadatas length ({len(metadatas)}) must match texts length "
                 f"({len(texts)}).")
+        if source_ids:
+            seen: set[str] = set()
+            for sid in source_ids:
+                if sid is None:
+                    continue
+                if sid in seen:
+                    raise ValueError(
+                        f"duplicate source_id {sid!r} in the same write() call "
+                        f"— each source_id must be unique per call, otherwise "
+                        f"chunk ids collide silently in the vector store."
+                    )
+                seen.add(sid)
         self._ensure()
         metadatas = metadatas or [{} for _ in texts]
         all_texts: list[str] = []
         all_metas: list[dict] = []
         all_ids: list[str | None] = []
+        # (namespace, new_chunk_count) per source_id, to purge any stale tail
+        # left over from a previous write() where the document had more chunks.
+        purge_specs: list[tuple[uuid.UUID, int]] = []
         for i, (text, meta) in enumerate(zip(texts, metadatas)):
             chunks = self._splitter.create_documents([text], [meta])
             src = source_ids[i] if source_ids and i < len(source_ids) else None
+            ns: uuid.UUID | None = None
+            if src:
+                try:
+                    ns = uuid.UUID(src)
+                except ValueError:
+                    ns = uuid.uuid5(uuid.NAMESPACE_DNS, src)
             for ci, chunk in enumerate(chunks):
                 all_texts.append(chunk.page_content)
                 all_metas.append(chunk.metadata)
-                if src:
-                    try:
-                        ns = uuid.UUID(src)
-                    except ValueError:
-                        ns = uuid.uuid5(uuid.NAMESPACE_DNS, src)
-                    all_ids.append(str(uuid.uuid5(ns, str(ci))))
-                else:
-                    all_ids.append(None)
+                all_ids.append(str(uuid.uuid5(ns, str(ci))) if ns else None)
+            if ns is not None:
+                purge_specs.append((ns, len(chunks)))
         if any(all_ids):
-            return self._vectorstore.add_texts(
+            result = self._vectorstore.add_texts(
                 texts=all_texts, metadatas=all_metas, ids=all_ids)
-        return self._vectorstore.add_texts(texts=all_texts, metadatas=all_metas)
+        else:
+            result = self._vectorstore.add_texts(
+                texts=all_texts, metadatas=all_metas)
+        if purge_specs:
+            collection = self._client.collections.get(self.collection_name)
+            for ns, n in purge_specs:
+                ci = n
+                while collection.data.delete_by_id(uuid.uuid5(ns, str(ci))):
+                    ci += 1
+        return result
 
     def close(self) -> None:
         if self._owns_client and self._client is not None:
