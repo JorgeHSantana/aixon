@@ -34,12 +34,18 @@ dependencies = [
     "langchain>=1.0",
     "langchain-core>=1.0",
     "langgraph>=1.0",
+    # click is core: the `aixon` console-script is installed unconditionally
+    # (see [project.scripts] below), so its runtime dependency cannot live in
+    # an optional extra — a bare install would traceback on `aixon --help`.
+    "click>=8.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "httpx2"]  # httpx2: starlette>=0.5x TestClient
+# fastapi/openai are needed to exercise the server + remote-chat code paths
+# exercised by the test suite; click is a core dep (see above), not repeated here.
+dev = ["pytest", "pytest-cov", "httpx2", "fastapi", "openai"]  # httpx2: starlette>=0.5x TestClient
 server = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "httpx>=0.27", "pydantic>=2.0"]
-cli = ["click>=8.0", "openai>=1.0"]
+cli = ["openai>=1.0"]
 openai = ["langchain-openai>=0.2"]
 anthropic = ["langchain-anthropic>=0.2"]
 google = ["langchain-google-genai>=2.0"]

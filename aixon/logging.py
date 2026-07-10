@@ -10,20 +10,25 @@ import os
 class Logger:
     def __init__(self, name: str):
         level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-        level = getattr(logging, level_name, logging.INFO)
+        level = logging.getLevelName(level_name)
+        if not isinstance(level, int):
+            level = logging.INFO
 
         self._logger = logging.getLogger(name)
         self._logger.setLevel(level)
-
+        # Own handler + no propagation: one line per record, even when the
+        # consumer configures the root logger.
+        self._logger.propagate = False
         if not self._logger.handlers:
             handler = logging.StreamHandler()
-            handler.setLevel(level)
             formatter = logging.Formatter(
                 "[%(asctime)s] %(levelname)s %(name)s — %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
             handler.setFormatter(formatter)
             self._logger.addHandler(handler)
+        for handler in self._logger.handlers:
+            handler.setLevel(level)
 
     def info(self, msg: str, *args, **kwargs):
         self._logger.info(msg, *args, **kwargs)

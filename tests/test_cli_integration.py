@@ -77,8 +77,11 @@ def test_pyproject_cli_extra_includes_openai():
     assert any("openai" in dep for dep in cli_deps)
 
 
-def test_pyproject_cli_extra_includes_click():
-    """cli extra must declare click>=8.0."""
+def test_pyproject_click_is_core_dependency():
+    """click must be a CORE dependency, not in the 'cli' extra (bug-sweep I2):
+    the 'aixon' console-script is installed unconditionally by [project.scripts],
+    so a bare install without the 'cli' extra would traceback on `aixon --help`
+    if click were optional."""
     import os
     import tomllib
 
@@ -87,5 +90,7 @@ def test_pyproject_cli_extra_includes_click():
     )
     with open(pyproject_path, "rb") as f:
         data = tomllib.load(f)
+    core_deps = data["project"]["dependencies"]
+    assert any("click" in dep for dep in core_deps)
     cli_deps = data["project"]["optional-dependencies"]["cli"]
-    assert any("click" in dep for dep in cli_deps)
+    assert not any("click" in dep for dep in cli_deps)

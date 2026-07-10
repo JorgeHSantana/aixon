@@ -74,7 +74,10 @@ def _print_dim(text: str) -> None:
     if _supports_ansi():
         click.echo(f"{_DIM}{text}{_RESET}", nl=False)
     else:
-        click.echo(text, nl=False)
+        # No TTY: reasoning would otherwise interleave with the captured
+        # stdout content (e.g. when a caller pipes/redirects stdout). Route
+        # it to stderr instead — a separate diagnostic stream.
+        click.echo(text, nl=False, err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +179,10 @@ def _stream_inprocess(agent: object, messages: list) -> str:
         # A provider error must not crash the CLI and lose the conversation —
         # report it and return to the prompt (same pattern as remote mode).
         click.echo(f"\nError: {exc}", err=True)
+        # The turn's 'user' message was already appended before this call —
+        # drop it so a retry does not send two consecutive 'user' messages.
+        if messages and messages[-1].role == "user":
+            messages.pop()
     return "".join(parts)
 
 
@@ -320,6 +327,10 @@ def _chat_remote(url: str) -> None:
                 click.echo()
             except Exception as exc:
                 click.echo(f"\nError: {exc}", err=True)
+                # Drop the just-appended 'user' message — a retry must not
+                # send two consecutive 'user' messages to the server.
+                if messages and messages[-1]["role"] == "user":
+                    messages.pop()
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +382,9 @@ dependencies = [
 
 [project.optional-dependencies]
 all = ["aixon[all]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["agents"]
 """
 
 
@@ -454,10 +468,7 @@ def serve_command(host: str, port: int, package: str, anthropic: bool) -> None:
         raise SystemExit(1)
 
     _ensure_cwd_on_path()
-    try:
-        autodiscover(package)
-    except (ImportError, ModuleNotFoundError, ValueError):
-        click.echo(f"Warning: could not autodiscover package '{package}'.", err=True)
+    _autodiscover_quietly(package)
 
     adapters = [OpenAIAdapter()]
     if anthropic:

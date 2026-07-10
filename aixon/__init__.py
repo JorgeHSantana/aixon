@@ -78,15 +78,13 @@ __all__ = [
     "WeaviateRetriever",
 ]
 
-# Plan 5 — server surface (optional; requires aixon[server]). Guard so
-# `import aixon` still works on a bare install without FastAPI/uvicorn
-# (mirrors the LLM guard above; contract §9.4).
-try:
-    from aixon.server.adapters.anthropic import AnthropicAdapter
-    from aixon.server.adapters.openai import OpenAIAdapter
-    from aixon.server.protocol import ParsedRequest, ProtocolAdapter
-    from aixon.server.server import Server
+# Plan 5 — server surface. aixon.server.server, protocol, and both adapters
+# import only stdlib + aixon at module level (fastapi/uvicorn are lazy, used
+# only inside methods), so this import never fails on a bare install — no
+# guard needed (was dead code; see bug-sweep I5).
+from aixon.server.adapters.anthropic import AnthropicAdapter
+from aixon.server.adapters.openai import OpenAIAdapter
+from aixon.server.protocol import ParsedRequest, ProtocolAdapter
+from aixon.server.server import Server
 
-    __all__ += ["Server", "ProtocolAdapter", "OpenAIAdapter", "AnthropicAdapter", "ParsedRequest"]
-except ImportError:  # pragma: no cover - bare install without [server]
-    pass
+__all__ += ["Server", "ProtocolAdapter", "OpenAIAdapter", "AnthropicAdapter", "ParsedRequest"]
