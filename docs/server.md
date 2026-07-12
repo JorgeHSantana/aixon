@@ -185,11 +185,17 @@ Full OpenAI-compatible wire format. Served routes:
 > form. Agents that ignore client tools keep working unchanged. Runnable demo:
 > `examples/client_tools/`.
 >
-> The full client-tool **round-trip** is an OpenAI-dialect feature. The
-> Anthropic adapter normalizes inbound tool defs into `ParsedRequest.tools`
-> (so agents can act on them), but its responses don't emit `tool_use`
-> blocks and its parser doesn't ingest `tool_result` history yet — point
-> client-tool traffic at the OpenAI routes.
+> The client-tool **round-trip** also works over the Anthropic dialect
+> (`/v1/messages`), using the SAME `Message.tool_calls` / `Chunk.tool_calls`
+> neutral shapes. Outbound, `Message.tool_calls` becomes `tool_use` content
+> blocks (`stop_reason: "tool_use"`); on a stream, each call opens a
+> `content_block_start` (`type: "tool_use"`), one `input_json_delta` carrying
+> the full arguments, and a `content_block_stop` — the final `message_delta`
+> uses `stop_reason: "tool_use"` when the stream emitted one. Inbound, an
+> `assistant` history message with `tool_use` blocks parses back into
+> `Message.tool_calls`, and a `user` message with `tool_result` blocks parses
+> into one `role: "tool"` neutral message per block (`tool_call_id` from
+> `tool_use_id`).
 
 > **Non-blocking.** The server `await`s `agent.ainvoke` / `agent.astream`, so an
 > in-flight LLM call does not block the event loop — concurrent requests overlap

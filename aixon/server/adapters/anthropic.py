@@ -37,6 +37,67 @@ def _event(name: str, data: dict) -> str:
     return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _tool_use_id(tc: dict) -> str:
+    """Neutral tool-call id -> Anthropic ``tool_use.id``; an empty/missing
+    neutral id (e.g. an agent that didn't bother minting one) gets a fresh
+    ``toolu_`` one rather than shipping an empty id on the wire."""
+    return tc.get("id") or f"toolu_{uuid.uuid4().hex}"
+
+
+def _assistant_message_from_blocks(content: list) -> Message:
+    """Assistant history content[] -> one neutral Message: text blocks flatten
+    into ``content`` (same as ``_flatten_content``), ``tool_use`` blocks become
+    ``Message.tool_calls`` entries in the neutral ``{name, args, id, type}``
+    shape (mirrors ``_neutral_tool_calls`` in the OpenAI adapter)."""
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            tool_calls.append({
+                "name": block.get("name", ""),
+                "args": block.get("input") or {},
+                "id": block.get("id", ""),
+                "type": "tool_call",
+            })
+    return Message(role="assistant", content="".join(text_parts), tool_calls=tool_calls)
+
+
+def _user_messages_from_tool_result_blocks(content: list) -> list[Message]:
+    """User history content[] with tool_result blocks -> one neutral
+    ``Message(role="tool", ...)`` PER tool_result block (a tool_result's
+    ``content`` may be a string or a list of text blocks — flatten either
+    way), interleaved with a normal ``role="user"`` Message for any text
+    blocks found alongside them, in the order the blocks appear."""
+    out: list[Message] = []
+    text_buffer: list[str] = []
+
+    def _flush_text() -> None:
+        if text_buffer:
+            out.append(Message(role="user", content="".join(text_buffer)))
+            text_buffer.clear()
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text_buffer.append(block.get("text", ""))
+        elif btype == "tool_result":
+            _flush_text()
+            out.append(Message(
+                role="tool",
+                tool_call_id=block.get("tool_use_id", ""),
+                content=_flatten_content(block.get("content")),
+            ))
+    _flush_text()
+    return out
+
+
 def _openai_tools(tools) -> list[dict] | None:
     """Anthropic tool defs ({name, description, input_schema}) -> the OpenAI
     wire shape, so ParsedRequest.tools is dialect-neutral (always
@@ -77,9 +138,17 @@ class AnthropicAdapter(ProtocolAdapter):
         for m in body.get("messages") or []:
             if not isinstance(m, dict):
                 raise ValueError("Each entry in 'messages' must be a JSON object.")
-            messages.append(
-                Message(role=m.get("role", "user"), content=_flatten_content(m.get("content")))
-            )
+            role = m.get("role", "user")
+            content = m.get("content")
+            if role == "assistant" and isinstance(content, list):
+                messages.append(_assistant_message_from_blocks(content))
+                continue
+            if role == "user" and isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                messages.extend(_user_messages_from_tool_result_blocks(content))
+                continue
+            messages.append(Message(role=role, content=_flatten_content(content)))
         params = {k: v for k, v in body.items() if k not in _TRANSPORT_FIELDS}
         return ParsedRequest(
             model=body.get("model") or "",
@@ -100,13 +169,30 @@ class AnthropicAdapter(ProtocolAdapter):
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
             }
+        content: list[dict] = [{"type": "text", "text": message.content}]
+        stop_reason = "end_turn"
+        if message.tool_calls:
+            # message.content only becomes a text block when non-empty (a
+            # tool-calls-only turn, the common case, has no text preamble);
+            # `_flatten_content` intact behavior is preserved by the else path.
+            content = []
+            if message.content:
+                content.append({"type": "text", "text": message.content})
+            for tc in message.tool_calls:
+                content.append({
+                    "type": "tool_use",
+                    "id": _tool_use_id(tc),
+                    "name": tc.get("name", ""),
+                    "input": tc.get("args") or {},
+                })
+            stop_reason = "tool_use"
         return {
             "id": f"msg_{uuid.uuid4().hex}",
             "type": "message",
             "role": "assistant",
             "model": model,
-            "content": [{"type": "text", "text": message.content}],
-            "stop_reason": "end_turn",
+            "content": content,
+            "stop_reason": stop_reason,
             "stop_sequence": None,
             "usage": out_usage,
         }
@@ -187,6 +273,7 @@ class _AnthropicStreamSession(StreamSession):
         self._open_kind: str | None = None  # "thinking" | "text" | None
         self._content_parts: list[str] = []
         self._reasoning_parts: list[str] = []
+        self._had_tool_use = False  # flips the final message_delta.stop_reason
 
     def _message_start(self) -> str:
         if self._started:
@@ -250,6 +337,30 @@ class _AnthropicStreamSession(StreamSession):
                 "type": "content_block_delta", "index": self._open_index,
                 "delta": {"type": "text_delta", "text": chunk.content},
             })
+        if chunk.tool_calls:
+            # A tool_use block is never additive (unlike text/thinking deltas):
+            # the full call is already known, so it opens, gets ONE
+            # input_json_delta with the whole JSON, and closes immediately —
+            # whatever text/thinking block was open closes first (a new kind
+            # always forces the current block shut, see _open_block).
+            out += self._close_open_block()
+            for tc in chunk.tool_calls:
+                index = self._next_index
+                self._next_index += 1
+                out += _event("content_block_start", {
+                    "type": "content_block_start", "index": index,
+                    "content_block": {"type": "tool_use", "id": _tool_use_id(tc),
+                                      "name": tc.get("name", ""), "input": {}},
+                })
+                out += _event("content_block_delta", {
+                    "type": "content_block_delta", "index": index,
+                    "delta": {"type": "input_json_delta",
+                             "partial_json": json.dumps(tc.get("args") or {},
+                                                        ensure_ascii=False)},
+                })
+                out += _event("content_block_stop",
+                             {"type": "content_block_stop", "index": index})
+            self._had_tool_use = True
         if chunk.done:
             out += self._close_open_block()
             from aixon.server.usage import build_usage
@@ -259,9 +370,10 @@ class _AnthropicStreamSession(StreamSession):
                 completion_text += "\n" + "".join(self._reasoning_parts)
             usage = build_usage(self.model, "", completion_text)
             output_tokens = usage.get("completion_tokens", 0) if usage else 0
+            stop_reason = "tool_use" if self._had_tool_use else "end_turn"
             out += _event("message_delta", {
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
                 "usage": {"output_tokens": output_tokens},
             })
         return out
