@@ -64,3 +64,15 @@ def test_mixed_anthropic_and_openai_and_junk_tools():
     assert len(pr.tools) == 2
     assert pr.tools[0]["function"]["name"] == "get_weather"
     assert pr.tools[1] is openai_tool
+
+
+def test_anthropic_server_tools_are_skipped():
+    # Anthropic SERVER tools (no input_schema, e.g. web_search) cannot be
+    # expressed as a client function tool — they must be skipped, not turned
+    # into a bogus empty-parameters function def.
+    pr = _parse([
+        {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+        {"name": "real_tool", "description": "d", "input_schema": {"type": "object"}},
+    ])
+    assert len(pr.tools) == 1
+    assert pr.tools[0]["function"]["name"] == "real_tool"

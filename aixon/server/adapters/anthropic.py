@@ -48,6 +48,12 @@ def _openai_tools(tools) -> list[dict] | None:
         if "function" in t:            # already OpenAI-shaped: pass through
             out.append(t)
             continue
+        if "input_schema" not in t:
+            # Anthropic SERVER tools (e.g. {"type": "web_search_20250305",
+            # "name": "web_search", "max_uses": 5}) have no input_schema and
+            # cannot be expressed as a client function tool — skip rather
+            # than emit a bogus empty-parameters function def.
+            continue
         out.append({
             "type": "function",
             "function": {

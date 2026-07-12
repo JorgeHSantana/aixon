@@ -222,8 +222,11 @@ def test_anthropic_stream_emits_message_start_and_block_envelope():
 def test_anthropic_parse_request_extracts_tools_not_params():
     from aixon.server.adapters.anthropic import AnthropicAdapter
     pr = AnthropicAdapter().parse_request(
-        {"model": "m", "messages": [], "tools": [{"name": "t"}]}, path="/v1/messages")
+        {"model": "m", "messages": [],
+         "tools": [{"name": "t", "input_schema": {"type": "object"}}]},
+        path="/v1/messages")
     # M2: ParsedRequest.tools is always OpenAI-shaped, regardless of adapter.
     assert pr.tools == [{"type": "function",
-                         "function": {"name": "t", "description": "", "parameters": {}}}]
+                         "function": {"name": "t", "description": "",
+                                      "parameters": {"type": "object"}}}]
     assert "tools" not in pr.params

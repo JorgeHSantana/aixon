@@ -8,13 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.13] - 2026-07-12
 
 ### Added
-- Real provider usage tracking via `Message.usage` (M1: tiktoken fallback for batch-only providers)
+- Real provider usage tracking via `Message.usage` — provider-reported usage wins on non-streaming responses; the tiktoken estimate remains the fallback when the provider reports none (and for streaming) (M1)
 - Production stream session support for Anthropic with interleaved blocks and error envelope closing (M3)
-- `ParsedRequest.tools` now always OpenAI-shaped, with anthropic definitions normalized (M2)
 - mypy CI gate in both workflows plus a bare-install smoke job on PRs; `[tool.mypy]` config in pyproject.toml (M4)
 
 ### Changed
-- Request tools dialect unified to OpenAI format across all providers (M2)
+- `ParsedRequest.tools` is now always OpenAI-shaped: the Anthropic adapter normalizes inbound tool defs, so `current_client_tools()` is dialect-neutral (M2)
 
 ### Fixed
 - Anthropic provider no longer passes `api_key=None` to ChatAnthropic when the env var is unset (raised a pydantic ValidationError) — pre-existing bug surfaced by the M4 mypy gate
