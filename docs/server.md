@@ -151,7 +151,8 @@ Full OpenAI-compatible wire format. Served routes:
 > server fall back to a `tiktoken` estimate (`pip install aixon[tiktoken]`),
 > counted in the Server layer — the neutral `Message`/`Chunk` types still carry
 > no token counts of their own. Without `tiktoken` AND no provider usage,
-> `usage` is omitted — never an error. Streaming keeps the estimate-only path
+> the response carries an empty usage object (`"usage": {}`) — never an
+> error. Streaming keeps the estimate-only path
 > (provider usage isn't accumulated mid-stream); add
 > `"stream_options": {"include_usage": true}` to get a final usage chunk before
 > `[DONE]`.

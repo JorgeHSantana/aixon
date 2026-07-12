@@ -50,8 +50,9 @@ pip install aixon          # core: langchain + langgraph — agents work out of 
 ```
 
 `langchain`/`langchain-core`/`langgraph`/`click` are mandatory core dependencies
-— the `aixon` command (`list`, `new`, in-process `chat`, `serve`) is already on
-your PATH after a bare install. The optional extras add the outer layers:
+— the `aixon` command (`list`, `new`, in-process `chat`, and `serve` given the
+`server` extra) is already on your PATH after a bare install. The optional
+extras add the outer layers:
 
 ```bash
 pip install "aixon[server]"            # FastAPI + uvicorn + httpx — serve agents as an API
@@ -344,11 +345,11 @@ pytest                         # run the suite
 mypy aixon                     # type-check the package
 ```
 
-CI runs both `mypy aixon` and the full suite on every push/PR, plus a
-bare-install smoke job (`pip install .` with no extras, then `import aixon`
-and `aixon --help`) that guards the neutral-boundary/lazy-import discipline —
-the core package must stay importable and the CLI runnable without any
-optional dependency installed.
+CI runs both `mypy aixon` and the full suite on every push/PR. The PR gate
+additionally runs a bare-install smoke job (`pip install .` with no extras,
+then `import aixon` and `aixon --help`) that guards the
+neutral-boundary/lazy-import discipline — the core package must stay
+importable and the CLI runnable without any optional dependency installed.
 
 ---
 
