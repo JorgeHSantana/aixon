@@ -14,9 +14,9 @@ from aixon.embedding import OpenAIEmbedding
 class _FakeOpenAIEmbeddings:
     """Minimal stand-in for langchain_openai.OpenAIEmbeddings."""
 
-    def __init__(self, model, openai_api_key):
+    def __init__(self, model, api_key):
         self.model = model
-        self.openai_api_key = openai_api_key
+        self.openai_api_key = api_key
 
     def embed_documents(self, texts):
         return [[0.1, 0.2] for _ in texts]
@@ -59,7 +59,7 @@ def test_openai_embedding_custom_api_key_env(patched_openai, monkeypatch):
     monkeypatch.setenv("MY_KEY", "sk-custom")
     emb = OpenAIEmbedding("text-embedding-3-small", api_key_env="MY_KEY")
     emb.embed_query("x")
-    assert emb._client.openai_api_key == "sk-custom"
+    assert emb._client.openai_api_key.get_secret_value() == "sk-custom"
 
 
 def test_openai_embedding_client_cached(patched_openai, monkeypatch):

@@ -26,6 +26,7 @@ class ZAIProvider(Provider):
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_openai import ChatOpenAI  # lazy import
+        from pydantic import SecretStr
 
         api_key = os.getenv(self.env_key)
         if not api_key:
@@ -36,7 +37,12 @@ class ZAIProvider(Provider):
             )
         base_url = os.getenv("ZAI_BASE_URL", DEFAULT_BASE_URL)
         apply_resilience_defaults(params)
-        return ChatOpenAI(model=model, api_key=api_key, base_url=base_url, **params)
+        # ChatOpenAI's `api_key` field is SecretStr | Callable | None, not a
+        # bare str — wrap explicitly (api_key is guaranteed truthy here, the
+        # `raise` above already ruled out the empty/missing case).
+        return ChatOpenAI(
+            model=model, api_key=SecretStr(api_key), base_url=base_url, **params
+        )
 
 
 register_provider(ZAIProvider())

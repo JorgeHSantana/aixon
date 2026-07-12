@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Hashable
 from typing import Any, AsyncIterator, Iterator
 
 from langgraph.graph import StateGraph
@@ -140,7 +141,12 @@ class Orchestrator(Agent, abstract=True):
             path.append(node_cls)
             neighbors = getattr(node_cls, "_referenced_agent_classes", None)
             if callable(neighbors):
-                for nxt in node_cls._referenced_agent_classes():
+                # Call the already-fetched (and callable-checked) `neighbors`,
+                # not `node_cls._referenced_agent_classes()` again — `node_cls`
+                # is typed as plain `type` here (any class may be a node/tool),
+                # so a direct attribute access on it doesn't type-check even
+                # though we just proved the attribute exists and is callable.
+                for nxt in neighbors():
                     walk(nxt)
             path.pop()
 
@@ -352,7 +358,11 @@ class Orchestrator(Agent, abstract=True):
                 f"Tier 1 Orchestrator '{type(self).__name__}' has an empty "
                 f"`agents` list. Add at least one worker Agent."
             )
-        graph = StateGraph(self.State)
+        # self.State is a runtime-only `type` (the nested `class State(...)`
+        # declared on a concrete Orchestrator subclass, resolved in the
+        # `State` property above) — mypy can't infer StateGraph's generic
+        # parameter from it, hence the explicit annotation.
+        graph: StateGraph[Any] = StateGraph(self.State)
 
         def supervisor_node(state: GraphState) -> dict:
             return {}  # routing happens in the conditional edge
@@ -363,7 +373,11 @@ class Orchestrator(Agent, abstract=True):
             graph.add_edge(name, _SUPERVISOR)  # back to supervisor after each worker
 
         graph.set_entry_point(_SUPERVISOR)
-        path_map = {name: name for name in workers}
+        # dict[str, str] is not accepted where add_conditional_edges expects
+        # dict[Hashable, str] — dict's key type is invariant, so the
+        # otherwise-safe str-is-Hashable relationship doesn't carry through
+        # without an explicit Hashable-keyed annotation.
+        path_map: dict[Hashable, str] = {name: name for name in workers}
         path_map[END] = END
         graph.add_conditional_edges(_SUPERVISOR, self._route_supervisor, path_map)
         return graph.compile()
@@ -400,7 +414,11 @@ class Orchestrator(Agent, abstract=True):
     def _build_explicit_graph(self, node_factory=None):
         node_factory = node_factory or self._make_worker_node
         instances = self._node_instances()
-        graph = StateGraph(self.State)
+        # self.State is a runtime-only `type` (the nested `class State(...)`
+        # declared on a concrete Orchestrator subclass, resolved in the
+        # `State` property above) — mypy can't infer StateGraph's generic
+        # parameter from it, hence the explicit annotation.
+        graph: StateGraph[Any] = StateGraph(self.State)
         for name, inst in instances.items():
             graph.add_node(name, node_factory(inst))
         graph.set_entry_point(self.entry)

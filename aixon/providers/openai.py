@@ -22,10 +22,18 @@ class OpenAIProvider(Provider):
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_openai import ChatOpenAI  # lazy import
+        from pydantic import SecretStr
 
         api_key = os.getenv(self.env_key)
         apply_resilience_defaults(params)
-        return ChatOpenAI(model=model, api_key=api_key, **params)
+        # ChatOpenAI's `api_key` field accepts SecretStr | Callable | None, not
+        # a bare str (pydantic coerces at runtime, but the static field type
+        # rejects it). None IS accepted and falls back to the SDK's own
+        # OPENAI_API_KEY env read (same var as `env_key`), so only wrap when
+        # a value is actually present.
+        if api_key:
+            params["api_key"] = SecretStr(api_key)
+        return ChatOpenAI(model=model, **params)
 
 
 register_provider(OpenAIProvider())

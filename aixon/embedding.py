@@ -54,18 +54,27 @@ class OpenAIEmbedding(Embedding):
     def _get_client(self) -> object:
         if self._client is None:
             from langchain_openai import OpenAIEmbeddings  # lazy import
+            from pydantic import SecretStr
 
+            # OpenAIEmbeddings' `api_key` field is SecretStr | Callable | None,
+            # not a bare str (pydantic coerces at runtime, but the static
+            # field type rejects it). None IS accepted and falls back to the
+            # SDK's own OPENAI_API_KEY env read, so only wrap when present.
+            raw_key = os.getenv(self.api_key_env)
             self._client = OpenAIEmbeddings(
                 model=self.model,
-                openai_api_key=os.getenv(self.api_key_env),
+                api_key=SecretStr(raw_key) if raw_key else None,
             )
         return self._client
 
+    # _get_client() is typed `-> object` (langchain_openai stays a lazy import,
+    # so its real type never appears in this module's signatures) — every
+    # call site necessarily hits attr-defined on `object`, not union-attr.
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._get_client().embed_documents(texts)  # type: ignore[union-attr]
+        return self._get_client().embed_documents(texts)  # type: ignore[attr-defined]
 
     def embed_query(self, text: str) -> list[float]:
-        return self._get_client().embed_query(text)  # type: ignore[union-attr]
+        return self._get_client().embed_query(text)  # type: ignore[attr-defined]
 
     def __repr__(self) -> str:
         return f"OpenAIEmbedding(model={self.model!r})"

@@ -65,6 +65,11 @@ class _AuthMiddleware:
 
 class Server:
     _instance: Optional["Server"] = None
+    # Declared here (not just assigned in __new__/__init__) so mypy can
+    # resolve its type — inferring it purely from `cls._instance._initialized
+    # = False` inside __new__ is circular (it needs _instance's own attribute
+    # type first).
+    _initialized: bool = False
 
     def __new__(cls, adapters: list[ProtocolAdapter] | None = None):
         if cls._instance is None:

@@ -297,7 +297,14 @@ class _OpenAIStreamSession(StreamSession):
     Usage (when ``stream_options.include_usage`` is true) is emitted as a final
     choices=[] chunk before [DONE]."""
 
-    def __init__(self, adapter, *, model, request):
+    # Narrower than the base StreamSession's `adapter: ProtocolAdapter` — this
+    # session only ever wraps an OpenAIAdapter (see open_stream() below) and
+    # calls its private `_chunk_line`/`_tool_call_delta_lines`/
+    # `_usage_chunk_line` helpers, which are OpenAI-wire-specific and so live
+    # on OpenAIAdapter, not on the dialect-agnostic ProtocolAdapter base.
+    adapter: "OpenAIAdapter"
+
+    def __init__(self, adapter: "OpenAIAdapter", *, model: str, request: ParsedRequest):
         super().__init__(adapter, model=model, request=request)
         params = request.params or {}
         self.mode = params.get("thought_stream_mode") \

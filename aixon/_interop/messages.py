@@ -14,7 +14,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from aixon.message import Message
+from aixon.message import Message, Role
 
 
 def _flatten_content(content: object) -> str:
@@ -91,6 +91,10 @@ def from_langchain(msg: BaseMessage) -> Message:
       LangChain naming input/output_tokens) to the neutral OpenAI shape
       (prompt/completion/total_tokens); None when the provider reported none.
     """
+    # Explicitly annotated: without it, mypy widens the multi-branch literal
+    # assignments below to plain `str` instead of keeping them narrowed to
+    # `Role`, and the `Message(role=role, ...)` call below would fail typing.
+    role: Role
     if isinstance(msg, AIMessage):
         role = "assistant"
     elif isinstance(msg, HumanMessage):

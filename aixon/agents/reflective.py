@@ -128,7 +128,12 @@ class ReflectiveAgent(Agent, abstract=True):
             path.append(node_cls)
             neighbors = getattr(node_cls, "_referenced_agent_classes", None)
             if callable(neighbors):
-                for nxt in node_cls._referenced_agent_classes():
+                # Call the already-fetched (and callable-checked) `neighbors`,
+                # not `node_cls._referenced_agent_classes()` again — `node_cls`
+                # is typed as plain `type` here (any class may be a node/tool),
+                # so a direct attribute access on it doesn't type-check even
+                # though we just proved the attribute exists and is callable.
+                for nxt in neighbors():
                     walk(nxt)
             path.pop()
 

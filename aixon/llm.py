@@ -17,6 +17,7 @@ from aixon.message import Chunk, Message
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.runnables import Runnable
 
 # Bound on LLM._request_model_cache: a per-request model is a full provider
 # SDK client (HTTP connection pool and all), so the cache must not grow
@@ -98,9 +99,14 @@ class LLM:
         self._request_model_cache[key] = model
         return model
 
-    def _bound_model(self) -> "BaseChatModel":
+    def _bound_model(self) -> "Runnable[Any, Any]":
         """Chat model with the current request's generation params bound on top
-        of the class-level defaults. No params active → the bare model."""
+        of the class-level defaults. No params active → the bare model.
+
+        Return type is the broader ``Runnable``, not ``BaseChatModel``:
+        ``.bind()`` wraps the model in a ``RunnableBinding``, a distinct
+        Runnable subtype, not a ``BaseChatModel``. Every caller only uses
+        ``invoke``/``stream``/``ainvoke``/``astream``, all Runnable-generic."""
         from aixon.runtime import current_generation_params
 
         params = current_generation_params()

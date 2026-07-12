@@ -78,7 +78,13 @@ class WeaviateRetriever(Retriever):
             raise AixonError(
                 f"{type(self).__name__} requires an 'embedding' class attr."
             )
-        self._host = host or os.getenv("WEAVIATE_HOST", "localhost")
+        # Bound to a separate statement rather than inlined into the `or`
+        # expression: mypy's overload resolution for `os.getenv(key, default)`
+        # loses the "always str" overload when the expression is combined
+        # directly with `host or ...`, and infers the whole thing as
+        # `str | None` even though it can never actually be None.
+        default_host = os.getenv("WEAVIATE_HOST", "localhost")
+        self._host = host or default_host
         self._port = port if port is not None else int(
             os.getenv("WEAVIATE_PORT", "8080"))
         self._skip_init_checks = skip_init_checks
@@ -124,6 +130,8 @@ class WeaviateRetriever(Retriever):
                     "langchain-text-splitters. Install with "
                     "'pip install aixon[weaviate]'."
                 ) from exc
+            # __init__ already refuses to construct without an `embedding`.
+            assert self.embedding is not None
             self._vectorstore = WeaviateVectorStore(
                 client=self._client, index_name=self.collection_name,
                 text_key=self.text_key,
@@ -227,6 +235,10 @@ class WeaviateRetriever(Retriever):
                 all_metas.append(chunk.metadata)
                 all_ids.append(str(uuid.uuid5(ns, str(ci))) if ns else None)
             if ns is not None:
+                # `ns` is only ever set inside `if src:` above, so `src` is
+                # guaranteed non-None here too — mypy can't correlate the two
+                # separate variables' narrowing itself.
+                assert src is not None
                 purge_specs.append((src, ns, len(chunks)))
         if any(all_ids):
             result = self._vectorstore.add_texts(

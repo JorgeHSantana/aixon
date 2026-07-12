@@ -15,7 +15,7 @@ never requires it."""
 from __future__ import annotations
 
 import time
-from typing import AsyncIterator, Iterator
+from typing import TYPE_CHECKING, AsyncIterator, Iterator
 
 from aixon.agent import Agent
 from aixon.exceptions import AixonError
@@ -23,6 +23,9 @@ from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.reasoning import current_channel, emit_reasoning, reasoning_channel
 from aixon._interop.tools import coerce_tools
+
+if TYPE_CHECKING:
+    from aixon.llm import LLM
 
 _log = Logger("aixon.tool_agent")
 
@@ -44,7 +47,7 @@ class ToolAgent(Agent, abstract=True):
 
     _suffix = "Agent"
 
-    llm = None  # REQUIRED LLM instance on concrete subclasses
+    llm: "LLM | None" = None  # REQUIRED LLM instance on concrete subclasses
     prompt: str = ""
     tools: list = []
     max_iterations: int = 15
@@ -81,6 +84,9 @@ class ToolAgent(Agent, abstract=True):
             messages = messages[1:]
 
         lc_tools = coerce_tools(list(self.tools))
+        # _validate_subclass() (__init_subclass__ hook, above) already refuses
+        # to register any concrete ToolAgent subclass with `llm=None`.
+        assert self.llm is not None
         agent = create_agent(self.llm.request_chat_model(), lc_tools, system_prompt=system_prompt)
         lc_messages = to_langchain(messages)
         config = {"recursion_limit": 2 * self.max_iterations + 1}

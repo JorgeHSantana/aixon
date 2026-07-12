@@ -5,24 +5,32 @@ route requests and build menus."""
 from __future__ import annotations
 
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from aixon.exceptions import AgentNotFoundError, RegistrationError
 from aixon.logging import Logger
+
+if TYPE_CHECKING:
+    # Type-only: aixon.agent imports get_registry from this module at runtime,
+    # so a real top-level import here would be circular. Under
+    # `from __future__ import annotations` every annotation below is a
+    # deferred string, so this guarded import is enough for mypy without
+    # ever executing at import time.
+    from aixon.agent import Agent
 
 _log = Logger("aixon.registry")
 
 
 class Registry:
     def __init__(self) -> None:
-        self._agents: dict[str, object] = {}   # name -> agent
+        self._agents: dict[str, "Agent"] = {}   # name -> agent
         self._aliases: dict[str, str] = {}      # alias -> name
         self._order: list[str] = []             # registration order of names
         # Serializes register()'s check-then-insert so concurrent registrations
         # cannot both pass the uniqueness check.
         self._lock = threading.Lock()
 
-    def register(self, agent: object) -> None:
+    def register(self, agent: "Agent") -> None:
         with self._lock:
             name = agent.name
             if name in self._agents or name in self._aliases:
@@ -43,7 +51,7 @@ class Registry:
         hidden = " (hidden)" if agent.hidden else ""
         _log.info(f"registered agent '{name}'{hidden} aliases={agent.aliases}")
 
-    def resolve(self, name: str) -> object:
+    def resolve(self, name: str) -> "Agent":
         if name in self._agents:
             return self._agents[name]
         if name in self._aliases:
@@ -58,10 +66,10 @@ class Registry:
             f"Known agents: {sorted(self._agents)}."
         )
 
-    def public(self) -> list:
+    def public(self) -> list["Agent"]:
         return [self._agents[n] for n in self._order if not self._agents[n].hidden]
 
-    def all(self) -> list:
+    def all(self) -> list["Agent"]:
         return [self._agents[n] for n in self._order]
 
     def clear(self) -> None:

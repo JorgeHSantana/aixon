@@ -24,12 +24,16 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError, NamingError
 
 # NOTE: httpx is imported lazily inside _httpx() — NOT at module level — so the
 # neutral-boundary guarantee holds (import aixon works without [retrieval]).
+if TYPE_CHECKING:
+    # Type-only: httpx is an optional extra ([retrieval]), never imported at
+    # runtime module level (see _httpx() below).
+    import httpx
 
 
 class Connector:
@@ -75,7 +79,7 @@ class Connector:
         )
 
         self.timeout = timeout
-        self._aclient = None
+        self._aclient: "httpx.AsyncClient | None" = None
         self._aclient_loop: asyncio.AbstractEventLoop | None = None
         self._aclient_lock = threading.Lock()
 
@@ -190,7 +194,7 @@ class Connector:
 
     async def aclose(self) -> None:
         """Close the pooled async client (idempotent)."""
-        if getattr(self, "_aclient", None) is not None:
+        if self._aclient is not None:
             await self._aclient.aclose()
             self._aclient = None
             self._aclient_loop = None

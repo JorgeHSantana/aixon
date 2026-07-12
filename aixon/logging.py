@@ -27,8 +27,11 @@ class Logger:
             )
             handler.setFormatter(formatter)
             self._logger.addHandler(handler)
-        for handler in self._logger.handlers:
-            handler.setLevel(level)
+        # Named `h`, not `handler`: reusing `handler` here would make mypy
+        # widen its inferred type from the concrete `StreamHandler` built
+        # above to the base `logging.Handler` yielded by `.handlers`.
+        for h in self._logger.handlers:
+            h.setLevel(level)
 
     def info(self, msg: str, *args, **kwargs):
         self._logger.info(msg, *args, **kwargs)

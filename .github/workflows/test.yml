@@ -16,4 +16,21 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[all,dev]"
+      - run: mypy aixon
       - run: pytest -q
+
+  bare-install-smoke:
+    # Validates the neutral-boundary/lazy-import discipline: `import aixon`
+    # and the `aixon` console-script must both work with NO extras installed
+    # (the langchain/langgraph/click core deps only) — the exact opposite of
+    # the `test` job's `[all,dev]` install above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install .
+      - run: python -c "import aixon; print(aixon.__version__)"
+      - run: aixon --help

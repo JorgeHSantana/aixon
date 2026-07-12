@@ -11,12 +11,17 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import TYPE_CHECKING
 
 import click
 
 from aixon import __version__
 from aixon.discovery import autodiscover
 from aixon.registry import get_registry
+
+if TYPE_CHECKING:
+    from aixon.agent import Agent
+    from openai.types.chat import ChatCompletionMessageParam
 
 
 def _ensure_cwd_on_path() -> None:
@@ -128,7 +133,7 @@ def chat_command(package: str, url: str | None) -> None:
         _chat_inprocess(package)
 
 
-def _pick_agent() -> object | None:
+def _pick_agent() -> "Agent | None":
     """Display a menu and return the chosen agent, or None to exit."""
     agents = get_registry().public()
     if not agents:
@@ -156,7 +161,7 @@ def _pick_agent() -> object | None:
         click.echo("Invalid choice, try again.")
 
 
-def _stream_inprocess(agent: object, messages: list) -> str | None:
+def _stream_inprocess(agent: "Agent", messages: list) -> str | None:
     """Stream agent.stream(messages) to the terminal and RETURN the assistant
     content collected from the stream, or None when the turn errored.
 
@@ -295,7 +300,7 @@ def _chat_remote(url: str) -> None:
                 pass
             click.echo("Invalid choice, try again.")
 
-        messages: list[dict] = []
+        messages: list["ChatCompletionMessageParam"] = []
         back_to_menu = False
 
         while not back_to_menu:
@@ -468,6 +473,7 @@ def serve_command(host: str, port: int, package: str, anthropic: bool) -> None:
     try:
         from aixon.server.server import Server
         from aixon.server.adapters.openai import OpenAIAdapter
+        from aixon.server.protocol import ProtocolAdapter
     except ImportError:
         click.echo(
             "The server extra is required for 'serve'. "
@@ -479,7 +485,10 @@ def serve_command(host: str, port: int, package: str, anthropic: bool) -> None:
     _ensure_cwd_on_path()
     _autodiscover_quietly(package)
 
-    adapters = [OpenAIAdapter()]
+    # Annotated at the dialect-agnostic base: without it, mypy infers
+    # list[OpenAIAdapter] from the first element, and both the AnthropicAdapter
+    # append below and the Server(adapters=...) call fail (list is invariant).
+    adapters: list[ProtocolAdapter] = [OpenAIAdapter()]
     if anthropic:
         from aixon.server.adapters.anthropic import AnthropicAdapter
 
