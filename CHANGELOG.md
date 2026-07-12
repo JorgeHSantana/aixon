@@ -11,12 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Real provider usage tracking via `Message.usage` (M1: tiktoken fallback for batch-only providers)
 - Production stream session support for Anthropic with interleaved blocks and error envelope closing (M3)
 - `ParsedRequest.tools` now always OpenAI-shaped, with anthropic definitions normalized (M2)
+- mypy CI gate in both workflows plus a bare-install smoke job on PRs; `[tool.mypy]` config in pyproject.toml (M4)
 
 ### Changed
 - Request tools dialect unified to OpenAI format across all providers (M2)
 
 ### Fixed
-- Loop-affine async client, developer role parity, request-model cache, anthropic parse guard (final-review wave)
+- Anthropic provider no longer passes `api_key=None` to ChatAnthropic when the env var is unset (raised a pydantic ValidationError) — pre-existing bug surfaced by the M4 mypy gate
 
 ## [0.1.12] - 2026-07-10
 
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Weaviate (R3):** Purge is best-effort (warn instead of fail); empty string source_id treated as no-source in deduplication
 - **Infrastructure (I1-I8):** Scaffold buildability, click core, dev extra completeness, logging deduplication, serve autodiscovery, reasoning stderr, orphaned history
 - **CLI (I8 follow-up):** Errored turns return None instead of partial assistant message
+- **Final-review wave:** Loop-affine async client, developer role parity, request-model cache, anthropic parse guard
 
 ## [0.1.11] - 2026-07-09
 
