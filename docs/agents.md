@@ -57,7 +57,11 @@ class PlannerAgent(LLMAgent):
 **How it works:** `invoke` prepends the system prompt (if any) as a
 `Message(role="system", content=self.prompt)` and delegates to
 `self.llm.complete(messages)`. `stream` delegates to `self.llm.stream(messages)`,
-yielding `Chunk` deltas and a final `Chunk(done=True)`.
+yielding `Chunk` deltas and a final `Chunk(done=True)`. A leading `system` (or
+`developer` — OpenAI's system-role alias, treated identically) message in the
+caller's `messages` **wins** over the class-level `prompt` instead of both
+reaching the provider as two separate system messages; if that leading
+message's content is empty, it falls back to `self.prompt`.
 
 ### LLM — declaring a language model
 
@@ -85,9 +89,41 @@ API key to be present at import time.
 | `gpt-*`, `o[0-9]*`, `text-*` | `"openai"` |
 | `claude-*` | `"anthropic"` |
 | `gemini-*` | `"google"` |
+| `glm*` | `"zai"` |
 
 Provider names are lowercase strings, not an enum. To override inference, pass
 `provider=` explicitly: `LLM("some-model", provider="openai")`.
+
+**z.AI (GLM models).** `LLM("glm-4.6", provider="zai")` (or a bare `glm-*` model
+name, inferred) reuses `langchain_openai.ChatOpenAI` pointed at the z.AI
+OpenAI-compatible endpoint. `ZAI_API_KEY` is **required** — unlike the other
+providers, it does not fall back to `OPENAI_API_KEY` if unset; building the
+model raises `AixonError` instead of silently sending your OpenAI credential
+to the z.AI endpoint. `ZAI_BASE_URL` overrides the default
+(`https://api.z.ai/api/paas/v4`).
+
+### Per-request generation params
+
+When an agent runs behind the `Server`, per-request generation params
+(`temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`,
+`stop`) are published on a `ContextVar` for the duration of the call (see
+`aixon.runtime.generation_params`) and apply **on top of** the `LLM(...)`
+class-level defaults, without mutating them:
+
+- `LLMAgent` applies them via `LLM._bound_model()` — `.bind(**params)` on the
+  cached `chat_model` (a `RunnableBinding`, still fine for `invoke`/`stream`).
+- `ToolAgent` applies them via `LLM.request_chat_model()` instead: since
+  `langchain.agents.create_agent` requires an actual `BaseChatModel` (not a
+  `RunnableBinding`), it builds a fresh provider model with the params merged
+  in as constructor kwargs. No active params → the same cached `chat_model`
+  (no rebuild). Models built for repeated identical param combinations are
+  cached (bounded to 8 entries, oldest-evicted-first) so a hot request path
+  reuses one provider client (and its HTTP connection pool) instead of
+  rebuilding an SDK client per call.
+
+Both paths read the exact same `ContextVar`, so a request's `temperature`
+override behaves identically whether the resolved agent is an `LLMAgent` or a
+`ToolAgent`.
 
 For a custom backend, subclass the `Provider` ABC (`aixon.providers.base`) and
 register a single instance before first use:
@@ -139,6 +175,10 @@ class ResearchAgent(ToolAgent):
 | `max_iterations` | `int` | `15` | Maximum tool-call rounds before the loop stops. |
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds. |
 | `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
+
+Like `LLMAgent`, a leading `system` (or `developer`) message in `messages`
+overrides `self.prompt` as the graph's `system_prompt` rather than both being
+sent to the provider.
 
 **Tool coercion:** anything in `tools` is normalized at runtime:
 - An `AgentTool` (from `Agent.as_tool()` or `Retriever.as_tool()`) → `StructuredTool`

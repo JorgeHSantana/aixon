@@ -115,11 +115,20 @@ class ProtocolAdapter(ABC):
 ```python
 @dataclass
 class ParsedRequest:
-    model:    str            # the requested agent name / alias
+    model:    str                  # the requested agent name / alias
     messages: list[Message]
-    params:   dict           # temperature, max_tokens, stream, etc.
+    params:   dict                 # temperature, max_tokens, etc. (transport fields already stripped)
     stream:   bool
+    tools:    list[dict] | None = None
 ```
+
+`tools` carries the tool definitions the **client** declared on the request,
+**always normalized to the OpenAI wire shape**
+(`{"type": "function", "function": {"name", "description", "parameters"}}`)
+regardless of which adapter parsed the request — `AnthropicAdapter` converts
+its `{name, description, input_schema}` defs before returning `ParsedRequest`,
+so `aixon.runtime.current_client_tools()` is dialect-neutral for every
+consumer, or `None` if the client sent none.
 
 ---
 
@@ -134,12 +143,18 @@ Full OpenAI-compatible wire format. Served routes:
 | `/v1/models` | GET | List registered agents in OpenAI `model` object format. |
 | `/models` | GET | Same as above, without the `/v1` prefix. |
 
-> **`usage`.** When `tiktoken` is installed (`pip install aixon[tiktoken]`), the
-> server reports `prompt_tokens`/`completion_tokens`/`total_tokens`, counted in
-> the Server layer (the neutral `Message`/`Chunk` types still carry no token
-> counts). Without `tiktoken`, `usage` is omitted — never an error. On a stream,
-> add `"stream_options": {"include_usage": true}` to get a final usage chunk
-> before `[DONE]`.
+> **`usage`.** On a non-streaming response, the **provider's real usage wins**:
+> when the LLM call reports `usage_metadata` (surfaced on the neutral
+> `Message.usage`, summed over every model turn for a `ToolAgent` run — a
+> multi-step tool loop bills every turn, not just the final answer), the
+> server reports it as-is. Only when the provider reported none does the
+> server fall back to a `tiktoken` estimate (`pip install aixon[tiktoken]`),
+> counted in the Server layer — the neutral `Message`/`Chunk` types still carry
+> no token counts of their own. Without `tiktoken` AND no provider usage,
+> `usage` is omitted — never an error. Streaming keeps the estimate-only path
+> (provider usage isn't accumulated mid-stream); add
+> `"stream_options": {"include_usage": true}` to get a final usage chunk before
+> `[DONE]`.
 
 > **`thought_stream_mode`** (request body, OpenAI adapter) controls how an
 > agent's reasoning reaches the wire on a stream:
@@ -206,9 +221,9 @@ configurable mode: hidden (default), a vendor extension field, or inline
 
 ## `AnthropicAdapter`
 
-Thin proof-of-concept adapter serving Anthropic's structurally different wire
-format. Demonstrates that neutral types are genuinely neutral — not OpenAI types
-in disguise.
+Full production dialect serving Anthropic's Messages API from the SAME neutral
+`Message`/`Chunk` types the OpenAI adapter uses — proof that the neutral
+boundary is genuinely dialect-neutral, not OpenAI types in disguise.
 
 Served routes:
 
@@ -219,10 +234,36 @@ Served routes:
 
 Wire-format differences handled by the adapter (agents see none of these):
 
-- System prompt is outside the `messages` array (a separate top-level field).
+- System prompt is outside the `messages` array (a separate top-level field),
+  hoisted into a leading neutral `system` `Message`.
 - Response body uses typed content blocks (`[{"type": "text", "text": "..."}]`).
 - Stop reason field is `stop_reason` instead of `finish_reason`.
-- Streaming uses named event types (`content_block_delta`, `message_delta`, `message_stop`).
+- Client-declared `tools` ({name, description, input_schema}) are normalized to
+  the OpenAI wire shape before reaching `ParsedRequest.tools` (see above).
+
+**Streaming envelope.** `AnthropicAdapter.open_stream` returns a stateful
+`_AnthropicStreamSession` (not the stateless default) that emits the real
+Anthropic SSE sequence a production SDK expects, tracking per-block indices
+across the whole request:
+
+```
+message_start
+content_block_start (index 0, "thinking" or "text")
+content_block_delta  (thinking_delta | text_delta) ...
+content_block_stop   (index 0)
+content_block_start (index 1, the other kind — only if the run interleaves)
+...
+message_delta  (stop_reason, usage.output_tokens)
+message_stop
+```
+
+Blocks are a true **sequence**, not a fixed thinking-then-text pair: whichever
+modality (reasoning vs. content) is *not* the currently open block closes the
+open one and opens a fresh block at the next index — indices are never
+reused. A mid-stream failure closes whatever block is currently open
+(`content_block_stop`) *before* the `error` event, so the client's SDK (which
+tracks block state) never sees a delta/stop against a block it doesn't know
+is still open; `message_stop` still follows to close the request.
 
 ### Serving more than one dialect
 
@@ -267,6 +308,35 @@ client = OpenAI(
     api_key="my-secret-key",
 )
 ```
+
+---
+
+## Errors
+
+Every chat route returns a dialect-appropriate JSON error body (never a raw
+traceback) with the matching HTTP status:
+
+| Status | When | Body shape |
+|---|---|---|
+| `400` | Request body isn't a JSON object, or `adapter.parse_request` raises (e.g. a malformed `messages` entry). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
+| `404` | `model` doesn't resolve to a registered agent (`AgentNotFoundError`). | `{"error": {"message": ..., "type": "model_not_found"}}` |
+| `500` | The agent raised while running (non-streaming). The real exception is logged server-side only; the client gets a generic message. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
+
+**Mid-stream failures** cannot use an HTTP status — the `200`/
+`text/event-stream` headers already went out. Instead, once streaming has
+started, an exception from `agent.astream` is caught and turned into one
+final dialect-shaped SSE error event (never propagated into Starlette, which
+would otherwise abort the response mid-stream) — the full exception goes to
+the server log, never to the client:
+
+- OpenAI: `data: {"error": {"message": "The server encountered an error while generating the response.", "type": "server_error"}}\n\n`
+- Anthropic: `event: error\ndata: {"type": "error", "error": {"type": "api_error", "message": "..."}}\n\n`, with any
+  currently-open content block closed first (`content_block_stop`) so the
+  client's SDK never sees a delta/stop against a block it doesn't know is
+  still open.
+
+The stream's terminal event (`[DONE]` / `message_stop`) is still emitted after
+the error event either way.
 
 ---
 

@@ -13,10 +13,14 @@ Commands:
   serve  Start the API server
 ```
 
-Install the CLI extra to get the `aixon` command in your PATH:
+`click` is a **core** dependency (the `aixon` console-script is installed
+unconditionally), so the `aixon` command — `list`, `new`, in-process `chat`,
+and `serve` (given the `server` extra) — is already on your PATH after a bare
+`pip install aixon`. The `cli` extra only adds `openai`, needed for
+**remote** `chat --url` mode:
 
 ```bash
-pip install 'aixon[cli]'
+pip install 'aixon[cli]'   # only required for `aixon chat --url ...`
 ```
 
 ---
@@ -87,12 +91,22 @@ Options:
 2. A numbered menu lists all non-hidden agents with their type and description.
 3. Select an agent by number.
 4. Type messages. The agent streams its response — `reasoning` is shown dimmed
-   (grey on ANSI-capable terminals), `content` is shown normally.
+   (grey) when stdout is a TTY. When stdout is **not** a TTY (piped/redirected —
+   e.g. `aixon chat | tee log.txt`), reasoning is routed to **stderr** instead,
+   so it never interleaves with the captured `content` on stdout. `content` is
+   always shown normally on stdout.
 5. In-session commands:
    - `/menu` — return to the agent selection menu (conversation history is reset).
    - `/exit` — quit the CLI.
    - `Ctrl+C` — interrupt the current generation; press again at an empty prompt
      to return to the agent selection menu.
+
+**History stays consistent on a turn error.** If a turn raises (provider
+error, timeout, ...), the error is printed and the just-appended `user`
+message is popped from history before returning to the prompt — so a retry
+never sends two consecutive `user` messages, and a failed turn never appends
+a spurious `assistant` reply built from truncated output. The same discipline
+applies in remote mode.
 
 **Remote flow:**
 

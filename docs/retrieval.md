@@ -51,6 +51,10 @@ class Retriever(ABC):
     def write(self, texts: list[str], metadatas: list[dict] | None = None) -> list[str]:
         """Store documents. Raises if type_access is READ."""
 
+    async def awrite(self, texts: list[str], metadatas: list[dict] | None = None) -> list[str]:
+        """Async write. Default bridges to write() in a thread; override for a
+        native async SDK."""
+
     def as_tool(self, name=None, description=None, k=None) -> AgentTool:
         """Expose as a neutral AgentTool (same shape as Agent.as_tool())."""
 ```
@@ -120,6 +124,11 @@ ids = retriever.write(
 ```
 
 Calling `write()` on a `TypeAccess.READ` retriever raises `AixonError`.
+
+**Async write.** `awrite(texts, metadatas=None)` mirrors `asearch`: the default
+bridges the sync `write` to a worker thread (so every retriever gets a working
+`awrite` for free), and a vendor retriever backed by an async SDK may override
+it for true non-blocking indexing.
 
 ---
 
@@ -214,9 +223,10 @@ class InventoryConnector(Connector):
         return self.post("/reservations", json={"product_id": product_id, "qty": qty})
 ```
 
-**Async:** `Connector` also provides `aget`/`apost`, which use
-`httpx.AsyncClient` so they don't block the event loop. Use them from an async
-tool or an agent's `ainvoke` path:
+**Async:** `Connector` also provides `aget`/`apost`, which use a **pooled**
+`httpx.AsyncClient` (kept alive across calls, for connection reuse) so they
+don't block the event loop. Use them from an async tool or an agent's
+`ainvoke` path:
 
 ```python
 class InventoryConnector(Connector):
@@ -225,6 +235,18 @@ class InventoryConnector(Connector):
     async def get_stock(self, product_id: str) -> dict:
         return await self.aget(f"/products/{product_id}/stock")
 ```
+
+**Loop affinity.** `httpx.AsyncClient`'s connection pool is bound to the event
+loop that created it. Caching one instance forever would eventually break
+across separate `asyncio.run()` calls (each with its own loop) with an
+"Event loop is closed" error, so the pooled client is rebuilt automatically
+whenever the currently running loop differs from (or has closed since) the one
+that built it — safe to call `aget`/`apost` from a fresh loop without managing
+this yourself.
+
+**Closing.** Call `await connector.aclose()` to close the pooled async client
+explicitly (idempotent — safe to call even if no async call was ever made).
+The sync `get`/`post` methods don't pool a client, so they need no closing.
 
 **Suffix rule:** concrete `Connector` subclasses must end with `"Connector"`.
 Violating it raises `NamingError` at import time.

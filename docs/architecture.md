@@ -32,7 +32,7 @@ cross upward.
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
-Role = Literal["system", "user", "assistant", "tool"]
+Role = Literal["system", "developer", "user", "assistant", "tool"]
 
 @dataclass
 class Message:
@@ -42,6 +42,7 @@ class Message:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: Optional[str] = None
     reasoning: Optional[str] = None
+    usage: Optional[dict[str, int]] = None
 
     def to_dict(self) -> dict[str, Any]: ...   # omits empty optional fields
 
@@ -49,11 +50,20 @@ class Message:
 class Chunk:
     content: str = ""
     reasoning: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False
 ```
 
 `Message` carries a conversation turn. `Chunk` is a streaming delta — `content`
-and `reasoning` are additive text; the final `Chunk` has `done=True`.
+and `reasoning` are additive text; the final `Chunk` has `done=True`. `developer`
+is OpenAI's system-role alias: every conversion point (`to_langchain`, `LLMAgent`,
+`ToolAgent`) treats it exactly like `system` (a leading `developer` message wins
+over the agent's class-level `prompt`, same as `system` would). `Message.usage`,
+when present, carries the provider's real token usage in OpenAI shape
+(`{"prompt_tokens", "completion_tokens", "total_tokens"}`); `None` means the
+provider reported none, so a consumer (e.g. the Server) may fall back to
+estimating. `Chunk.tool_calls` carries neutral tool-call dicts the agent wants
+surfaced to the client for execution (see [server.md](server.md), client tools).
 
 **What the neutral boundary prevents:** a `ToolAgent` can swap its LLM from
 OpenAI to Anthropic without touching the `Orchestrator` that calls it as a node.
@@ -87,10 +97,13 @@ Adding a new wire format = adding a new `ProtocolAdapter` subclass. Nothing in
 
 `aixon` ships two adapters:
 - **`OpenAIAdapter`** — full OpenAI-compatible (`/v1/chat/completions`, `/v1/models`).
-- **`AnthropicAdapter`** — thin proof-of-concept (`/v1/messages`). Demonstrates that
+- **`AnthropicAdapter`** — full production dialect (`/v1/messages`), proof that
   the neutral types are not secretly OpenAI types — Anthropic's structurally
-  different wire format (typed content blocks, `stop_reason`, named SSE events)
-  translates through the same `Message`/`Chunk` boundary.
+  different wire format (typed content blocks, `stop_reason`, named SSE events:
+  `message_start`/`content_block_start`/`content_block_delta`/
+  `content_block_stop`/`message_delta`/`message_stop`) translates through the
+  same `Message`/`Chunk` boundary, including a stateful per-request stream
+  session that sequences blocks and closes them cleanly on a mid-stream error.
 
 See [server.md](server.md) for the adapter API.
 

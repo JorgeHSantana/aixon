@@ -49,12 +49,13 @@ provider SDKs stay hidden inside `LLM`.
 pip install aixon          # core: langchain + langgraph — agents work out of the box
 ```
 
-`langchain`/`langchain-core`/`langgraph` are mandatory core dependencies. The
-optional extras add the outer layers:
+`langchain`/`langchain-core`/`langgraph`/`click` are mandatory core dependencies
+— the `aixon` command (`list`, `new`, in-process `chat`, `serve`) is already on
+your PATH after a bare install. The optional extras add the outer layers:
 
 ```bash
 pip install "aixon[server]"            # FastAPI + uvicorn + httpx — serve agents as an API
-pip install "aixon[cli]"               # click + openai — the `aixon` command + remote chat
+pip install "aixon[cli]"               # openai — only needed for remote `aixon chat --url ...`
 pip install "aixon[openai]"            # OpenAI provider binding (langchain-openai)
 pip install "aixon[anthropic]"         # Anthropic provider binding
 pip install "aixon[google]"            # Google provider binding
@@ -335,15 +336,32 @@ never registered.
 
 ---
 
+## Development
+
+```bash
+pip install -e ".[all,dev]"   # every extra + the test suite (pytest, mypy, ...)
+pytest                         # run the suite
+mypy aixon                     # type-check the package
+```
+
+CI runs both `mypy aixon` and the full suite on every push/PR, plus a
+bare-install smoke job (`pip install .` with no extras, then `import aixon`
+and `aixon --help`) that guards the neutral-boundary/lazy-import discipline —
+the core package must stay importable and the CLI runnable without any
+optional dependency installed.
+
+---
+
 ## Dependencies
 
 ```
 langchain             >= 1.0    (core)
 langchain-core        >= 1.0    (core)
 langgraph             >= 1.0    (core)
+click                 >= 8.0    (core — the `aixon` command)
 fastapi / uvicorn / pydantic    (server extra)
 httpx                 >= 0.27   (server / retrieval extra)
-click / openai                  (cli extra — `aixon` command + remote chat)
+openai                >= 1.0    (cli extra — remote `aixon chat --url`)
 langchain-openai      >= 0.2    (openai / openai-embedding / zai extra)
 langchain-anthropic   >= 0.2    (anthropic extra)
 langchain-google-genai >= 2.0   (google extra)

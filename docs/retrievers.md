@@ -57,8 +57,11 @@ class LibraryRetriever(WeaviateRetriever):
 
 Vector store retrieval. The neutral `aixon.Embedding` is bridged to LangChain
 internally. The connection is lazy (opened on first `search`/`write`), so
-instantiation is safe at import/autodiscover time. Connection via `host`/`port`
-args or `WEAVIATE_HOST`/`WEAVIATE_PORT`. Optional flashrank reranking:
+instantiation is safe at import/autodiscover time — first init is
+thread-safe (double-checked locking), so concurrent first callers race into
+the lock but only one actually builds the client/vectorstore. Connection via
+`host`/`port` args or `WEAVIATE_HOST`/`WEAVIATE_PORT`. Optional flashrank
+reranking:
 
 ```python
 class DeepLibraryRetriever(WeaviateRetriever):
@@ -71,4 +74,23 @@ class DeepLibraryRetriever(WeaviateRetriever):
 ```
 
 `write()` (when `type_access` allows) chunks via `RecursiveCharacterTextSplitter`
-and supports deterministic IDs through `source_ids`.
+and supports deterministic IDs through `source_ids`:
+
+```python
+retriever.write(
+    texts=["Updated manual page 1...", "Updated manual page 2..."],
+    source_ids=["doc-42", "doc-43"],
+)
+```
+
+**Upsert semantics.** Passing `source_ids` makes `write()` an upsert: chunk IDs
+are derived deterministically from each `source_id` (a UUID namespace), so
+re-writing the same `source_id` with fewer chunks than before **purges the
+now-obsolete tail chunks** left over from the previous write — otherwise stale
+chunks from a longer prior version would linger in the vector store
+alongside the new content. The purge runs *after* the new content is
+committed and is best-effort: a transient delete failure is logged, not
+raised (the write already succeeded; worst case is a lingering stale tail
+until the next rewrite). `source_ids` must be unique within a single
+`write()` call — a duplicate raises `ValueError` before anything is written
+(colliding IDs would otherwise silently overwrite each other's chunks).
