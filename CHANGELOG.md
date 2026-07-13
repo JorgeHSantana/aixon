@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-07-13
+
+### Added
+- Full client-tools round-trip on the Anthropic dialect: responses emit `tool_use` blocks (non-stream and stream, `stop_reason: "tool_use"`), and `tool_result`/`tool_use` history blocks are parsed back into neutral form (N1)
+- `aixon.usage` module (`merge_usage`, thread-safe `UsageAccumulator`, `usage_scope`): Orchestrator runs now report usage summed over EVERY model turn (Tier-1 supervisor + all workers, Tier-2 nodes), and ReflectiveAgent sums worker + judge turns across retries (N2)
+- Regression tests: Anthropic provider builds without `ANTHROPIC_API_KEY`; accumulator thread-safety under fan-out contention (N2)
+
+### Changed
+- `publish.yml` now runs the bare-install smoke job and gates publishing on it — a broken bare install can no longer reach PyPI (N2)
+
+### Fixed
+- Usage totals no longer mutate the worker's returned `Message` in place (copies via `dataclasses.replace`) and no longer drop turns under LangGraph's threaded fan-out (`threading.Lock`) (N2)
+
 ## [0.1.13] - 2026-07-12
 
 ### Added
