@@ -22,6 +22,7 @@ rather fold usage locally than open a scope.
 from __future__ import annotations
 
 import contextvars
+import threading
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
@@ -46,17 +47,26 @@ def merge_usage(a: "dict[str, int] | None", b: "dict[str, int] | None") -> "dict
 
 
 class UsageAccumulator:
-    """Buffers usage across every model turn of one run."""
+    """Buffers usage across every model turn of one run.
+
+    Thread-safe: LangGraph runs fan-out nodes of the same superstep on real
+    threads (BackgroundExecutor -> ContextThreadPoolExecutor), so parallel
+    worker nodes call ``add`` concurrently against ONE accumulator. ``add``'s
+    read-merge-write must therefore be atomic — unguarded, a preemption inside
+    that window silently drops the other thread's turn from the total."""
 
     def __init__(self) -> None:
         self._total: "dict[str, int] | None" = None
+        self._lock = threading.Lock()
 
     def add(self, usage: "dict[str, int] | None") -> None:
-        self._total = merge_usage(self._total, usage)
+        with self._lock:
+            self._total = merge_usage(self._total, usage)
 
     @property
     def total(self) -> "dict[str, int] | None":
-        return dict(self._total) if self._total is not None else None
+        with self._lock:
+            return dict(self._total) if self._total is not None else None
 
 
 # The active accumulator for the current execution context. None when no run

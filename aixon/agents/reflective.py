@@ -13,6 +13,7 @@ a quality shortfall must not crash a run that produced an answer)."""
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, AsyncIterator, Iterator
 
 from aixon.agent import Agent
@@ -191,8 +192,10 @@ class ReflectiveAgent(Agent, abstract=True):
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
             if self._approved(verdict):
-                answer.usage = total_usage
-                return answer
+                # A COPY carrying the run's total — the worker owns `answer`
+                # (it may be cached/shared, or a nested agent's own Message),
+                # so the neutral boundary must not mutate it in place.
+                return dataclasses.replace(answer, usage=total_usage)
             if round_ == self.max_rounds:
                 break
             emit_reasoning(self.retry_label.format(round=round_ + 1,
@@ -205,8 +208,7 @@ class ReflectiveAgent(Agent, abstract=True):
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
-        answer.usage = total_usage
-        return answer
+        return dataclasses.replace(answer, usage=total_usage)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         """LIVE evaluator-optimizer stream.
@@ -263,8 +265,8 @@ class ReflectiveAgent(Agent, abstract=True):
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
             if self._approved(verdict):
-                answer.usage = total_usage
-                return answer
+                # See invoke(): a COPY — never mutate the worker's Message.
+                return dataclasses.replace(answer, usage=total_usage)
             if round_ == self.max_rounds:
                 break
             emit_reasoning(self.retry_label.format(round=round_ + 1,
@@ -277,8 +279,7 @@ class ReflectiveAgent(Agent, abstract=True):
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
-        answer.usage = total_usage
-        return answer
+        return dataclasses.replace(answer, usage=total_usage)
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
         """Async mirror of ``stream`` — same live pass-through/buffering."""

@@ -8,6 +8,7 @@ LangGraph lives entirely inside this module and ``aixon.state``."""
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import time
 from collections.abc import Hashable
@@ -488,12 +489,13 @@ class Orchestrator(Agent, abstract=True):
         out_messages = result.get("messages", [])
         for m in reversed(out_messages):
             if m.role == "assistant":
-                # Overwrite the worker's own usage (its turn alone) with the
-                # run's total (every turn) — the neutral-boundary Message this
-                # method returns must report the WHOLE run, not just its last
-                # step, mirroring ToolAgent._sum_usage's contract.
-                m.usage = usage_acc.total
-                return m
+                # Return a COPY carrying the run's total (every turn), not just
+                # this worker's own turn — mirroring ToolAgent._sum_usage's
+                # contract. A copy, not `m.usage = ...`: the worker owns that
+                # Message (it may be cached/shared, or belong to a nested
+                # Orchestrator that already stamped its own total on it), so
+                # the neutral boundary must not mutate it in place.
+                return dataclasses.replace(m, usage=usage_acc.total)
         return Message(role="assistant", content="", usage=usage_acc.total)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
@@ -546,10 +548,9 @@ class Orchestrator(Agent, abstract=True):
         out_messages = result.get("messages", [])
         for m in reversed(out_messages):
             if m.role == "assistant":
-                # See invoke(): the total covers the WHOLE run, not just this
-                # worker's own turn.
-                m.usage = usage_acc.total
-                return m
+                # See invoke(): a COPY carrying the run's total — never mutate
+                # the worker's own Message in place.
+                return dataclasses.replace(m, usage=usage_acc.total)
         return Message(role="assistant", content="", usage=usage_acc.total)
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":

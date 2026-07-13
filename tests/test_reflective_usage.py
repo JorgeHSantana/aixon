@@ -142,3 +142,28 @@ def test_exhausted_rounds_still_sums_all_attempted_turns():
     out = r.invoke(USER)
     assert out.content == "v2"  # last attempt, rounds exhausted
     assert out.usage == _usage(5 + 1 + 6 + 1, 1 + 1 + 2 + 1)
+
+
+def test_worker_message_is_not_mutated_in_place():
+    # The worker may return a cached/shared Message (nothing in Agent's
+    # contract forbids it); the reflective loop must return a COPY with the
+    # summed usage, never stamp the total onto the worker's own object.
+    shared = Message(role="assistant", content="v1 (fonte: IBGE)",
+                     usage=_usage(8, 4))
+
+    class SharedAgent(Agent):
+        name = "gen-usage-shared"
+
+        def invoke(self, messages: list[Message]) -> Message:
+            return shared
+
+        def stream(self, messages: list[Message]):
+            return iter([])
+
+    worker = get_registry().resolve("gen-usage-shared")
+    judge = make_judge([("APROVADO", _lc_usage(2, 1))])
+    r = make_reflective("ref-usage-shared", worker, judge)
+    out = r.invoke(USER)
+    assert out.usage == _usage(8 + 2, 4 + 1)
+    assert out is not shared
+    assert shared.usage == _usage(8, 4)  # worker's own Message untouched
