@@ -12,7 +12,12 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError
-from aixon.providers.base import Provider, apply_resilience_defaults, register_provider
+from aixon.providers.base import (
+    Provider,
+    apply_resilience_defaults,
+    register_provider,
+    resolve_reasoning_spec,
+)
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
@@ -37,6 +42,17 @@ class ZAIProvider(Provider):
             )
         base_url = os.getenv("ZAI_BASE_URL", DEFAULT_BASE_URL)
         apply_resilience_defaults(params)
+
+        spec = resolve_reasoning_spec(params)
+        if spec is not None:
+            # GLM has no budget/effort dial — any non-off spec just turns
+            # thinking on. Merge with a caller-supplied extra_body if present.
+            extra_body = dict(params.get("extra_body") or {})
+            thinking = dict(extra_body.get("thinking") or {})
+            thinking["type"] = "enabled"
+            extra_body["thinking"] = thinking
+            params["extra_body"] = extra_body
+
         # ChatOpenAI's `api_key` field is SecretStr | Callable | None, not a
         # bare str — wrap explicitly (api_key is guaranteed truthy here, the
         # `raise` above already ruled out the empty/missing case).

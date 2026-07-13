@@ -44,6 +44,76 @@ def apply_resilience_defaults(params: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reasoning knob: normalization + per-build extraction
+# ---------------------------------------------------------------------------
+
+# Canonical budget<->effort table (fixed, shared by every provider). `True` is
+# equivalent to ``{"effort": "medium"}``; a bare budget is bucketed into the
+# nearest effort tier for providers with only a coarse effort dial (OpenAI).
+_EFFORT_TO_BUDGET: dict[str, int] = {"low": 1024, "medium": 4096, "high": 16384}
+
+
+def _budget_to_effort(budget_tokens: int) -> str:
+    if budget_tokens <= 1024:
+        return "low"
+    if budget_tokens <= 8192:
+        return "medium"
+    return "high"
+
+
+def normalize_reasoning(spec: bool | dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize the declarative ``reasoning`` knob into a canonical spec.
+
+    - ``None``/``False`` -> ``None`` (reasoning off; callers must leave every
+      other kwarg untouched to preserve today's byte-for-byte behavior).
+    - ``True`` -> ``{"effort": "medium"}`` normalized (see below).
+    - ``dict`` -> filled in with whichever half (``budget_tokens``/``effort``)
+      is missing, per the fixed table above. If both halves are already
+      present they are kept exactly as given (no re-derivation).
+    """
+    if spec is None or spec is False:
+        return None
+    if spec is True:
+        spec = {"effort": "medium"}
+
+    budget_tokens = spec.get("budget_tokens")
+    effort = spec.get("effort")
+    if effort is None:
+        effort = "medium" if budget_tokens is None else _budget_to_effort(budget_tokens)
+    if budget_tokens is None:
+        budget_tokens = _EFFORT_TO_BUDGET[effort]
+    return {"budget_tokens": budget_tokens, "effort": effort}
+
+
+def pop_reasoning(params: dict[str, Any]) -> bool | dict[str, Any] | None:
+    """Pop and return the raw ``reasoning`` knob from *params*.
+
+    ``LLM`` always injects ``params["reasoning"]`` (possibly ``None``) before
+    calling ``Provider.build()``. Every provider must pop it here — before
+    touching any other kwarg — so the raw key never reaches the vendor SDK
+    constructor, regardless of whether that provider translates it.
+    """
+    return params.pop("reasoning", None)
+
+
+def resolve_reasoning_spec(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Pop both reasoning-related keys from *params* and resolve the final
+    canonical spec a provider's ``build()`` must apply.
+
+    Pops the class-level ``reasoning`` knob (via ``pop_reasoning``) and, if
+    present, the per-request ``reasoning_effort`` generation param (allow-
+    listed onto the wire in a later round) — which OVERRIDES the knob for
+    this one build with ``{"effort": reasoning_effort}``, translated the same
+    way as any other effort-only spec.
+    """
+    spec = normalize_reasoning(pop_reasoning(params))
+    reasoning_effort = params.pop("reasoning_effort", None)
+    if reasoning_effort is not None:
+        spec = normalize_reasoning({"effort": reasoning_effort})
+    return spec
+
+
+# ---------------------------------------------------------------------------
 # Provider ABC
 # ---------------------------------------------------------------------------
 

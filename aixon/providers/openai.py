@@ -10,7 +10,12 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from aixon.providers.base import Provider, apply_resilience_defaults, register_provider
+from aixon.providers.base import (
+    Provider,
+    apply_resilience_defaults,
+    register_provider,
+    resolve_reasoning_spec,
+)
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
@@ -26,6 +31,14 @@ class OpenAIProvider(Provider):
 
         api_key = os.getenv(self.env_key)
         apply_resilience_defaults(params)
+
+        spec = resolve_reasoning_spec(params)
+        if spec is not None:
+            # ChatOpenAI's own `reasoning_effort` constructor kwarg (verified
+            # on the installed langchain-openai) takes the effort string
+            # directly — OpenAI has no separate budget_tokens dial.
+            params["reasoning_effort"] = spec["effort"]
+
         # ChatOpenAI's `api_key` field accepts SecretStr | Callable | None, not
         # a bare str (pydantic coerces at runtime, but the static field type
         # rejects it). None IS accepted and falls back to the SDK's own

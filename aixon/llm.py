@@ -29,9 +29,17 @@ _REQUEST_MODEL_CACHE_MAX = 8
 class LLM:
     """Declarative handle for a LangChain chat model behind a neutral boundary."""
 
-    def __init__(self, model: str, *, provider: str | None = None, **params: Any):
+    def __init__(
+        self,
+        model: str,
+        *,
+        provider: str | None = None,
+        reasoning: bool | dict[str, Any] | None = None,
+        **params: Any,
+    ):
         self.model = model
         self.params = params
+        self.reasoning = reasoning               # None/False off, True/dict on
         self._provider_name = provider          # None → inferred from model name
         self._chat_model: "BaseChatModel | None" = None  # lazy
         self._request_model_cache: dict[tuple, "BaseChatModel"] = {}
@@ -59,7 +67,9 @@ class LLM:
         call).
         """
         if self._chat_model is None:
-            self._chat_model = self._provider().build(self.model, **self.params)
+            self._chat_model = self._provider().build(
+                self.model, reasoning=self.reasoning, **self.params
+            )
         return self._chat_model
 
     def request_chat_model(self) -> "BaseChatModel":
@@ -92,7 +102,9 @@ class LLM:
         if cached is not None:
             return cached
 
-        model = self._provider().build(self.model, **{**self.params, **params})
+        model = self._provider().build(
+            self.model, reasoning=self.reasoning, **{**self.params, **params}
+        )
         if len(self._request_model_cache) >= _REQUEST_MODEL_CACHE_MAX:
             oldest_key = next(iter(self._request_model_cache))
             del self._request_model_cache[oldest_key]

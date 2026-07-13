@@ -10,10 +10,22 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from aixon.providers.base import Provider, apply_resilience_defaults, register_provider
+from aixon.logging import Logger
+from aixon.providers.base import (
+    Provider,
+    apply_resilience_defaults,
+    register_provider,
+    resolve_reasoning_spec,
+)
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
+
+_log = Logger("aixon.providers.anthropic")
+
+# Margin added on top of the thinking budget when the caller's max_tokens is
+# absent or too low to fit it — Anthropic's API requires max_tokens > budget.
+_REASONING_MAX_TOKENS_MARGIN = 4096
 
 
 class AnthropicProvider(Provider):
@@ -26,6 +38,24 @@ class AnthropicProvider(Provider):
 
         api_key = os.getenv(self.env_key)
         apply_resilience_defaults(params)
+
+        spec = resolve_reasoning_spec(params)
+        if spec is not None:
+            budget = spec["budget_tokens"]
+            # Anthropic's extended-thinking API requires temperature == 1;
+            # the knob wins over whatever the caller/request asked for.
+            if "temperature" in params and params["temperature"] != 1:
+                _log.warning(
+                    "reasoning is on: forcing temperature=1 (Anthropic's "
+                    "extended-thinking API requires it); caller passed %r",
+                    params["temperature"],
+                )
+            params["temperature"] = 1
+            params["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            max_tokens = params.get("max_tokens")
+            if max_tokens is None or max_tokens <= budget:
+                params["max_tokens"] = budget + _REASONING_MAX_TOKENS_MARGIN
+
         # ChatAnthropic's `model` field is declared with alias "model_name"
         # (populate_by_name=True still accepts "model" at runtime, verified),
         # and its `api_key` field is a required (non-Optional) SecretStr with
