@@ -78,6 +78,21 @@ def test_anthropic_provider_build():
     assert hasattr(model, "invoke")
 
 
+def test_anthropic_provider_build_without_api_key_does_not_raise(monkeypatch):
+    """Regression (M4): ChatAnthropic's `api_key` field is a required (non-
+    Optional) SecretStr with a default_factory that re-reads ANTHROPIC_API_KEY.
+    Passing `api_key=None` explicitly (the old code, when the env var is
+    unset) bypassed that default_factory and raised a pydantic ValidationError
+    at build() time. Building without a key must still construct the model —
+    the missing key only fails later, at the network call."""
+    pytest.importorskip("langchain_anthropic")
+    from aixon.providers.anthropic import AnthropicProvider
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    model = AnthropicProvider().build("claude-sonnet-5")
+    assert hasattr(model, "invoke")
+
+
 def test_google_provider_build():
     pytest.importorskip("langchain_google_genai")
     importlib.import_module("aixon.providers.google")

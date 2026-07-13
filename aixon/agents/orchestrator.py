@@ -20,6 +20,7 @@ from aixon.exceptions import AixonError, CompositionCycleError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.state import END, GraphState
+from aixon.usage import add_usage, usage_scope
 
 _log = Logger("aixon.orchestrator")
 
@@ -308,6 +309,11 @@ class Orchestrator(Agent, abstract=True):
             ),
         )
         reply = self.supervisor.complete([system, *messages])
+        # The routing reply never lands in state["messages"] (only the
+        # supervisor_node's `{}` update does), so its usage would otherwise be
+        # lost — contribute it to the active usage_scope() (opened by
+        # invoke/ainvoke) the same way a worker's returned Message does.
+        add_usage(getattr(reply, "usage", None))
         choice = self._parse_choice(reply.content, workers)
         if choice is not None:
             return choice
@@ -323,6 +329,7 @@ class Orchestrator(Agent, abstract=True):
             ),
         )
         reply = self.supervisor.complete([system, *messages, strict])
+        add_usage(getattr(reply, "usage", None))
         choice = self._parse_choice(reply.content, workers)
         return choice if choice is not None else ""
 
@@ -385,6 +392,10 @@ class Orchestrator(Agent, abstract=True):
     def _make_worker_node(self, agent: Agent):
         def node(state: GraphState) -> dict:
             result = agent.invoke(list(state.get("messages", [])))
+            # Contribute this worker turn's usage to the active usage_scope()
+            # (opened by invoke()) — same accumulator the supervisor's routing
+            # calls add to, so the run's total covers every model turn.
+            add_usage(getattr(result, "usage", None))
             return {"messages": result}
 
         return node
@@ -394,6 +405,7 @@ class Orchestrator(Agent, abstract=True):
         genuinely async (cancellable at await points)."""
         async def node(state: GraphState) -> dict:
             result = await agent.ainvoke(list(state.get("messages", [])))
+            add_usage(getattr(result, "usage", None))
             return {"messages": result}
 
         return node
@@ -453,17 +465,21 @@ class Orchestrator(Agent, abstract=True):
 
         graph = self._compiled()
         deadline = time.monotonic() + self.timeout if self.timeout else None
-        try:
-            result = graph.invoke(
-                self._initial_state(messages), config=self._run_config()
-            )
-        except GraphRecursionError as exc:
-            raise AixonError(
-                f"Orchestrator '{type(self).__name__}' hit its recursion limit "
-                f"({self.recursion_limit}). The graph looped without reaching "
-                f"END. Raise `recursion_limit`, fix the routing, or set a "
-                f"terminal edge. (LangGraph: {exc})"
-            ) from exc
+        # Opens a fresh accumulator for THIS run; worker nodes and (Tier 1)
+        # the supervisor's routing calls add their turn's usage into it as
+        # the graph executes (see _make_worker_node / _supervisor_choose).
+        with usage_scope() as usage_acc:
+            try:
+                result = graph.invoke(
+                    self._initial_state(messages), config=self._run_config()
+                )
+            except GraphRecursionError as exc:
+                raise AixonError(
+                    f"Orchestrator '{type(self).__name__}' hit its recursion limit "
+                    f"({self.recursion_limit}). The graph looped without reaching "
+                    f"END. Raise `recursion_limit`, fix the routing, or set a "
+                    f"terminal edge. (LangGraph: {exc})"
+                ) from exc
         if deadline is not None and time.monotonic() > deadline:
             raise AixonError(
                 f"Orchestrator '{type(self).__name__}' exceeded timeout="
@@ -472,8 +488,13 @@ class Orchestrator(Agent, abstract=True):
         out_messages = result.get("messages", [])
         for m in reversed(out_messages):
             if m.role == "assistant":
+                # Overwrite the worker's own usage (its turn alone) with the
+                # run's total (every turn) — the neutral-boundary Message this
+                # method returns must report the WHOLE run, not just its last
+                # step, mirroring ToolAgent._sum_usage's contract.
+                m.usage = usage_acc.total
                 return m
-        return Message(role="assistant", content="")
+        return Message(role="assistant", content="", usage=usage_acc.total)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         from aixon.reasoning import reasoning_channel
@@ -499,31 +520,37 @@ class Orchestrator(Agent, abstract=True):
         from langgraph.errors import GraphRecursionError
 
         graph = self._acompiled()
-        try:
-            coro = graph.ainvoke(
-                self._initial_state(messages), config=self._run_config()
-            )
-            if self.timeout:
-                result = await asyncio.wait_for(coro, timeout=self.timeout)
-            else:
-                result = await coro
-        except asyncio.TimeoutError:
-            raise AixonError(
-                f"Orchestrator '{type(self).__name__}' exceeded timeout="
-                f"{self.timeout}s; the run was cancelled."
-            )
-        except GraphRecursionError as exc:
-            raise AixonError(
-                f"Orchestrator '{type(self).__name__}' hit its recursion limit "
-                f"({self.recursion_limit}). The graph looped without reaching "
-                f"END. Raise `recursion_limit`, fix the routing, or set a "
-                f"terminal edge. (LangGraph: {exc})"
-            ) from exc
+        # See invoke(): a fresh accumulator for THIS run, fed by worker nodes
+        # and (Tier 1) the supervisor's routing calls as the graph executes.
+        with usage_scope() as usage_acc:
+            try:
+                coro = graph.ainvoke(
+                    self._initial_state(messages), config=self._run_config()
+                )
+                if self.timeout:
+                    result = await asyncio.wait_for(coro, timeout=self.timeout)
+                else:
+                    result = await coro
+            except asyncio.TimeoutError:
+                raise AixonError(
+                    f"Orchestrator '{type(self).__name__}' exceeded timeout="
+                    f"{self.timeout}s; the run was cancelled."
+                )
+            except GraphRecursionError as exc:
+                raise AixonError(
+                    f"Orchestrator '{type(self).__name__}' hit its recursion limit "
+                    f"({self.recursion_limit}). The graph looped without reaching "
+                    f"END. Raise `recursion_limit`, fix the routing, or set a "
+                    f"terminal edge. (LangGraph: {exc})"
+                ) from exc
         out_messages = result.get("messages", [])
         for m in reversed(out_messages):
             if m.role == "assistant":
+                # See invoke(): the total covers the WHOLE run, not just this
+                # worker's own turn.
+                m.usage = usage_acc.total
                 return m
-        return Message(role="assistant", content="")
+        return Message(role="assistant", content="", usage=usage_acc.total)
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
         from aixon.reasoning import reasoning_channel

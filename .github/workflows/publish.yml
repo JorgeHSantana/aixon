@@ -31,8 +31,26 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
 
+  bare-install-smoke:
+    # Validates the neutral-boundary/lazy-import discipline: `import aixon`
+    # and the `aixon` console-script must both work with NO extras installed
+    # (the langchain/langgraph/click core deps only) — the exact opposite of
+    # the `test` job's `[all,dev]` install above. Identical to test.yml's job
+    # of the same name (that one gates PRs; this one gates the push-to-main
+    # publish pipeline, so a regression can't slip through on a direct push).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install .
+      - run: python -c "import aixon; print(aixon.__version__)"
+      - run: aixon --help
+
   publish-testpypi:
-    needs: test
+    needs: [test, bare-install-smoke]
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:

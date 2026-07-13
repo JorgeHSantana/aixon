@@ -21,6 +21,7 @@ from aixon.llm import LLM
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.reasoning import emit_reasoning
+from aixon.usage import merge_usage
 
 _log = Logger("aixon.reflective")
 
@@ -179,12 +180,18 @@ class ReflectiveAgent(Agent, abstract=True):
     def invoke(self, messages: list[Message]) -> Message:
         msgs = list(messages)
         answer = self._worker.invoke(msgs)
+        # Every worker AND judge turn attempted this run is summed here (a
+        # turn that reports no usage contributes zero, never erasing what the
+        # others reported) so the final Message.usage covers the WHOLE run,
+        # not just the last worker/judge turn.
+        total_usage = answer.usage
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
-            verdict = self.judge_llm.complete(
-                self._judge_messages(messages, answer)
-            ).content
+            verdict_msg = self.judge_llm.complete(self._judge_messages(messages, answer))
+            total_usage = merge_usage(total_usage, verdict_msg.usage)
+            verdict = verdict_msg.content
             if self._approved(verdict):
+                answer.usage = total_usage
                 return answer
             if round_ == self.max_rounds:
                 break
@@ -192,11 +199,13 @@ class ReflectiveAgent(Agent, abstract=True):
                                                    max=self.max_rounds))
             msgs = self._retry_messages(msgs, answer, verdict)
             answer = self._worker.invoke(msgs)
+            total_usage = merge_usage(total_usage, answer.usage)
         emit_reasoning(self.exhausted_label)
         _log.info(
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
+        answer.usage = total_usage
         return answer
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
@@ -244,12 +253,17 @@ class ReflectiveAgent(Agent, abstract=True):
     async def ainvoke(self, messages: list[Message]) -> Message:
         msgs = list(messages)
         answer = await self._worker.ainvoke(msgs)
+        # See invoke(): sum every worker + judge turn attempted this run.
+        total_usage = answer.usage
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
-            verdict = (
-                await self.judge_llm.acomplete(self._judge_messages(messages, answer))
-            ).content
+            verdict_msg = await self.judge_llm.acomplete(
+                self._judge_messages(messages, answer)
+            )
+            total_usage = merge_usage(total_usage, verdict_msg.usage)
+            verdict = verdict_msg.content
             if self._approved(verdict):
+                answer.usage = total_usage
                 return answer
             if round_ == self.max_rounds:
                 break
@@ -257,11 +271,13 @@ class ReflectiveAgent(Agent, abstract=True):
                                                    max=self.max_rounds))
             msgs = self._retry_messages(msgs, answer, verdict)
             answer = await self._worker.ainvoke(msgs)
+            total_usage = merge_usage(total_usage, answer.usage)
         emit_reasoning(self.exhausted_label)
         _log.info(
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
+        answer.usage = total_usage
         return answer
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":

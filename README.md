@@ -345,11 +345,12 @@ pytest                         # run the suite
 mypy aixon                     # type-check the package
 ```
 
-CI runs both `mypy aixon` and the full suite on every push/PR. The PR gate
-additionally runs a bare-install smoke job (`pip install .` with no extras,
-then `import aixon` and `aixon --help`) that guards the
-neutral-boundary/lazy-import discipline — the core package must stay
-importable and the CLI runnable without any optional dependency installed.
+CI runs both `mypy aixon` and the full suite on every push/PR. Both the PR
+gate and the push-to-main publish pipeline additionally run a bare-install
+smoke job (`pip install .` with no extras, then `import aixon` and
+`aixon --help`) that guards the neutral-boundary/lazy-import discipline — the
+core package must stay importable and the CLI runnable without any optional
+dependency installed.
 
 ---
 
