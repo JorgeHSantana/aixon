@@ -32,11 +32,12 @@ _KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
 def merge_usage(a: "dict[str, int] | None", b: "dict[str, int] | None") -> "dict[str, int] | None":
     """Sum two neutral OpenAI-shaped usage dicts.
 
-    A side that reports no usage (``None``) contributes zero and does NOT
-    erase a total already accumulated from the other side. Only when BOTH
-    sides are ``None`` does the merge stay ``None`` (nothing was ever
-    reported, so the server's estimate-based fallback should still apply)."""
-    if a is None and b is None:
+    A side that reports no usage (``None`` or an EMPTY dict) contributes
+    zero and does NOT erase a total already accumulated from the other side.
+    Only when NEITHER side reported anything does the merge stay ``None``
+    (so the server's estimate-based fallback still applies — an all-zero
+    dict here would be truthy and silently suppress it)."""
+    if not a and not b:
         return None
     out = {k: 0 for k in _KEYS}
     for src in (a, b):

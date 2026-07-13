@@ -154,3 +154,50 @@ def test_e2e_anthropic_stream_error_envelope_order_and_is_generic():
     assert error_event["error"]["message"] == (
         "The server encountered an error while generating the response."
     )
+
+
+# ── final-review 0.1.14: pins for hand-verified paths + malformed input ──────
+
+def test_parse_non_dict_tool_use_input_degrades_to_empty_dict():
+    # Valid JSON that isn't an object (list/string) must become args={} —
+    # one malformed history entry must not 500 the request (same contract
+    # as _neutral_tool_calls on the OpenAI adapter).
+    pr = AnthropicAdapter().parse_request(
+        {"model": "m", "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "f", "input": [1, 2]},
+                {"type": "tool_use", "id": "t2", "name": "g", "input": "oops"},
+                {"type": "tool_use", "id": "t3", "name": "h",
+                 "input": {"x": 1}},
+            ]},
+        ]},
+        path="/v1/messages")
+    calls = pr.messages[0].tool_calls
+    assert [c["args"] for c in calls] == [{}, {}, {"x": 1}]
+
+
+def test_stream_error_after_tool_use_emits_clean_envelope():
+    # tool_use blocks self-close, so an error right after one must emit the
+    # error event without a dangling content_block_stop.
+    s = _session()
+    raw = s.chunk(Chunk(tool_calls=[{"name": "f", "args": {}, "id": "t1"}]))
+    raw += s.error(RuntimeError("boom"))
+    raw += s.done()
+    text = raw
+    assert text.index("content_block_stop") < text.index("event: error")
+    assert text.index("event: error") < text.index("message_stop")
+    assert "boom" not in text  # generic payload, no internal leak
+
+
+def test_stream_reasoning_after_tool_use_opens_new_block():
+    s = _session()
+    raw = s.chunk(Chunk(content="answer"))
+    raw += s.chunk(Chunk(tool_calls=[{"name": "f", "args": {}, "id": "t1"}]))
+    raw += s.chunk(Chunk(reasoning="thinking more"))
+    raw += s.chunk(Chunk(done=True))
+    events = _events(raw)
+    starts = [(e["index"], e["content_block"]["type"])
+              for e in events if e["type"] == "content_block_start"]
+    # text(0) -> tool_use(1) -> thinking(2): indices strictly increasing,
+    # no reuse of a closed block's index.
+    assert starts == [(0, "text"), (1, "tool_use"), (2, "thinking")]

@@ -58,9 +58,14 @@ def _assistant_message_from_blocks(content: list) -> Message:
         if btype == "text":
             text_parts.append(block.get("text", ""))
         elif btype == "tool_use":
+            # Non-dict input (valid JSON like a list or string) must degrade
+            # to {} — a dict is required by AIMessage.tool_calls, and one
+            # malformed history entry must not 500 the whole request (same
+            # guard as _neutral_tool_calls in the OpenAI adapter).
+            args = block.get("input")
             tool_calls.append({
                 "name": block.get("name", ""),
-                "args": block.get("input") or {},
+                "args": args if isinstance(args, dict) else {},
                 "id": block.get("id", ""),
                 "type": "tool_call",
             })
