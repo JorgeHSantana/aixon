@@ -41,6 +41,50 @@ def _flatten_content(content: object) -> str:
     return str(content)
 
 
+def reasoning_from_message(msg: object) -> str | None:
+    """Extract the reasoning text carried by a LangChain AIMessage (non-stream)
+    or AIMessageChunk (one streaming delta) — same two sources, in this order:
+
+    1. Anthropic-style ``thinking`` blocks in a list ``.content``: entries
+       shaped ``{"type": "thinking", "thinking": "...", ...}``. This is the
+       wire shape verbatim — langchain-anthropic 1.4.7's ``_format_output``
+       (non-stream) dumps the raw Anthropic API response content list with
+       only unrelated keys stripped, and its streaming event handler
+       (``_make_message_chunk_from_anthropic_event``) emits one such block per
+       ``thinking_delta`` SSE event (a trailing ``signature_delta`` block has
+       no ``"thinking"`` key and contributes nothing here).
+    2. The ``reasoning_content`` convention some OpenAI-compatible providers
+       (e.g. zai/GLM) place in ``additional_kwargs``.
+
+    Blocks/values are concatenated in the order above, thinking-blocks first.
+    Returns ``None`` when neither source is present — this is what keeps
+    no-reasoning behavior unchanged: nothing is added, nothing is dropped.
+    """
+    parts: list[str] = []
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                thinking = block.get("thinking")
+                if isinstance(thinking, str) and thinking:
+                    parts.append(thinking)
+    kwargs = getattr(msg, "additional_kwargs", None)
+    if kwargs:
+        reasoning_content = kwargs.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            parts.append(reasoning_content)
+    return "".join(parts) or None
+
+
+# Streaming chunks (AIMessageChunk) carry the exact same two shapes as a full
+# AIMessage, except each chunk's .content/.additional_kwargs already IS the
+# per-chunk delta (not the accumulated total) — mirroring how `_flatten_content`
+# is applied to individual stream chunks in aixon.llm. The extraction logic is
+# identical; this alias just names the call site (LLM.stream/astream) that
+# uses it, distinct from from_langchain's non-stream call site.
+reasoning_from_chunk = reasoning_from_message
+
+
 def to_langchain(messages: list[Message]) -> list[BaseMessage]:
     """Convert neutral Message[] to LangChain message objects.
 
@@ -49,6 +93,15 @@ def to_langchain(messages: list[Message]) -> list[BaseMessage]:
         user      → HumanMessage
         assistant → AIMessage (tool_calls forwarded if present)
         tool      → ToolMessage (requires tool_call_id)
+
+    Does NOT reconstruct Anthropic thinking blocks (nor any other reasoning
+    shape) on the way back in: a neutral Message's `.reasoning` is a plain
+    string with no signature/block structure to round-trip, and clients don't
+    need to resend it — ToolAgent's internal LangGraph loop keeps native
+    LangChain messages (with any Claude thinking-block signatures) in its own
+    graph state across turns, so those survive there independently of this
+    conversion. Reasoning coming back from a neutral history (e.g. a client
+    replaying `Message.reasoning` from a prior response) is simply dropped.
     """
     result: list[BaseMessage] = []
     for msg in messages:
@@ -86,7 +139,9 @@ def from_langchain(msg: BaseMessage) -> Message:
 
     - Role inferred from the LangChain type.
     - tool_calls: forwarded from AIMessage.tool_calls (list of dicts).
-    - reasoning: read from additional_kwargs['reasoning_content'] if present.
+    - reasoning: thinking-blocks from a list `.content` (if any) followed by
+      additional_kwargs['reasoning_content'] (if any) — see
+      `reasoning_from_message`.
     - usage: converted from AIMessage.usage_metadata (provider-real counts,
       LangChain naming input/output_tokens) to the neutral OpenAI shape
       (prompt/completion/total_tokens); None when the provider reported none.
@@ -112,9 +167,7 @@ def from_langchain(msg: BaseMessage) -> Message:
     if isinstance(msg, AIMessage) and msg.tool_calls:
         tool_calls = [dict(tc) for tc in msg.tool_calls]
 
-    reasoning: str | None = None
-    if getattr(msg, "additional_kwargs", None):
-        reasoning = msg.additional_kwargs.get("reasoning_content")
+    reasoning = reasoning_from_message(msg)
 
     # Preserve tool-routing fields so a Message -> LangChain -> Message round-trip
     # of a tool message keeps its tool_call_id/name. Without this, to_langchain

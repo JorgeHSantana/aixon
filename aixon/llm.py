@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
-from aixon._interop.messages import _flatten_content, from_langchain, to_langchain
+from aixon._interop.messages import (
+    _flatten_content,
+    from_langchain,
+    reasoning_from_chunk,
+    to_langchain,
+)
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 
@@ -149,11 +154,18 @@ class LLM:
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         """Neutral streaming. Used by LLMAgent.stream.
 
-        Yields Chunk(content=delta) per non-empty delta, then Chunk(done=True).
-        Works whether the model yields AIMessageChunk deltas (real providers)
-        or a single AIMessage (the fake, which has no _stream).
+        Yields Chunk(reasoning=delta) then Chunk(content=delta) per chunk (in
+        that order, when a single underlying chunk carries both — e.g. a
+        Claude thinking block followed by text in the same delta), skipping
+        whichever is empty, then Chunk(done=True). Works whether the model
+        yields AIMessageChunk deltas (real providers) or a single AIMessage
+        (the fake, which has no _stream). No reasoning present -> unchanged
+        byte-for-byte from before reasoning extraction existed.
         """
         for lc_chunk in self._bound_model().stream(to_langchain(messages)):
+            reasoning = reasoning_from_chunk(lc_chunk)
+            if reasoning:
+                yield Chunk(reasoning=reasoning)
             # Some providers stream list-of-blocks deltas; flatten to text.
             content = _flatten_content(getattr(lc_chunk, "content", ""))
             if content:
@@ -168,8 +180,12 @@ class LLM:
 
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """Async neutral streaming. Used by LLMAgent.astream. Mirrors stream()
-        over the model's native ``astream``."""
+        over the model's native ``astream`` (same reasoning-before-content
+        ordering per chunk; see stream())."""
         async for lc_chunk in self._bound_model().astream(to_langchain(messages)):
+            reasoning = reasoning_from_chunk(lc_chunk)
+            if reasoning:
+                yield Chunk(reasoning=reasoning)
             # Some providers stream list-of-blocks deltas; flatten to text.
             content = _flatten_content(getattr(lc_chunk, "content", ""))
             if content:
