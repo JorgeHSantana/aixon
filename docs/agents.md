@@ -102,13 +102,78 @@ model raises `AixonError` instead of silently sending your OpenAI credential
 to the z.AI endpoint. `ZAI_BASE_URL` overrides the default
 (`https://api.z.ai/api/paas/v4`).
 
+### Reasoning (extended thinking / reasoning effort)
+
+`LLM(model, reasoning=...)` turns on the provider's native reasoning/thinking
+mode:
+
+```python
+llm = LLM("claude-sonnet-4-5", reasoning=True)                    # {"effort": "medium"}
+llm = LLM("claude-sonnet-4-5", reasoning={"effort": "high"})
+llm = LLM("claude-sonnet-4-5", reasoning={"budget_tokens": 8000})
+llm = LLM("gpt-5.4", reasoning={"effort": "low"})
+```
+
+- `None`/`False` (the default) — off; behavior is byte-for-byte unchanged from
+  before the knob existed.
+- `True` — shorthand for `{"effort": "medium"}`.
+- A `dict` may give `budget_tokens`, `effort`, or both; whichever half is
+  missing is derived from the fixed table below (an already-complete dict is
+  kept exactly as given, no re-derivation):
+
+| Effort | Budget tokens |
+|---|---|
+| `low` | 1024 |
+| `medium` | 4096 |
+| `high` | 16384 |
+
+A bare `budget_tokens` is bucketed into the nearest effort tier the other way
+(`<= 1024` → `low`, `<= 8192` → `medium`, else `high`) for providers with only
+a coarse effort dial.
+
+**Per-provider translation:**
+
+| Provider | Translation |
+|---|---|
+| `anthropic` | `thinking={"type": "enabled", "budget_tokens": ...}`. Anthropic's extended-thinking API requires `temperature == 1`; the knob **forces** it (logging a warning if the caller/request asked for a different value). `max_tokens` is raised to `budget_tokens + 4096` when absent or not already comfortably above the budget. |
+| `openai` | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`. No budget dial — only the effort string reaches the API. |
+| `zai` (GLM) | `extra_body={"thinking": {"type": "enabled", ...}}` (merged with any caller-supplied `extra_body`). GLM has no budget/effort dial of its own — any non-off spec just turns thinking on. |
+| `google` (Gemini) | `thinking_budget=<budget_tokens>` and `include_thoughts=True` on `ChatGoogleGenerativeAI` — applied only if the installed `langchain-google-genai` declares those fields; an older install degrades gracefully (knob ignored, warning logged) instead of raising on an unknown kwarg. |
+| custom (no `supports_reasoning = True`) | the knob is **ignored** (with a warning) rather than forwarded — a pydantic-strict vendor constructor never sees the stray `reasoning` kwarg, so the build never breaks. |
+
+**Per-request override.** `reasoning_effort` in the request body (see
+[server.md](server.md)) is allow-listed the same way as `temperature`/
+`max_tokens`/etc., and, when present, overrides the class-level `reasoning=`
+knob for that one build — translated as `{"effort": reasoning_effort}` through
+the same table above.
+
+**What actually comes back — read before relying on visible reasoning text:**
+- **Anthropic** extracts `thinking` blocks into `Message.reasoning` /
+  `Chunk.reasoning` (see [architecture.md](architecture.md#the-neutral-boundary))
+  — real, provider-generated chain-of-thought text.
+- **Gemini** does the same when `include_thoughts=True` is applied (always the
+  case when the knob is on and the installed package supports it).
+- **OpenAI's API does not return raw chain-of-thought at all.**
+  `reasoning_effort` makes the model think harder and improves the answer,
+  but there is no reasoning text to extract — `Message.reasoning` stays
+  `None` for OpenAI models regardless of the knob.
+- **z.AI (GLM)**: `thinking` IS enabled on the wire, but the installed
+  `langchain-openai` does not populate `additional_kwargs["reasoning_content"]`
+  from the Chat Completions response today — a provider/package gap, not
+  something aixon papers over. Extraction already supports the
+  `reasoning_content` convention the moment the installed SDK starts filling
+  it in; until then, GLM reasoning text does not surface even though thinking
+  is enabled server-side.
+- **Cost.** Thinking/reasoning tokens bill as output tokens and already show
+  up in `Message.usage["completion_tokens"]` — no separate accounting needed.
+
 ### Per-request generation params
 
 When an agent runs behind the `Server`, per-request generation params
 (`temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`,
-`stop`) are published on a `ContextVar` for the duration of the call (see
-`aixon.runtime.generation_params`) and apply **on top of** the `LLM(...)`
-class-level defaults, without mutating them:
+`stop`, `reasoning_effort`) are published on a `ContextVar` for the duration of
+the call (see `aixon.runtime.generation_params`) and apply **on top of** the
+`LLM(...)` class-level defaults, without mutating them:
 
 - `LLMAgent` applies them via `LLM._bound_model()` — `.bind(**params)` on the
   cached `chat_model` (a `RunnableBinding`, still fine for `invoke`/`stream`).
@@ -207,6 +272,16 @@ class OrchestratorAgent(ToolAgent):
 `ReasoningChannel`), that reasoning bubbles up through the outer `stream()` as
 `Chunk(reasoning=...)` deltas — so callers see the full chain of thought even
 across nesting levels.
+
+**Model reasoning.** When `self.llm` has the [reasoning knob](#reasoning-extended-thinking--reasoning-effort)
+turned on, a turn's own thinking/reasoning text (extracted per
+`reasoning_from_message`, see [architecture.md](architecture.md)) is emitted
+into the same `ReasoningChannel` *before* that turn's tool-call label(s) — the
+model reasoned before deciding to call the tool, and the channel preserves
+that order. `Message.reasoning` (`invoke`) / `Chunk.reasoning` (`stream`)
+therefore interleave the model's own thinking with the `"Calling {name}..."`
+step labels, in the order they occurred. Consecutive duplicate reasoning
+lines are deduplicated the same way as tool-call labels.
 
 ---
 

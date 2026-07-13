@@ -65,6 +65,16 @@ provider reported none, so a consumer (e.g. the Server) may fall back to
 estimating. `Chunk.tool_calls` carries neutral tool-call dicts the agent wants
 surfaced to the client for execution (see [server.md](server.md), client tools).
 
+`Message.reasoning`/`Chunk.reasoning` have two sources: `ToolAgent`'s own
+tool-call step labels (unchanged), and — when the agent's `LLM` has the
+[reasoning knob](agents.md#reasoning-extended-thinking--reasoning-effort) on —
+the model's own native reasoning (Anthropic `thinking` blocks, or the
+`reasoning_content` convention some OpenAI-compatible providers use),
+extracted by `aixon._interop.messages.reasoning_from_message` and merged into
+the same `ReasoningChannel` ahead of the labels it led to. `LLMAgent`/`LLM.stream`
+surface the same extraction directly, one `Chunk(reasoning=...)` per delta
+before the matching `Chunk(content=...)` of that delta.
+
 **What the neutral boundary prevents:** a `ToolAgent` can swap its LLM from
 OpenAI to Anthropic without touching the `Orchestrator` that calls it as a node.
 The `Server` can mount a new `ProtocolAdapter` without touching any `Agent`.

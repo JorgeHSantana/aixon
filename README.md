@@ -180,6 +180,17 @@ Attributes:
 | `aliases` | `list[str]` | Alternate names for registry resolution. |
 | `hidden` | `bool` | Exclude from `aixon chat` menu and `public()` listing. |
 
+`LLM(model, reasoning=...)` turns on the provider's native reasoning/thinking
+mode — `True` for medium effort, or `{"effort": "low"|"medium"|"high"}` /
+`{"budget_tokens": int}` for finer control — translated per provider
+(Anthropic `thinking` blocks, OpenAI `reasoning_effort`, z.AI/GLM
+`extra_body.thinking`, Gemini `thinking_budget`). Note that OpenAI's API
+returns no raw chain-of-thought (the knob only improves the answer) and GLM
+reasoning text doesn't surface with the currently-installed `langchain-openai`
+even though thinking is enabled server-side. See
+[docs/agents.md](docs/agents.md#reasoning-extended-thinking--reasoning-effort)
+for the full per-provider table and honesty notes.
+
 `aixon list` output (no header, one agent per line):
 
 ```

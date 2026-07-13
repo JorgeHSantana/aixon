@@ -170,9 +170,12 @@ Full OpenAI-compatible wire format. Served routes:
 > think-blocks. A per-request `thought_stream_mode` always wins.
 
 > **Generation params.** Per-request `temperature`, `top_p`, `max_tokens`,
-> `presence_penalty`, `frequency_penalty`, and `stop` are forwarded to the model
-> automatically (allow-listed), overriding the agent's class-level `LLM(...)`
-> defaults for that request.
+> `presence_penalty`, `frequency_penalty`, `stop`, and `reasoning_effort` are
+> forwarded to the model automatically (allow-listed), overriding the agent's
+> class-level `LLM(...)` defaults for that request. `reasoning_effort`
+> specifically overrides the class-level `reasoning=` knob (see
+> [agents.md](agents.md#reasoning-extended-thinking--reasoning-effort)) for
+> that one build, translated as `{"effort": reasoning_effort}`.
 
 > **Client tools.** Agentic clients (editors, IDEs) may send OpenAI `tools` on
 > the request; the adapter extracts them into `ParsedRequest.tools` and the
@@ -225,10 +228,12 @@ with client.chat.completions.stream(
         print(text, end="", flush=True)
 ```
 
-**Reasoning field:** `Chunk.reasoning` (emitted by `ToolAgent` and nested agents
-via the `ReasoningChannel`) is surfaced in the streaming response via a
-configurable mode: hidden (default), a vendor extension field, or inline
-`<think>…</think>` tags.
+**Reasoning field:** `Chunk.reasoning` (emitted by `ToolAgent`/nested agents via
+the `ReasoningChannel`, and — when the agent's `LLM(model, reasoning=...)` knob
+is on — the model's own native thinking, see
+[agents.md](agents.md#reasoning-extended-thinking--reasoning-effort)) is
+surfaced in the streaming response via a configurable mode: hidden (default), a
+vendor extension field, or inline `<think>…</think>` tags.
 
 ---
 

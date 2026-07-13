@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `LLM(model, reasoning=...)`: declarative reasoning/extended-thinking knob (`None`/`False` off — byte-for-byte unchanged behavior; `True` ≡ `{"effort": "medium"}`; `dict` with `budget_tokens`/`effort`, normalized low=1024/medium=4096/high=16384) translated per provider — Anthropic `thinking` (temperature forced to 1 with a warning, `max_tokens` raised to fit the budget), OpenAI `reasoning_effort`, z.AI/GLM `extra_body.thinking`, Google `thinking_budget`/`include_thoughts` (graceful degradation + warning on an older `langchain-google-genai`); a custom provider without `supports_reasoning = True` has the knob ignored with a warning instead of a broken build (R1)
+- Reasoning extraction: Claude `thinking` blocks and the `reasoning_content` convention (zai/GLM) surface on `Message.reasoning` (non-stream) and `Chunk.reasoning` (stream — reasoning delta yielded before the content delta of the same chunk); `to_langchain` does not reconstruct thinking blocks on the way back in — the internal LangGraph loop keeps native provider messages across turns instead (R2)
+- `ToolAgent` emits a turn's own model reasoning into the live `ReasoningChannel` *before* that turn's tool-call label(s), so `Message.reasoning`/`Chunk.reasoning` carry the model's thinking ahead of the "Calling {name}..." steps it led to; per-request `reasoning_effort` (allow-listed generation param) overrides the class-level `reasoning=` knob for that one build (R3)
+
+### Docs
+- Documented the reasoning knob, the per-provider translation table, and the honesty notes: OpenAI's API returns no raw chain-of-thought (`reasoning_effort` only improves the answer — visible reasoning text comes from Anthropic, and Gemini with `include_thoughts`), the installed `langchain-openai` does not yet populate `reasoning_content` from Chat Completions (so GLM reasoning text doesn't surface despite thinking being enabled — a provider-side gap), and thinking/reasoning tokens bill as output tokens already counted in `Message.usage` (R4)
+
 ## [0.1.14] - 2026-07-13
 
 ### Added
