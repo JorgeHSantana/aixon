@@ -1,0 +1,5 @@
+# This example calls Anthropic for real (extended thinking is a provider
+# feature — there is nothing meaningful to fake), so it needs the framework
+# plus the Anthropic provider binding and an ANTHROPIC_API_KEY in the env.
+aixon
+langchain-anthropic
