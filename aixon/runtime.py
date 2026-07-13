@@ -17,7 +17,16 @@ from typing import Iterator
 # Wire params we forward to the provider. Everything else in the request body
 # (thought_stream_mode, stream_options, user, n, ...) is NOT a generation knob.
 GENERATION_PARAMS = frozenset(
-    {"temperature", "top_p", "max_tokens", "presence_penalty", "frequency_penalty", "stop"}
+    {
+        "temperature", "top_p", "max_tokens", "presence_penalty", "frequency_penalty",
+        "stop",
+        # Per-request override of the declarative `reasoning` knob (R1 rule 6):
+        # each provider's build() pops it via resolve_reasoning_spec and
+        # translates {"effort": reasoning_effort} the same way as any other
+        # effort-only spec, taking precedence over the class-level knob for
+        # this one build.
+        "reasoning_effort",
+    }
 )
 
 # Provider-dialect spellings normalized to the canonical key above so downstream

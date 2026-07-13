@@ -92,6 +92,28 @@ class ToolAgent(Agent, abstract=True):
         config = {"recursion_limit": 2 * self.max_iterations + 1}
         return agent, lc_messages, config
 
+    def _emit_message_reasoning(self, message) -> None:
+        """If a NEW AI message carries reasoning extracted by R2's
+        ``reasoning_from_message`` (Anthropic-style thinking blocks, or the
+        ``reasoning_content`` convention), emit it into the active
+        ReasoningChannel. Called BEFORE ``_emit_tool_call_labels`` for the same
+        message so the user sees the model's own thinking live, ahead of that
+        turn's tool-call label(s) — the model literally reasoned before
+        deciding to call the tool.
+
+        Same consecutive-duplicate dedupe as ``_emit_tool_call_labels`` (against
+        ``ReasoningChannel.last``), for the same reason: a provider that
+        re-sends identical reasoning text must not spam the channel."""
+        from aixon._interop.messages import reasoning_from_message
+
+        reasoning = reasoning_from_message(message)
+        if not reasoning:
+            return
+        channel = current_channel()
+        if channel is not None and channel.last == reasoning:
+            return
+        emit_reasoning(reasoning)
+
     def _emit_tool_call_labels(self, message) -> None:
         """If an AI message carries tool calls, emit one reasoning label per
         call into the active ReasoningChannel (the langgraph-native equivalent
@@ -182,6 +204,7 @@ class ToolAgent(Agent, abstract=True):
             # belongs to a prior turn in the caller's history.
             for m in result["messages"][len(lc_messages):]:
                 if getattr(m, "type", "") == "ai":
+                    self._emit_message_reasoning(m)
                     self._emit_tool_call_labels(m)
             if time.monotonic() > deadline:
                 # Post-hoc deadline: checked after the run completes (it does NOT
@@ -226,6 +249,7 @@ class ToolAgent(Agent, abstract=True):
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
                             if getattr(m, "type", "") == "ai":
+                                self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
                                 # Only an AI message WITHOUT tool calls is a
                                 # final answer; content on a tool-calling
@@ -289,6 +313,7 @@ class ToolAgent(Agent, abstract=True):
             # See the sync invoke() comment: only THIS run's new messages.
             for m in result["messages"][len(lc_messages):]:
                 if getattr(m, "type", "") == "ai":
+                    self._emit_message_reasoning(m)
                     self._emit_tool_call_labels(m)
             reasoning_lines = [] if outer_channel is not None else channel.drain()
         final = from_langchain(result["messages"][-1])
@@ -343,6 +368,7 @@ class ToolAgent(Agent, abstract=True):
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
                             if getattr(m, "type", "") == "ai":
+                                self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
                                 # Only an AI message WITHOUT tool calls is a
                                 # final answer (see stream): preamble thought
