@@ -13,11 +13,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 from aixon._interop.messages import _flatten_content, from_langchain, to_langchain
+from aixon.logging import Logger
 from aixon.message import Chunk, Message
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
     from langchain_core.runnables import Runnable
+
+_log = Logger("aixon.llm")
 
 # Bound on LLM._request_model_cache: a per-request model is a full provider
 # SDK client (HTTP connection pool and all), so the cache must not grow
@@ -54,6 +57,24 @@ class LLM:
             return get_provider(self._provider_name)
         return resolve_provider_for_model(self.model)
 
+    def _build(self, provider: Any, **params: Any) -> "BaseChatModel":
+        """Call ``provider.build`` with the reasoning knob applied safely.
+
+        ``params["reasoning"]`` is only injected when the provider declares
+        ``supports_reasoning`` (all shipped providers do, and they pop it
+        before touching the vendor constructor). A provider WITHOUT support —
+        e.g. a custom one that blindly forwards **params to a pydantic-strict
+        vendor class — never sees the stray key: the knob is ignored with a
+        warning instead of breaking the build."""
+        if getattr(provider, "supports_reasoning", False):
+            return provider.build(self.model, reasoning=self.reasoning, **params)
+        if self.reasoning is not None and self.reasoning is not False:
+            _log.warning(
+                "provider '%s' does not support reasoning — ignored",
+                getattr(provider, "name", type(provider).__name__),
+            )
+        return provider.build(self.model, **params)
+
     @property
     def chat_model(self) -> "BaseChatModel":
         """Lazily build and cache the LangChain model.
@@ -67,9 +88,7 @@ class LLM:
         call).
         """
         if self._chat_model is None:
-            self._chat_model = self._provider().build(
-                self.model, reasoning=self.reasoning, **self.params
-            )
+            self._chat_model = self._build(self._provider(), **self.params)
         return self._chat_model
 
     def request_chat_model(self) -> "BaseChatModel":
@@ -102,9 +121,7 @@ class LLM:
         if cached is not None:
             return cached
 
-        model = self._provider().build(
-            self.model, reasoning=self.reasoning, **{**self.params, **params}
-        )
+        model = self._build(self._provider(), **{**self.params, **params})
         if len(self._request_model_cache) >= _REQUEST_MODEL_CACHE_MAX:
             oldest_key = next(iter(self._request_model_cache))
             del self._request_model_cache[oldest_key]

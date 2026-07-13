@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
+from aixon.logging import Logger
 from aixon.providers.base import (
     Provider,
     apply_resilience_defaults,
@@ -20,10 +21,13 @@ from aixon.providers.base import (
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
 
+_log = Logger("aixon.providers.google")
+
 
 class GoogleProvider(Provider):
     name = "google"
     env_key = "GOOGLE_API_KEY"
+    supports_reasoning = True
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_google_genai import ChatGoogleGenerativeAI  # lazy import
@@ -33,11 +37,20 @@ class GoogleProvider(Provider):
 
         spec = resolve_reasoning_spec(params)
         if spec is not None:
-            # Verified on the installed langchain-google-genai (4.2.5):
             # `thinking_budget`/`include_thoughts` are direct constructor
-            # kwargs — no model_kwargs fallback needed on this version.
-            params["thinking_budget"] = spec["budget_tokens"]
-            params["include_thoughts"] = True
+            # kwargs on the installed langchain-google-genai (verified on
+            # 4.2.5) — but probe the pydantic fields first so an older
+            # installed version without thinking support degrades gracefully
+            # (skip + warn) instead of blowing up on unknown kwargs.
+            fields = getattr(ChatGoogleGenerativeAI, "model_fields", {})
+            if "thinking_budget" in fields:
+                params["thinking_budget"] = spec["budget_tokens"]
+                params["include_thoughts"] = True
+            else:
+                _log.warning(
+                    "reasoning not supported by installed langchain-google-genai"
+                    " — ignored"
+                )
 
         return ChatGoogleGenerativeAI(model=model, google_api_key=api_key, **params)
 

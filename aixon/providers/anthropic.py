@@ -31,6 +31,7 @@ _REASONING_MAX_TOKENS_MARGIN = 4096
 class AnthropicProvider(Provider):
     name = "anthropic"
     env_key = "ANTHROPIC_API_KEY"
+    supports_reasoning = True
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_anthropic import ChatAnthropic  # lazy import

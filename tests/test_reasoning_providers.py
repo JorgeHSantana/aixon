@@ -94,9 +94,9 @@ def test_llm_stores_reasoning_spec():
     assert llm.reasoning is True
 
 
-def test_chat_model_build_always_receives_reasoning_key(monkeypatch):
-    """LLM always injects params["reasoning"] before build() — even when the
-    knob was never set (None) — so every provider can uniformly pop it."""
+@pytest.fixture
+def recording_fake_build(monkeypatch):
+    """Record the params FakeProvider.build receives, per call."""
     captured: list[dict] = []
     original_build = FakeProvider.build
 
@@ -105,25 +105,91 @@ def test_chat_model_build_always_receives_reasoning_key(monkeypatch):
         return original_build(self, model, **params)
 
     monkeypatch.setattr(FakeProvider, "build", recording_build)
+    return captured
+
+
+def test_supporting_provider_build_receives_reasoning_key(
+    monkeypatch, recording_fake_build
+):
+    """For a provider that declares supports_reasoning=True, LLM always
+    injects params["reasoning"] before build() — even when the knob was never
+    set (None) — so the provider can uniformly pop it."""
+    monkeypatch.setattr(FakeProvider, "supports_reasoning", True, raising=False)
 
     llm = make_llm()
     llm.chat_model
-    assert captured[-1]["reasoning"] is None
+    assert recording_fake_build[-1]["reasoning"] is None
 
 
-def test_chat_model_build_passes_through_explicit_reasoning(monkeypatch):
-    captured: list[dict] = []
-    original_build = FakeProvider.build
-
-    def recording_build(self, model, **params):
-        captured.append(params)
-        return original_build(self, model, **params)
-
-    monkeypatch.setattr(FakeProvider, "build", recording_build)
+def test_supporting_provider_build_passes_through_explicit_reasoning(
+    monkeypatch, recording_fake_build
+):
+    monkeypatch.setattr(FakeProvider, "supports_reasoning", True, raising=False)
 
     llm = make_llm(reasoning={"effort": "high"})
     llm.chat_model
-    assert captured[-1]["reasoning"] == {"effort": "high"}
+    assert recording_fake_build[-1]["reasoning"] == {"effort": "high"}
+
+
+def test_unsupporting_provider_never_receives_reasoning_key(recording_fake_build):
+    """Rule 5: FakeProvider does NOT declare supports_reasoning, standing in
+    for any custom provider that blindly forwards **params to a strict vendor
+    constructor. The stray "reasoning" key must never reach its build()."""
+    assert getattr(FakeProvider, "supports_reasoning", False) is False
+
+    llm = make_llm()
+    llm.chat_model
+    assert "reasoning" not in recording_fake_build[-1]
+
+
+def test_unsupporting_provider_with_reasoning_on_warns_and_does_not_crash(
+    recording_fake_build, caplog
+):
+    """Rule 5: knob on + provider without support -> build still succeeds,
+    receives NO reasoning key, and a warning names the provider."""
+    llm = make_llm(reasoning=True)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        model = llm.chat_model  # must not raise
+    assert model is not None
+    assert "reasoning" not in recording_fake_build[-1]
+    assert any(
+        "does not support reasoning" in m and "fake" in m for m in caplog.messages
+    )
+
+
+def test_unsupporting_provider_reasoning_off_does_not_warn(
+    recording_fake_build, caplog
+):
+    llm = make_llm()
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        llm.chat_model
+    assert caplog.messages == []
+
+
+def test_unsupporting_provider_request_chat_model_path_also_guarded(
+    recording_fake_build, caplog
+):
+    """request_chat_model (the per-request-params path) applies the same
+    rule-5 guard as chat_model."""
+    from aixon.runtime import generation_params
+
+    llm = make_llm(reasoning=True)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with generation_params({"temperature": 0.3}):
+            llm.request_chat_model()  # must not raise
+    assert "reasoning" not in recording_fake_build[-1]
+    assert recording_fake_build[-1]["temperature"] == 0.3
+    assert any("does not support reasoning" in m for m in caplog.messages)
+
+
+def test_shipped_providers_declare_reasoning_support():
+    from aixon.providers.anthropic import AnthropicProvider
+    from aixon.providers.google import GoogleProvider
+    from aixon.providers.openai import OpenAIProvider
+    from aixon.providers.zai import ZAIProvider
+
+    for cls in (AnthropicProvider, OpenAIProvider, ZAIProvider, GoogleProvider):
+        assert cls.supports_reasoning is True
 
 
 # ── Anthropic translation ─────────────────────────────────────────────────────
@@ -290,7 +356,25 @@ def test_zai_reasoning_effort_param_overrides_knob(fake_zai):
 # ── Google translation ────────────────────────────────────────────────────────
 
 class _FakeChatGoogleGenerativeAI:
+    # Mirrors the installed langchain-google-genai (4.2.5), whose pydantic
+    # model exposes these fields — the provider probes model_fields before
+    # emitting the kwargs (rule 4 graceful degradation).
+    model_fields = {"thinking_budget": None, "include_thoughts": None}
+
     def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class _FakeOldChatGoogleGenerativeAI:
+    # Stands in for an older langchain-google-genai WITHOUT thinking support:
+    # no thinking_budget/include_thoughts fields, and (being pydantic-strict)
+    # it rejects unknown kwargs.
+    model_fields: dict = {}
+
+    def __init__(self, **kwargs):
+        for key in ("thinking_budget", "include_thoughts"):
+            if key in kwargs:
+                raise TypeError(f"unexpected keyword argument {key!r}")
         self.kwargs = kwargs
 
 
@@ -300,6 +384,19 @@ def fake_google(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     monkeypatch.setattr(
         "langchain_google_genai.ChatGoogleGenerativeAI", _FakeChatGoogleGenerativeAI
+    )
+    from aixon.providers.google import GoogleProvider
+
+    return GoogleProvider()
+
+
+@pytest.fixture
+def fake_old_google(monkeypatch):
+    pytest.importorskip("langchain_google_genai")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "langchain_google_genai.ChatGoogleGenerativeAI",
+        _FakeOldChatGoogleGenerativeAI,
     )
     from aixon.providers.google import GoogleProvider
 
@@ -329,3 +426,28 @@ def test_google_reasoning_effort_param_overrides_knob(fake_google):
         "gemini-2.0-flash", reasoning={"effort": "low"}, reasoning_effort="high"
     )
     assert model.kwargs["thinking_budget"] == 16384
+
+
+def test_google_reasoning_degrades_when_installed_package_lacks_support(
+    fake_old_google, caplog
+):
+    """Rule 4: an installed langchain-google-genai without thinking fields ->
+    build succeeds WITHOUT the kwargs (the strict fake would raise on them)
+    and the mandated warning is logged."""
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.google"):
+        model = fake_old_google.build("gemini-2.0-flash", reasoning=True)  # no raise
+    assert "thinking_budget" not in model.kwargs
+    assert "include_thoughts" not in model.kwargs
+    assert any(
+        "reasoning not supported by installed langchain-google-genai" in m
+        for m in caplog.messages
+    )
+
+
+def test_google_reasoning_off_on_old_package_neither_warns_nor_breaks(
+    fake_old_google, caplog
+):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.google"):
+        model = fake_old_google.build("gemini-2.0-flash")
+    assert "thinking_budget" not in model.kwargs
+    assert caplog.messages == []

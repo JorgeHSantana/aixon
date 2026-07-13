@@ -127,6 +127,13 @@ class Provider(ABC):
     name: str       # "openai" | "anthropic" | "google" | "zai"
     env_key: str    # e.g. "OPENAI_API_KEY"
 
+    # Providers that translate the declarative ``reasoning`` knob set this to
+    # True; ``LLM`` only injects ``params["reasoning"]`` into build() for
+    # those. Default False so a custom provider that blindly forwards
+    # **params to a strict vendor constructor never receives the stray key —
+    # the knob is then ignored with a warning instead of breaking the build.
+    supports_reasoning: bool = False
+
     @abstractmethod
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         """Return a configured LangChain chat model.

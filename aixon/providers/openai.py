@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 class OpenAIProvider(Provider):
     name = "openai"
     env_key = "OPENAI_API_KEY"
+    supports_reasoning = True
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_openai import ChatOpenAI  # lazy import

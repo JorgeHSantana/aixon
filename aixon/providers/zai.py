@@ -28,6 +28,7 @@ DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
 class ZAIProvider(Provider):
     name = "zai"
     env_key = "ZAI_API_KEY"
+    supports_reasoning = True
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_openai import ChatOpenAI  # lazy import
