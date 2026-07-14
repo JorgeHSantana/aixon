@@ -64,6 +64,15 @@ class AnthropicProvider(Provider):
                     params["temperature"],
                 )
             params["temperature"] = 1
+            # Same class of incompatibility: Anthropic's extended-thinking API
+            # rejects top_p modifications (400) — drop it with a warning
+            # rather than surface a client-triggerable error.
+            if "top_p" in params:
+                _log.warning(
+                    "reasoning is on: dropping top_p=%r (Anthropic's "
+                    "extended-thinking API rejects it)",
+                    params.pop("top_p"),
+                )
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
             max_tokens = params.get("max_tokens")
             if max_tokens is None or max_tokens <= budget:

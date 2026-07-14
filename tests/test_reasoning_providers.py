@@ -582,3 +582,18 @@ def test_google_pops_unsupported_penalty_params_and_warns(fake_google, caplog):
     assert any(
         "presence_penalty" in m and "frequency_penalty" in m for m in caplog.messages
     )
+
+
+def test_anthropic_reasoning_drops_top_p_with_warning(fake_anthropic, caplog):
+    # Anthropic's extended-thinking API rejects top_p modifications — the
+    # provider must drop it (warning) instead of letting the request 400.
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.anthropic"):
+        model = fake_anthropic.build("claude-sonnet-5", reasoning=True, top_p=0.5)
+    assert "top_p" not in model.kwargs
+    assert model.kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert any("dropping top_p" in m for m in caplog.messages)
+
+
+def test_anthropic_no_reasoning_keeps_top_p(fake_anthropic):
+    model = fake_anthropic.build("claude-sonnet-5", top_p=0.5)
+    assert model.kwargs["top_p"] == 0.5
