@@ -139,12 +139,19 @@ class MCPConnector(Connector):
 
         Returns neutral dicts: ``{name, description, inputSchema}``.
 
-        Double-checked locking around the cache write (mirroring
-        ``Connector._async_client``) so concurrent first-use from multiple
-        threads triggers exactly one discovery session instead of one per
-        thread."""
+        Exactly-once discovery under concurrency, WITHOUT holding a
+        ``threading.Lock`` across the awaits below: a plain ``with lock:``
+        here would deadlock two tasks on the SAME event loop (the second
+        task's blocking ``acquire`` freezes the loop thread, so the first —
+        parked on an await while holding the lock — can never resume). The
+        non-blocking acquire + ``asyncio.sleep`` spin parks contenders
+        without blocking the loop, keeps cross-THREAD first-use exactly-once
+        (each thread runs its own loop), and is cancellation-safe (a
+        cancelled waiter never owns the lock, so nothing is poisoned)."""
         if getattr(self, "_tools_cache", None) is None:
-            with self._tools_lock:
+            while not self._tools_lock.acquire(blocking=False):
+                await asyncio.sleep(0.01)
+            try:
                 if getattr(self, "_tools_cache", None) is None:
                     async with self._session() as session:
                         result = await session.list_tools()
@@ -156,6 +163,8 @@ class MCPConnector(Connector):
                         }
                         for tool in result.tools
                     ]
+            finally:
+                self._tools_lock.release()
         return self._tools_cache
 
     def list_tools(self) -> list[dict]:

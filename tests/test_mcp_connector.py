@@ -324,3 +324,19 @@ def test_list_tools_concurrent_first_use_single_discovery_across_threads():
 
     assert conn.sessions_opened == 1
     assert all(r is results[0] for r in results)
+
+
+def test_alist_tools_concurrent_first_use_same_loop_no_deadlock():
+    # Two tasks on ONE event loop hitting first-use discovery concurrently:
+    # a plain `with threading.Lock():` around the awaits would deadlock the
+    # loop (second task's blocking acquire freezes the thread the first task
+    # needs to resume). The non-blocking-acquire + asyncio.sleep spin must
+    # keep this exactly-once AND completable.
+    conn = _ProbeMCPConnector()
+
+    async def run():
+        return await asyncio.gather(conn.alist_tools(), conn.alist_tools())
+
+    a, b = asyncio.run(asyncio.wait_for(run(), timeout=5))
+    assert conn.sessions_opened == 1
+    assert a is b
