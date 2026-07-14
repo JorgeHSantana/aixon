@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-07-14
+
+### Added
+- `MCPConnector`: MCP servers as declarative tool sources — catalog discovery with `include`/`exclude`, sync/async calls, `isError` → `AixonError`, `as_tools()`/`aas_tools()`, and the deferred `toolset()` marker (zero I/O at class-body/import time; discovery runs lazily at the first agent invoke, so an unreachable MCP server can never fail server boot). New `[mcp]` extra and offline `examples/mcp_tools/` demo
+- `AgentTool.args_schema`: tools may publish a JSON schema — the LLM sees the server's own contract (`**kwargs`) instead of a free-text wrapper; existing schema-less tools are byte-for-byte unchanged
+
+### Fixed
+- MCP review wave: `as_tools()` raises a clean `AixonError` inside a running event loop (was a bare RuntimeError + leaked coroutine); connector `timeout` is now passed through to the transport; catalog cache is exactly-once under concurrent first-use without holding a lock across awaits (same-loop deadlock avoided)
+
+### Docs
+- `RAG_KNOWLEDGE_BASE.md` refreshed from 0.1.1 to 0.1.15+ (ReflectiveAgent, usage tracking, reasoning, client tools, MCP)
+
 ## [0.1.15] - 2026-07-13
 
 ### Added
