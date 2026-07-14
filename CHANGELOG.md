@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.15] - 2026-07-13
 
 ### Added
 - `LLM(model, reasoning=...)`: declarative reasoning/extended-thinking knob (`None`/`False` off — byte-for-byte unchanged behavior; `True` ≡ `{"effort": "medium"}`; `dict` with `budget_tokens`/`effort`, normalized low=1024/medium=4096/high=16384) translated per provider — Anthropic `thinking` (temperature forced to 1 with a warning, `max_tokens` raised to fit the budget), OpenAI `reasoning_effort`, z.AI/GLM `extra_body.thinking`, Google `thinking_budget`/`include_thoughts` (graceful degradation + warning on an older `langchain-google-genai`); a custom provider without `supports_reasoning = True` has the knob ignored with a warning instead of a broken build (R1)
