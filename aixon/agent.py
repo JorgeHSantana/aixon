@@ -22,12 +22,19 @@ class AgentTool:
 
     name: str
     description: str
-    func: Callable[[str], str]
+    # Signature contract: without `args_schema`, a single free-text argument
+    # (str -> str); with it, the schema's fields arrive as **kwargs.
+    func: Callable[..., str]
     # Optional async variant. When set, coerce_tools registers the LangChain tool
     # with both a sync `func` and this `coroutine`, so the tool runs on BOTH the
     # sync (`invoke`) and async (`ainvoke`) agent paths — the async path awaits
     # the coroutine for true non-blocking I/O.
-    coroutine: Callable[[str], Awaitable[str]] | None = None
+    coroutine: Callable[..., Awaitable[str]] | None = None
+    # Optional JSON Schema (neutral dict) describing the tool's arguments. When
+    # set, `func`/`coroutine` receive the schema's fields as **kwargs instead of
+    # a single free-text argument — the schema, not the signature, is what the
+    # LLM sees. Used by schema-carrying sources (e.g. MCPConnector.as_tools()).
+    args_schema: dict | None = None
 
 
 class Agent(ABC):

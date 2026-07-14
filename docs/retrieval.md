@@ -307,6 +307,68 @@ class InventoryAgent(ToolAgent):
 
 ---
 
+## MCPConnector — MCP servers
+
+`MCPConnector` plugs an [MCP](https://modelcontextprotocol.io) server into an
+agent: the server publishes its tool catalog (`tools/list`) and `as_tools()`
+turns every entry into a neutral `AgentTool` whose `args_schema` is the tool's
+published JSON Schema — the LLM sees the server's own contract, with no
+hand-written wrapper per tool.
+
+It is the complement of `HttpToolConnector`, not its replacement:
+
+| | Flow decided by | Use when |
+|---|---|---|
+| `HttpToolConnector` | **your code** — each typed method is a curated tool | you own the contract and want to shape each tool (signature, normalization, encoding) |
+| `MCPConnector` | **the LLM** — the model works from the published catalog | plugging a server (often third-party) where writing method-per-tool makes no sense |
+
+```python
+from aixon import LLM, MCPConnector, ToolAgent
+
+class MetabaseMCPConnector(MCPConnector):
+    base_url_env   = "MCP_METABASE_URL"     # streamable-HTTP endpoint URL
+    auth_token_env = "MCP_METABASE_TOKEN"   # optional Bearer token
+
+class AnalystAgent(ToolAgent):
+    llm   = LLM("gpt-4o-mini")
+    tools = [*MetabaseMCPConnector().as_tools(exclude=["delete_card"])]
+```
+
+Transport is MCP **streamable HTTP** at `base_url` (the full endpoint URL,
+e.g. `https://host/mcp`). Env-var resolution, constructor overrides and the
+`*Connector` suffix rule are inherited from `Connector`.
+
+**Install:** the `mcp` SDK ships behind the `mcp` extra — `pip install
+"aixon[mcp]"`. The import is lazy: defining a subclass works on a bare
+install; the error only surfaces when the server is actually contacted.
+
+### MCPConnector API
+
+```python
+class MCPConnector(Connector):
+    def as_tools(self, include=None, exclude=None) -> list[AgentTool]: ...
+    def list_tools(self) -> list[dict]: ...          # cached per instance
+    async def alist_tools(self) -> list[dict]: ...
+    def call(self, name: str, **params) -> str: ...
+    async def acall(self, name: str, **params) -> str: ...
+```
+
+- `as_tools(include=...)` raises `AixonError` for a name the server does not
+  expose — a typo must not silently shrink an agent's toolbox. `exclude`
+  ignores unknown names.
+- Discovery (`list_tools`) is cached per instance; execution opens one fresh
+  session per call (stateless — no event-loop affinity to manage).
+- A tool result with `isError` raises `AixonError`; text content is joined for
+  the LLM, with `structuredContent` as JSON fallback.
+- The sync paths (`list_tools`/`call`/`as_tools`) run the async ones via
+  `asyncio.run`, so they must **not** be called from a running event loop —
+  use `alist_tools`/`acall` there (the async agent path already does).
+
+A fully offline, runnable demo lives in
+[examples/mcp_tools](../examples/mcp_tools/README.md).
+
+---
+
 ## Related
 
 - [agents.md](agents.md) — `ToolAgent` and `Agent.as_tool()`

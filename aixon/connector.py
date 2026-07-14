@@ -233,8 +233,9 @@ class HttpToolConnector(Connector):
 
     Typed methods on subclasses pass the explicit ``path``/``method`` — the tool
     name is NOT assumed to equal the URL (servers may route arbitrarily). This is
-    NOT the MCP wire protocol (stdio/SSE); for that, use langchain-mcp-adapters ->
-    BaseTool -> coerce_tools.
+    NOT the MCP wire protocol; for that, use ``aixon.mcp.MCPConnector``. The two
+    are complements: here the flow is decided in code (each typed method is a
+    curated tool); there the LLM drives the server's published catalog.
 
     ``call``/``acall`` drop ``None`` params before sending (POST -> json, GET ->
     query). ``_unwrap`` understands the default ``{success, result, error}``

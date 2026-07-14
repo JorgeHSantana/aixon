@@ -50,6 +50,8 @@ dev = [
     "fastapi",
     "openai",
     "mypy",
+    # mcp powers the in-memory MCP server/client used by test_mcp_connector.py.
+    "mcp>=1.0",
     # numpy is a transitive dep (via langchain-weaviate, pulled in by the
     # `weaviate`/`all` extras) that aixon never imports directly. numpy>=2
     # ships a bundled .pyi using PEP 695 `type X = ...` syntax, which mypy can
@@ -67,6 +69,7 @@ anthropic = ["langchain-anthropic>=0.2"]
 google = ["langchain-google-genai>=2.0"]
 zai = ["langchain-openai>=0.2"]
 retrieval = ["httpx>=0.27"]
+mcp = ["mcp>=1.0"]
 openai-embedding = ["langchain-openai>=0.2"]
 tiktoken = ["tiktoken>=0.7"]
 tavily = ["tavily-python>=0.7"]
@@ -89,6 +92,7 @@ all = [
     "langchain-weaviate>=0.0.7",
     "langchain-text-splitters>=1",
     "flashrank>=0.2",
+    "mcp>=1.0",
 ]
 
 [project.urls]

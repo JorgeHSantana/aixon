@@ -50,12 +50,17 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
             # (rather than **kwargs-ing it in only when set) is equivalent and
             # lets mypy check each argument against its own declared type
             # instead of joining them all into one `**dict[str, object]`.
+            # `args_schema` (a neutral JSON-Schema dict, e.g. an MCP tool's
+            # inputSchema) defines the LLM-facing argument surface; without it,
+            # from_function infers a single free-text arg from the signature.
+            # langchain-core accepts the dict form directly.
             coerced.append(
                 StructuredTool.from_function(
                     func=entry.func,
                     name=entry.name,
                     description=entry.description,
                     coroutine=entry.coroutine,
+                    args_schema=entry.args_schema,
                 )
             )
         elif callable(entry):

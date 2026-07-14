@@ -1,0 +1,2 @@
+# MCPConnector needs the `mcp` extra (the MCP SDK); everything else is inline.
+aixon[mcp]

@@ -62,6 +62,7 @@ pip install "aixon[anthropic]"         # Anthropic provider binding
 pip install "aixon[google]"            # Google provider binding
 pip install "aixon[zai]"               # z.AI provider binding (GLM via langchain-openai)
 pip install "aixon[retrieval]"         # httpx — Connector / HttpToolConnector
+pip install "aixon[mcp]"               # mcp SDK — MCPConnector (MCP servers)
 pip install "aixon[openai-embedding]"  # langchain-openai — OpenAIEmbedding
 pip install "aixon[weaviate]"          # Weaviate vector-store Retriever
 pip install "aixon[ragie]"             # Ragie managed-RAG Retriever
@@ -253,7 +254,21 @@ returns a dual tool that works on both the sync and async agent paths.
 
 `Connector` is an HTTP base class for wrapping external APIs (`base_url_env` /
 `auth_token_env`, sync `get`/`post` and async `aget`/`apost`). `HttpToolConnector`
-builds on it for HTTP-JSON tool servers.
+builds on it for HTTP-JSON tool servers where each typed method is a curated
+tool. `MCPConnector` (extra `aixon[mcp]`) covers the opposite case: point it at
+an [MCP](https://modelcontextprotocol.io) server and `as_tools()` turns the
+server's published catalog into `AgentTool`s — the LLM drives the published
+JSON Schemas, no wrapper per tool:
+
+```python
+class MetabaseMCPConnector(MCPConnector):
+    base_url_env   = "MCP_METABASE_URL"
+    auth_token_env = "MCP_METABASE_TOKEN"
+
+class AnalystAgent(ToolAgent):
+    llm   = LLM("gpt-4o-mini")
+    tools = [*MetabaseMCPConnector().as_tools(exclude=["delete_card"])]
+```
 
 `Embedding` is the vector-embedding ABC; the built-in implementation is
 `OpenAIEmbedding`.
@@ -327,6 +342,7 @@ with a mis-named class.
 | `ReflectiveAgent` | `*Agent` | `ReviewedWriterAgent` |
 | `Retriever` | `*Retriever` | `LibraryRetriever` |
 | `Connector` | `*Connector` | `CRMConnector` |
+| `MCPConnector` | `*Connector` | `MetabaseMCPConnector` |
 
 Abstract intermediate classes (declared with `abstract=True`) are exempt and
 never registered.
@@ -339,7 +355,7 @@ never registered.
 - [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, `ReflectiveAgent`, declarative API, `as_tool`, async
 - [Orchestrator](docs/orchestrator.md) — three tiers, entry/topology, branching, recursion guards
 - [Server](docs/server.md) — `ProtocolAdapter`, adapters, auth, SSE
-- [Retrieval](docs/retrieval.md) — `Retriever`, `Embedding`, `Connector`
+- [Retrieval](docs/retrieval.md) — `Retriever`, `Embedding`, `Connector`, `MCPConnector`
 - [Vendor retrievers](docs/retrievers.md) — `Weaviate`, `Ragie`, `Tavily`
 - [CLI](docs/cli.md) — `chat`, `new`, `serve`, `list`
 - [Quickstart](docs/quickstart.md) — consumer project walkthrough
