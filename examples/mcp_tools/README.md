@@ -16,9 +16,11 @@ wired through the `_session()` seam (the same seam the test suite uses), so
 |---|---|
 | An MCP server publishing tools with schemas (zero aixon code on that side) | [main.py](main.py) — `FastMCP("weather")` |
 | `class WeatherMCPConnector(MCPConnector)` + the `_session()` seam | [main.py](main.py) |
+| `tools = [WeatherMCPConnector().toolset()]` — the recommended `ToolAgent` class-body pattern (zero I/O at class/import time) | `class WeatherAgent(ToolAgent)` |
 | Catalog discovery (`list_tools`), cached per instance | `main()` — first block |
 | Direct execution, sync `call` and async `acall` | `main()` — middle blocks |
-| `as_tools(include=...)` → `coerce_tools` → LangChain `invoke` (what a `ToolAgent` does) | `main()` — last block |
+| `toolset()` performing no I/O until `coerce_tools()` resolves it (the lazy-discovery fix) | `main()` — "toolset(): zero I/O" block |
+| `as_tools(include=...)` → `coerce_tools` → LangChain `invoke` — the eager, script/runtime path | `main()` — last block |
 
 ## `HttpToolConnector` or `MCPConnector`?
 
@@ -55,5 +57,11 @@ class WeatherMCPConnector(MCPConnector):
 
 class WeatherAgent(ToolAgent):
     llm   = LLM("gpt-4o-mini")
-    tools = [*WeatherMCPConnector().as_tools(exclude=["dangerous_tool"])]
+    tools = [WeatherMCPConnector().toolset(exclude=["dangerous_tool"])]
 ```
+
+Note the class body uses `toolset()`, not `as_tools()`: a `ToolAgent` class
+body runs at `autodiscover()`/server-boot time, and `toolset()` performs no
+network I/O there — discovery is deferred to the agent's first invoke, so one
+unreachable MCP server can't take down the whole server's boot. `as_tools()`
+(eager) is for runtime/script code, like this example's `main()`.

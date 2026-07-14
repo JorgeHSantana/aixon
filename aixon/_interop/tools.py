@@ -30,15 +30,31 @@ def coerce_tools(tools: list) -> list["BaseTool"]:
         async callable is registered via ``coroutine=`` and therefore requires
         an async agent path (``ainvoke``/``astream``); calling it from sync
         ``invoke`` raises ``NotImplementedError`` rather than silently skipping.
+      * any entry with a ``resolve_tools()`` method (duck-typed — no import of
+        the concrete type needed here, e.g. ``aixon.mcp.MCPToolset`` from
+        ``MCPConnector.toolset()``) -> expanded in place: ``resolve_tools()``
+        runs (lazily, e.g. MCP catalog discovery — the reason this exists:
+        keeping I/O out of the agent class body / import time) and each
+        resulting ``AgentTool`` is coerced same as above. This first flattens
+        the whole list so name-collision detection (below) sees the expanded
+        tools too, not just the un-expanded marker.
 
     Raises ``AixonError`` for any other type.
     """
     from langchain_core.tools import BaseTool, StructuredTool
 
+    expanded: list = []
+    for entry in tools:
+        resolver = getattr(entry, "resolve_tools", None)
+        if callable(resolver):
+            expanded.extend(resolver())
+        else:
+            expanded.append(entry)
+
     coerced: list[BaseTool] = []
     seen_names: set[str] = set()
     dups: set[str] = set()
-    for entry in tools:
+    for entry in expanded:
         if isinstance(entry, BaseTool):
             coerced.append(entry)
         elif isinstance(entry, AgentTool):

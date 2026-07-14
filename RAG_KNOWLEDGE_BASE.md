@@ -1094,7 +1094,7 @@ class InventoryAgent(ToolAgent):
 
 ### 17.4 MCPConnector: MCP servers (the LLM drives the catalog)
 
-`MCPConnector` plugs an MCP server into an agent. The server publishes its tool catalog (`tools/list`) and `as_tools()` turns every entry into a neutral `AgentTool` whose `args_schema` is the tool's published JSON Schema. Install with `pip install "aixon[mcp]"` (the SDK import is lazy).
+`MCPConnector` plugs an MCP server into an agent. The server publishes its tool catalog (`tools/list`) and `toolset()`/`as_tools()` turn every entry into a neutral `AgentTool` whose `args_schema` is the tool's published JSON Schema. Install with `pip install "aixon[mcp]"` (the SDK import is lazy).
 
 ```python
 from aixon import LLM, MCPConnector, ToolAgent
@@ -1105,23 +1105,28 @@ class MetabaseMCPConnector(MCPConnector):
 
 class AnalystAgent(ToolAgent):
     llm   = LLM("gpt-4o-mini")
-    tools = [*MetabaseMCPConnector().as_tools(exclude=["delete_card"])]
+    tools = [MetabaseMCPConnector().toolset(exclude=["delete_card"])]
 ```
 
-> Explanation: `MCPConnector` is the complement of `HttpToolConnector`, not its replacement. `HttpToolConnector` = the flow is decided in code (each typed method is a curated tool you shaped). `MCPConnector` = the flow is decided by the LLM (the model works from the schemas the server publishes) — plug-and-play for servers, often third-party, where writing method-per-tool makes no sense.
+> Explanation: `MCPConnector` is the complement of `HttpToolConnector`, not its replacement. `HttpToolConnector` = the flow is decided in code (each typed method is a curated tool you shaped). `MCPConnector` = the flow is decided by the LLM (the model works from the schemas the server publishes) — plug-and-play for servers, often third-party, where writing method-per-tool makes no sense. Use **`toolset()`** (not `as_tools()`) in a class body like above: a `ToolAgent` body runs at `autodiscover()`/server-boot time, and `toolset()` does zero I/O at construction — it just records `(connector, include, exclude)`. Discovery runs lazily the first time the agent is actually invoked (`coerce_tools` expands the toolset into real tools right before building the LangGraph agent), so one unreachable MCP server breaks only that agent's requests, never server boot. `as_tools()`/`aas_tools()` (eager) stay for runtime/script code that wants the catalog immediately — never put `as_tools()` in a class body.
 
-### 17.5 MCPConnector API
+### 17.5 MCPConnector / MCPToolset API
 
 ```python
 class MCPConnector(Connector):
-    def as_tools(self, include=None, exclude=None) -> list[AgentTool]: ...
+    def toolset(self, include=None, exclude=None) -> "MCPToolset": ...  # deferred, zero I/O — use in class bodies
+    def as_tools(self, include=None, exclude=None) -> list[AgentTool]: ...        # eager — runtime/script code only
+    async def aas_tools(self, include=None, exclude=None) -> list[AgentTool]: ...  # eager, async-safe counterpart
     def list_tools(self) -> list[dict]: ...          # {name, description, inputSchema}; cached per instance
     async def alist_tools(self) -> list[dict]: ...
     def call(self, name: str, **params) -> str: ...  # None params dropped
     async def acall(self, name: str, **params) -> str: ...
+
+class MCPToolset:                       # returned by MCPConnector.toolset()
+    def resolve_tools(self) -> list[AgentTool]: ...   # lazy discovery, cached on success; called by coerce_tools
 ```
 
-> Explanation: transport is MCP streamable HTTP at `base_url` (the full endpoint URL, e.g. `https://host/mcp`); env-var resolution and the `*Connector` suffix rule come from `Connector`. `as_tools(include=...)` raises `AixonError` for a tool the server does not expose (a typo must not silently shrink the toolbox); `exclude` ignores unknown names. Discovery is cached per instance; execution opens one fresh session per call (stateless, no event-loop affinity). A result with `isError` raises `AixonError`; text content is joined for the LLM, `structuredContent` is the JSON fallback. The sync paths use `asyncio.run`, so from a running event loop use `alist_tools`/`acall` (the async agent path already does). A fully offline runnable demo lives in `examples/mcp_tools/`.
+> Explanation: transport is MCP streamable HTTP at `base_url` (the full endpoint URL, e.g. `https://host/mcp`); env-var resolution and the `*Connector` suffix rule come from `Connector`. `include=...` (on any of `toolset`/`as_tools`/`aas_tools`) raises `AixonError` for a tool the server does not expose (a typo must not silently shrink the toolbox); `exclude` ignores unknown names. Discovery (`list_tools`/`alist_tools`) is cached per instance under a `threading.Lock` (double-checked — concurrent first-use from multiple threads triggers exactly one discovery session); execution opens one fresh session per call (stateless, no event-loop affinity). A result with `isError` raises `AixonError`; text content is joined for the LLM, `structuredContent` is the JSON fallback. The sync paths use `asyncio.run`, so from a running event loop use `alist_tools`/`acall`/`aas_tools` (the async agent path already does) — calling `as_tools()` from a running loop now raises a clear `AixonError` pointing at `aas_tools()`/`toolset()` instead of a bare `RuntimeError`. `MCPToolset.resolve_tools()` works from both a plain sync call and one made synchronously from inside a running loop (the exact shape of `ToolAgent._build_agent`, which calls `coerce_tools` without awaiting even on the async invoke path): no running loop → `asyncio.run` directly; running loop → discovery on a worker thread via `concurrent.futures.ThreadPoolExecutor` (a bounded block on the calling thread). A discovery failure surfaces as `AixonError` scoped to that one call and is not cached, so a later invoke can retry. Known limitation: no session reuse across calls — every `list_tools`/`call` pays a full MCP handshake. A fully offline runnable demo lives in `examples/mcp_tools/`.
 
 ---
 
@@ -1583,7 +1588,7 @@ Every error subclasses `AixonError` and carries a human-readable `.message`.
 | Retriever | Context-search tool (`search` / `asearch` / `write` / `awrite` / `as_tool`). |
 | Embedding | Vector-embedding provider (`embed_documents` / `embed_query`). |
 | Connector | HTTP client base for external microservices (`get` / `post` / `aget` / `apost` / `aclose`). |
-| MCPConnector | `Connector` subclass that turns an MCP server's published tool catalog into `AgentTool`s via `as_tools()`. |
+| MCPConnector | `Connector` subclass that turns an MCP server's published tool catalog into `AgentTool`s via `toolset()` (deferred, class-body-safe) or `as_tools()`/`aas_tools()` (eager, runtime/script code). |
 | AgentTool | Neutral tool descriptor returned by `Agent.as_tool()` and `Retriever.as_tool()`. |
 | ReasoningChannel | Contextvars channel through which `emit_reasoning` lines, tool labels, and (since 0.1.15) model reasoning flow. |
 | UsageAccumulator | Thread-safe accumulator (`aixon.usage`) summing token usage across every model turn of one run (section 19). |
@@ -1954,7 +1959,7 @@ reply = await get_registry().resolve("support").ainvoke(
 from aixon import (
     LLM, LLMAgent, ToolAgent, Orchestrator, ReflectiveAgent, Agent, AgentTool,
     Message, Chunk, Role,
-    Retriever, TypeAccess, Embedding, OpenAIEmbedding, Connector, HttpToolConnector, MCPConnector,
+    Retriever, TypeAccess, Embedding, OpenAIEmbedding, Connector, HttpToolConnector, MCPConnector, MCPToolset,
     TavilyRetriever, RagieRetriever, WeaviateRetriever,
     autodiscover, get_registry, reset_registry,
     emit_reasoning, reasoning_channel,
@@ -1987,7 +1992,7 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 | Context search | `Retriever` (`search` / `asearch` / `write` / `awrite` / `as_tool`, `TypeAccess`) |
 | Vector embeddings | `Embedding` / `OpenAIEmbedding` |
 | HTTP microservice | `Connector` (`get` / `post` / `aget` / `apost` / `aclose`) |
-| MCP server as tools | `MCPConnector` (`as_tools()`, `pip install aixon[mcp]`) |
+| MCP server as tools | `MCPConnector` (`toolset()` deferred / `as_tools()` eager, `pip install aixon[mcp]`) |
 | Vendor RAG | `TavilyRetriever` / `RagieRetriever` / `WeaviateRetriever` |
 | Serve over HTTP | `Server` plus `OpenAIAdapter` / `AnthropicAdapter` / custom `ProtocolAdapter` |
 | Reasoning to client | `emit_reasoning` plus `thought_stream_mode` (`custom` default / `content` / `hidden`) |

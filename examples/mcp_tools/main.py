@@ -2,9 +2,23 @@
 
 ``MCPConnector`` is the plug-and-play counterpart of ``HttpToolConnector``:
 instead of hand-writing one typed method per tool, the server publishes its
-catalog (``tools/list``) and ``as_tools()`` turns every entry into a neutral
-``AgentTool`` whose ``args_schema`` is the server's own JSON Schema — the LLM
-sees the published contract, not a free-text wrapper.
+catalog (``tools/list``) and ``toolset()``/``as_tools()`` turn every entry
+into a neutral ``AgentTool`` whose ``args_schema`` is the server's own JSON
+Schema — the LLM sees the published contract, not a free-text wrapper.
+
+Two ways to get there, and this example demonstrates BOTH:
+
+* ``toolset()`` — the pattern for a ``ToolAgent`` class body (see
+  ``WeatherAgent`` below). A class body runs at ``autodiscover()``/server-boot
+  time; ``toolset()`` does NO network I/O at construction — it just records
+  the connector plus include/exclude — so an unreachable MCP server can never
+  block server boot. Discovery happens lazily, the first time the agent is
+  actually invoked: ``coerce_tools`` (what ``ToolAgent._build_agent`` calls,
+  per invoke) expands the toolset into real tools right before the LangGraph
+  agent is built.
+* ``as_tools()`` — eager, for runtime/script code (the ``main()`` function
+  below) that wants the catalog immediately and isn't sitting in a class
+  body.
 
 This example runs **fully offline**: the "server" is an in-memory FastMCP
 instance wired through the ``_session()`` seam (the same seam the test suite
@@ -21,8 +35,10 @@ Run it:
     python main.py
 
 Expected output: the discovered catalog with schemas, two direct tool calls
-(sync and async), and the same tools invoked through ``coerce_tools`` — the
-exact integration point a ``ToolAgent`` uses.
+(sync and async), a proof that ``toolset()`` does zero I/O until the first
+``coerce_tools`` expansion (the lazy-discovery fix), and the same tools
+invoked through ``coerce_tools(conn.as_tools(...))`` — the exact integration
+point a ``ToolAgent`` uses.
 """
 
 from __future__ import annotations
@@ -32,7 +48,7 @@ from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
-from aixon import MCPConnector
+from aixon import LLM, MCPConnector, ToolAgent
 from aixon._interop.tools import coerce_tools
 
 # ── the MCP server: in-memory, offline ───────────────────────────────────────
@@ -56,7 +72,7 @@ def current_temp(city: str) -> str:
 # ── the connector: aixon side ─────────────────────────────────────────────────
 # Overriding _session() wires the in-memory server in place of the default
 # streamable-HTTP transport. Everything else (discovery, caching, unwrapping,
-# as_tools) is the production code path.
+# toolset/as_tools) is the production code path.
 
 
 class WeatherMCPConnector(MCPConnector):
@@ -68,6 +84,21 @@ class WeatherMCPConnector(MCPConnector):
             server._mcp_server
         ) as session:
             yield session
+
+
+# ── the agent: what a real deployment looks like ─────────────────────────────
+# `tools = [WeatherMCPConnector().toolset(...)]` is the recommended pattern:
+# this class body runs at import/autodiscover() time, and toolset() performs
+# NO network I/O here — see the "toolset() does zero I/O" block in main()
+# below for a direct demonstration. Discovery only happens once this agent is
+# actually invoked; this example never invokes it (that needs a real LLM
+# call, and this demo stays fully offline), so this class exists purely to
+# show the declaration shape.
+
+
+class WeatherAgent(ToolAgent):
+    llm = LLM("gpt-4o-mini")
+    tools = [WeatherMCPConnector().toolset()]
 
 
 def main() -> None:
@@ -84,12 +115,21 @@ def main() -> None:
     print("\n── chamada direta (async) ──")
     print(" ", asyncio.run(conn.acall("current_temp", city="Recife")))
 
-    print("\n── as_tools() -> coerce_tools: o que um ToolAgent enxerga ──")
-    # In a real agent this is simply:
-    #     class WeatherAgent(ToolAgent):
-    #         llm   = LLM("gpt-4o-mini")
-    #         tools = [*WeatherMCPConnector().as_tools()]
-    # coerce_tools is the exact conversion ToolAgent applies to that list.
+    print("\n── toolset(): zero I/O até o primeiro coerce_tools() ──")
+    # A FRESH connector — no discovery has happened on it yet. toolset()
+    # just records (connector, include, exclude) and returns; nothing below
+    # touches the (in-memory) network until coerce_tools() resolves it.
+    fresh_conn = WeatherMCPConnector(base_url="http://in-memory")
+    lazy_toolset = fresh_conn.toolset(include=["current_temp"])
+    print("  toolset() construído — nenhuma chamada de rede ainda")
+    lazy_tools = coerce_tools([lazy_toolset])  # <- discovery happens HERE
+    print(f"  coerce_tools([toolset]) resolveu: {[t.name for t in lazy_tools]}")
+    print("  invoke:", lazy_tools[0].invoke({"city": "Belém"}))
+
+    print("\n── as_tools() -> coerce_tools: uso eager (scripts/runtime) ──")
+    # `toolset()` is for agent class bodies (see WeatherAgent above); when the
+    # catalog is wanted immediately in a script, as_tools() is the direct
+    # equivalent of what coerce_tools() would otherwise resolve lazily.
     for tool in coerce_tools(conn.as_tools(include=["forecast"])):
         print(f"  tool '{tool.name}' — args expostos ao LLM: {list(tool.args)}")
         print("  invoke:", tool.invoke({"city": "Natal", "days": 2}))

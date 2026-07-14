@@ -256,9 +256,11 @@ returns a dual tool that works on both the sync and async agent paths.
 `auth_token_env`, sync `get`/`post` and async `aget`/`apost`). `HttpToolConnector`
 builds on it for HTTP-JSON tool servers where each typed method is a curated
 tool. `MCPConnector` (extra `aixon[mcp]`) covers the opposite case: point it at
-an [MCP](https://modelcontextprotocol.io) server and `as_tools()` turns the
+an [MCP](https://modelcontextprotocol.io) server and `toolset()` turns the
 server's published catalog into `AgentTool`s — the LLM drives the published
-JSON Schemas, no wrapper per tool:
+JSON Schemas, no wrapper per tool. `toolset()` is a deferred marker (no I/O at
+construction); discovery runs lazily at the agent's first invoke, so a bad
+server can't block boot:
 
 ```python
 class MetabaseMCPConnector(MCPConnector):
@@ -267,8 +269,11 @@ class MetabaseMCPConnector(MCPConnector):
 
 class AnalystAgent(ToolAgent):
     llm   = LLM("gpt-4o-mini")
-    tools = [*MetabaseMCPConnector().as_tools(exclude=["delete_card"])]
+    tools = [MetabaseMCPConnector().toolset(exclude=["delete_card"])]
 ```
+
+(`as_tools()`/`aas_tools()` stay available, eager, for runtime/script code —
+see [docs/retrieval.md](docs/retrieval.md#mcpconnector--mcp-servers).)
 
 `Embedding` is the vector-embedding ABC; the built-in implementation is
 `OpenAIEmbedding`.

@@ -14,7 +14,7 @@ from aixon.agents.reflective import ReflectiveAgent
 from aixon.agents.tool_agent import ToolAgent
 from aixon.connector import Connector, HttpToolConnector
 from aixon.discovery import autodiscover
-from aixon.mcp import MCPConnector
+from aixon.mcp import MCPConnector, MCPToolset
 from aixon.embedding import Embedding, OpenAIEmbedding
 from aixon.exceptions import (
     AixonError,
@@ -71,6 +71,7 @@ __all__ = [
     "Connector",
     "HttpToolConnector",
     "MCPConnector",
+    "MCPToolset",
     "Embedding",
     "OpenAIEmbedding",
     "Retriever",

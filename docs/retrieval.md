@@ -331,7 +331,7 @@ class MetabaseMCPConnector(MCPConnector):
 
 class AnalystAgent(ToolAgent):
     llm   = LLM("gpt-4o-mini")
-    tools = [*MetabaseMCPConnector().as_tools(exclude=["delete_card"])]
+    tools = [MetabaseMCPConnector().toolset(exclude=["delete_card"])]
 ```
 
 Transport is MCP **streamable HTTP** at `base_url` (the full endpoint URL,
@@ -342,27 +342,70 @@ e.g. `https://host/mcp`). Env-var resolution, constructor overrides and the
 "aixon[mcp]"`. The import is lazy: defining a subclass works on a bare
 install; the error only surfaces when the server is actually contacted.
 
-### MCPConnector API
+### `toolset()` vs `as_tools()` — where discovery runs
+
+A `ToolAgent` subclass body executes at `autodiscover()` time (server boot).
+`as_tools()` runs discovery (`tools/list`) **immediately** via `asyncio.run` —
+put it in a class body and an unreachable MCP server kills the whole server's
+boot, not just that one agent. Use **`toolset()`** in class bodies instead:
+it does **no I/O at all** at construction, just records
+`(connector, include, exclude)`. Discovery happens lazily the first time the
+agent actually runs (`coerce_tools` expands it into real tools right before
+the LangGraph agent is built), so a bad server only breaks requests to *that*
+agent — never import, never boot. The resolved catalog is then cached on the
+toolset for subsequent invokes.
+
+`as_tools()`/`aas_tools()` stay the right tool for runtime/script code (e.g.
+`examples/mcp_tools/main.py`) that wants the catalog immediately and isn't
+sitting in a class body.
+
+### MCPConnector / MCPToolset API
 
 ```python
 class MCPConnector(Connector):
-    def as_tools(self, include=None, exclude=None) -> list[AgentTool]: ...
+    def toolset(self, include=None, exclude=None) -> "MCPToolset": ...  # deferred, zero I/O — use in class bodies
+    def as_tools(self, include=None, exclude=None) -> list[AgentTool]: ...       # eager — runtime/script code only
+    async def aas_tools(self, include=None, exclude=None) -> list[AgentTool]: ...  # eager, async-safe counterpart
     def list_tools(self) -> list[dict]: ...          # cached per instance
     async def alist_tools(self) -> list[dict]: ...
     def call(self, name: str, **params) -> str: ...
     async def acall(self, name: str, **params) -> str: ...
+
+class MCPToolset:                       # returned by MCPConnector.toolset()
+    def resolve_tools(self) -> list[AgentTool]: ...   # lazy discovery, cached on success; called by coerce_tools
 ```
 
-- `as_tools(include=...)` raises `AixonError` for a name the server does not
-  expose — a typo must not silently shrink an agent's toolbox. `exclude`
-  ignores unknown names.
-- Discovery (`list_tools`) is cached per instance; execution opens one fresh
-  session per call (stateless — no event-loop affinity to manage).
+- `as_tools()`/`aas_tools()`/`toolset()`'s eventual discovery all share the
+  same `include`/`exclude` contract: `include=...` raises `AixonError` for a
+  name the server does not expose — a typo must not silently shrink an
+  agent's toolbox; `exclude` ignores unknown names.
+- Discovery (`list_tools`/`alist_tools`) is cached per instance (guarded by a
+  `threading.Lock`, double-checked — concurrent first-use from multiple
+  threads triggers exactly one discovery session, not one per thread);
+  execution opens one fresh session per call (stateless — no event-loop
+  affinity to manage).
 - A tool result with `isError` raises `AixonError`; text content is joined for
   the LLM, with `structuredContent` as JSON fallback.
 - The sync paths (`list_tools`/`call`/`as_tools`) run the async ones via
   `asyncio.run`, so they must **not** be called from a running event loop —
-  use `alist_tools`/`acall` there (the async agent path already does).
+  use `alist_tools`/`acall`/`aas_tools` there (the async agent path already
+  does). Calling `as_tools()` from a running event loop raises a clear
+  `AixonError` (not a bare `RuntimeError` from `asyncio.run`) pointing at
+  `aas_tools()`/`toolset()`.
+- `MCPToolset.resolve_tools()` (what `coerce_tools` calls to expand a
+  `toolset()` entry) works from both a sync call site and one made
+  synchronously from inside a running event loop (the shape of
+  `ToolAgent._build_agent`, which calls `coerce_tools` without awaiting, even
+  on the async invoke path): with no running loop it uses `asyncio.run`
+  directly; with one running, discovery runs on a worker thread via
+  `concurrent.futures.ThreadPoolExecutor` (a bounded block on the calling
+  thread — the same class of trade-off as any sync tool called from an async
+  loop). A discovery failure (e.g. server unreachable) raises `AixonError`
+  scoped to that one call and is **not** cached, so a later invoke can retry.
+- **Known limitation (not addressed):** there is no session reuse across
+  calls — every `list_tools`/`call` pays a full MCP handshake (transport
+  connect + `initialize`). A chatty tool loop against the same server pays
+  that cost per call.
 
 A fully offline, runnable demo lives in
 [examples/mcp_tools](../examples/mcp_tools/README.md).
