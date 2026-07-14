@@ -199,6 +199,17 @@ Full OpenAI-compatible wire format. Served routes:
 > `Message.tool_calls`, and a `user` message with `tool_result` blocks parses
 > into one `role: "tool"` neutral message per block (`tool_call_id` from
 > `tool_use_id`).
+>
+> **Limitation.** Anthropic extended thinking (`reasoning=` on a
+> `claude-*` `LLM`) does not round-trip through a CLIENT-executed tool loop:
+> the neutral boundary drops `thinking` content on the way back into
+> LangChain messages, so a follow-up request carrying the client's tool
+> result — but not the matching signed thinking block — gets rejected by
+> Anthropic's API. This only affects tool calls the CLIENT executes across
+> separate HTTP requests; a normal `ToolAgent` (aixon runs the tool loop
+> in-process, within one request) is unaffected. See
+> [agents.md](agents.md#reasoning-extended-thinking--reasoning-effort) for
+> detail.
 
 > **Non-blocking.** The server `await`s `agent.ainvoke` / `agent.astream`, so an
 > in-flight LLM call does not block the event loop — concurrent requests overlap

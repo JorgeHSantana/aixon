@@ -14,6 +14,7 @@ from aixon.logging import Logger
 from aixon.providers.base import (
     Provider,
     apply_resilience_defaults,
+    drop_unsupported_params,
     register_provider,
     resolve_reasoning_spec,
 )
@@ -40,6 +41,17 @@ class AnthropicProvider(Provider):
         api_key = os.getenv(self.env_key)
         apply_resilience_defaults(params)
 
+        # `presence_penalty`/`frequency_penalty` are in the cross-provider
+        # GENERATION_PARAMS allowlist (valid ChatOpenAI kwargs) but are not
+        # fields on ChatAnthropic at all — verified against the installed
+        # langchain-anthropic's `model_fields` (absent). ChatAnthropic's
+        # `model_config` is `extra="ignore"`, so leaving them in would not
+        # raise — it would silently vanish with no feedback; drop + warn
+        # instead of relying on that silent behavior.
+        drop_unsupported_params(
+            params, ("presence_penalty", "frequency_penalty"), self.name, _log
+        )
+
         spec = resolve_reasoning_spec(params)
         if spec is not None:
             budget = spec["budget_tokens"]
@@ -55,6 +67,14 @@ class AnthropicProvider(Provider):
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
             max_tokens = params.get("max_tokens")
             if max_tokens is None or max_tokens <= budget:
+                if max_tokens is not None:
+                    _log.warning(
+                        "reasoning is on: raising max_tokens from %r to %r to fit "
+                        "the thinking budget (Anthropic requires max_tokens > "
+                        "budget_tokens)",
+                        max_tokens,
+                        budget + _REASONING_MAX_TOKENS_MARGIN,
+                    )
                 params["max_tokens"] = budget + _REASONING_MAX_TOKENS_MARGIN
 
         # ChatAnthropic's `model` field is declared with alias "model_name"

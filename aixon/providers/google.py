@@ -14,6 +14,7 @@ from aixon.logging import Logger
 from aixon.providers.base import (
     Provider,
     apply_resilience_defaults,
+    drop_unsupported_params,
     register_provider,
     resolve_reasoning_spec,
 )
@@ -34,6 +35,13 @@ class GoogleProvider(Provider):
 
         api_key = os.getenv(self.env_key)
         apply_resilience_defaults(params)
+
+        # `presence_penalty`/`frequency_penalty` are in the cross-provider
+        # GENERATION_PARAMS allowlist but are not fields on
+        # ChatGoogleGenerativeAI either — drop + warn, mirroring Anthropic.
+        drop_unsupported_params(
+            params, ("presence_penalty", "frequency_penalty"), self.name, _log
+        )
 
         spec = resolve_reasoning_spec(params)
         if spec is not None:

@@ -276,6 +276,14 @@ def test_reasoning_effort_is_in_generation_params_allowlist():
 
 
 def test_e2e_reasoning_effort_reaches_provider_build(monkeypatch):
+    # FakeProvider must declare supports_reasoning here: every SHIPPED
+    # provider does, and a provider WITHOUT it now has reasoning_effort
+    # popped-with-warning before build() (final-review IMPORTANT fix — see
+    # test_unsupporting_provider_reasoning_effort_param_also_guarded in
+    # test_reasoning_providers.py for that guard). This e2e test is about the
+    # normal, supporting-provider path reaching build() at all.
+    monkeypatch.setattr(FakeProvider, "supports_reasoning", True, raising=False)
+
     captured: list[dict] = []
     original_build = FakeProvider.build
 

@@ -167,6 +167,22 @@ the same table above.
 - **Cost.** Thinking/reasoning tokens bill as output tokens and already show
   up in `Message.usage["completion_tokens"]` — no separate accounting needed.
 
+**Limitation — Anthropic extended thinking + client-executed tools across
+requests.** A CLIENT-executed tool loop (see
+[server.md](server.md#openaiadapter) — an agentic client like an editor/IDE
+that calls tools itself and sends the results back on a *later* HTTP
+request) does not round-trip Anthropic's `thinking` blocks: the neutral
+boundary's `to_langchain` conversion drops reasoning content by design (the
+neutral `Message`/`Chunk` types carry `reasoning` as plain text, not
+Anthropic's signed thinking-block wire format), and Anthropic's API rejects a
+request that mixes extended thinking with tool results whose matching
+thinking block isn't present in that same request. Concretely: a reasoning-
+enabled Claude model that returns a tool call to a client-executed tool, then
+receives that tool's result back on the NEXT request, will get a 400 from
+Anthropic. A normal in-process `ToolAgent` loop (tools executed by aixon
+itself, all within one request/one call to the model) is unaffected — this
+only bites client-executed tools spanning multiple HTTP requests.
+
 ### Per-request generation params
 
 When an agent runs behind the `Server`, per-request generation params
@@ -175,20 +191,26 @@ When an agent runs behind the `Server`, per-request generation params
 the call (see `aixon.runtime.generation_params`) and apply **on top of** the
 `LLM(...)` class-level defaults, without mutating them:
 
-- `LLMAgent` applies them via `LLM._bound_model()` — `.bind(**params)` on the
-  cached `chat_model` (a `RunnableBinding`, still fine for `invoke`/`stream`).
-- `ToolAgent` applies them via `LLM.request_chat_model()` instead: since
-  `langchain.agents.create_agent` requires an actual `BaseChatModel` (not a
-  `RunnableBinding`), it builds a fresh provider model with the params merged
-  in as constructor kwargs. No active params → the same cached `chat_model`
-  (no rebuild). Models built for repeated identical param combinations are
-  cached (bounded to 8 entries, oldest-evicted-first) so a hot request path
-  reuses one provider client (and its HTTP connection pool) instead of
-  rebuilding an SDK client per call.
+- `LLMAgent` applies them via `LLM._bound_model()`, which delegates straight
+  to `LLM.request_chat_model()` — the same path `ToolAgent` uses (see below).
+- `ToolAgent` applies them via `LLM.request_chat_model()`: it builds a
+  provider model with the params merged in as constructor kwargs *before*
+  `Provider.build()` runs, so they go through the same reasoning translation
+  and validation every other constructor kwarg gets. No active params → the
+  cached `chat_model` (no rebuild). Models built for repeated identical param
+  combinations are cached (bounded to 8 entries, oldest-evicted-first) so a
+  hot request path reuses one provider client (and its HTTP connection pool)
+  instead of rebuilding an SDK client per call.
 
-Both paths read the exact same `ContextVar`, so a request's `temperature`
-override behaves identically whether the resolved agent is an `LLMAgent` or a
-`ToolAgent`.
+Both paths read the exact same `ContextVar` and go through the exact same
+`request_chat_model()` builder, so a request's `temperature` override behaves
+identically whether the resolved agent is an `LLMAgent` or a `ToolAgent` —
+`LLMAgent` used to bind params at invoke time on top of an already-built
+model instead, which bypassed provider translation entirely (a client
+`reasoning_effort` reached the vendor SDK raw, and a client `temperature`
+could override the constructor-forced `temperature=1` Anthropic's
+extended-thinking API requires); that gap is closed now that both agent
+kinds build through the same path.
 
 For a custom backend, subclass the `Provider` ABC (`aixon.providers.base`) and
 register a single instance before first use:

@@ -13,9 +13,12 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError
+from aixon.logging import Logger
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
+
+_log = Logger("aixon.providers.base")
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +46,32 @@ def apply_resilience_defaults(params: dict[str, Any]) -> None:
     params.setdefault("max_retries", DEFAULT_MAX_RETRIES)
 
 
+def drop_unsupported_params(
+    params: dict[str, Any], keys: tuple[str, ...], provider_name: str, log: Logger
+) -> None:
+    """Pop any of *keys* present in *params* that the vendor constructor does
+    not accept, logging one warning naming them.
+
+    ``GENERATION_PARAMS`` (aixon/runtime.py) is a fixed cross-provider
+    allowlist — e.g. ``presence_penalty``/``frequency_penalty`` are valid
+    ``ChatOpenAI`` kwargs but are NOT fields on ``ChatAnthropic`` or
+    ``ChatGoogleGenerativeAI`` (verified against the installed SDKs' pydantic
+    ``model_fields``). Both vendor models declare ``model_config =
+    ConfigDict(extra="ignore")``, so passing them through unfiltered doesn't
+    raise — it silently vanishes with no feedback at all, the exact kind of
+    silent-drop this rule replaces with an explicit, named warning.
+    """
+    dropped = sorted(k for k in keys if k in params)
+    for key in dropped:
+        del params[key]
+    if dropped:
+        log.warning(
+            "%s does not support %s — ignored (dropped from the request)",
+            provider_name,
+            ", ".join(dropped),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Reasoning knob: normalization + per-build extraction
 # ---------------------------------------------------------------------------
@@ -61,6 +90,11 @@ def _budget_to_effort(budget_tokens: int) -> str:
     return "high"
 
 
+# Budget used for an unrecognized effort string (bucket-based providers only —
+# OpenAI gets the ORIGINAL string verbatim; see below). Matches "medium".
+_DEFAULT_UNKNOWN_EFFORT_BUDGET = 4096
+
+
 def normalize_reasoning(spec: bool | dict[str, Any] | None) -> dict[str, Any] | None:
     """Normalize the declarative ``reasoning`` knob into a canonical spec.
 
@@ -70,6 +104,17 @@ def normalize_reasoning(spec: bool | dict[str, Any] | None) -> dict[str, Any] | 
     - ``dict`` -> filled in with whichever half (``budget_tokens``/``effort``)
       is missing, per the fixed table above. If both halves are already
       present they are kept exactly as given (no re-derivation).
+
+    An ``effort`` outside the fixed table (e.g. OpenAI's own ``"minimal"``,
+    or a plain typo — either reachable from a client via the per-request
+    ``reasoning_effort`` override) must never crash: this is a normalization
+    helper, not a validator. ``spec["effort"]`` always keeps the ORIGINAL
+    string verbatim (so ``OpenAIProvider``, which forwards ``spec["effort"]``
+    straight to its own ``reasoning_effort`` constructor kwarg, passes
+    unknown values through untouched — OpenAI is the authority on what its
+    own dial accepts, not this fixed table). Budget-based providers
+    (Anthropic/Google/z.AI) have no such passthrough, so an unknown effort
+    falls back to the medium budget with one warning.
     """
     if spec is None or spec is False:
         return None
@@ -81,7 +126,14 @@ def normalize_reasoning(spec: bool | dict[str, Any] | None) -> dict[str, Any] | 
     if effort is None:
         effort = "medium" if budget_tokens is None else _budget_to_effort(budget_tokens)
     if budget_tokens is None:
-        budget_tokens = _EFFORT_TO_BUDGET[effort]
+        budget_tokens = _EFFORT_TO_BUDGET.get(effort)
+        if budget_tokens is None:
+            _log.warning(
+                "unknown reasoning effort '%s' — using medium budget for "
+                "budget-based providers",
+                effort,
+            )
+            budget_tokens = _DEFAULT_UNKNOWN_EFFORT_BUDGET
     return {"budget_tokens": budget_tokens, "effort": effort}
 
 

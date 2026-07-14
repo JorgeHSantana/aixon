@@ -92,3 +92,9 @@ but *visible* reasoning text differs:
 * **Streaming over the wire:** `thought_stream_mode` on the OpenAI adapter
   picks how reasoning reaches the client — a separate `delta.reasoning`
   field, inline `<think>` tags, or hidden ([docs/server.md](../../docs/server.md)).
+
+**Limitation:** Anthropic extended thinking does not round-trip across a
+CLIENT-executed tool loop spanning multiple requests (Anthropic's API
+rejects a tool result whose matching thinking block isn't in that same
+request) — this example's in-process `CalculatorAgent` loop is unaffected;
+see [docs/agents.md](../../docs/agents.md#reasoning-extended-thinking--reasoning-effort).

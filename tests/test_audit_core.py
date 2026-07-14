@@ -166,27 +166,29 @@ def test_canonical_params_win_over_dialect_aliases():
         assert current_generation_params() == {"max_tokens": 64, "stop": ["A"]}
 
 
-def test_normalized_params_reach_the_model():
-    from langchain_core.messages import AIMessage
-    from langchain_core.outputs import ChatGeneration, ChatResult
-
+def test_normalized_params_reach_the_model(monkeypatch):
+    """UPDATED (final-review bind-path unification): per-request params now
+    reach the model via ``Provider.build()`` constructor kwargs
+    (``request_chat_model()``), not via ``.bind()`` onto a manually-injected
+    ``_chat_model`` — see the matching update in test_sp1_genparams.py for
+    the full rationale."""
     from aixon.runtime import generation_params
+    from tests._fakes import FakeProvider
 
-    captured: dict = {}
+    captured: list[dict] = []
+    original_build = FakeProvider.build
 
-    class Rec(FakeChatModel):
-        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-            captured.update(kwargs)
-            return ChatResult(
-                generations=[ChatGeneration(message=AIMessage(content="ok"))]
-            )
+    def recording_build(self, model, **params):
+        captured.append(params)
+        return original_build(self, model, **params)
+
+    monkeypatch.setattr(FakeProvider, "build", recording_build)
 
     llm = LLM("fake-1", provider="fake")
-    llm._chat_model = Rec()  # inject; skip provider.build
     with generation_params({"max_completion_tokens": 42}):
         llm.complete([Message(role="user", content="hi")])
-    assert captured.get("max_tokens") == 42
-    assert "max_completion_tokens" not in captured
+    assert captured[-1].get("max_tokens") == 42
+    assert "max_completion_tokens" not in captured[-1]
 
 
 # ── Finding 5: Registry.clear() must also reset _registered flags ────────────

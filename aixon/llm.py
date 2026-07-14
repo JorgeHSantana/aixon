@@ -23,7 +23,6 @@ from aixon.message import Chunk, Message
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
-    from langchain_core.runnables import Runnable
 
 _log = Logger("aixon.llm")
 
@@ -70,7 +69,17 @@ class LLM:
         before touching the vendor constructor). A provider WITHOUT support —
         e.g. a custom one that blindly forwards **params to a pydantic-strict
         vendor class — never sees the stray key: the knob is ignored with a
-        warning instead of breaking the build."""
+        warning instead of breaking the build.
+
+        The per-request ``reasoning_effort`` override (a GENERATION_PARAMS
+        key, arriving here already merged into ``params`` by
+        ``request_chat_model``) gets the identical treatment: it is a
+        SEPARATE key from the ``reasoning`` knob above, and a provider
+        without support never pops it itself (only ``resolve_reasoning_spec``,
+        called from inside ``supports_reasoning`` providers' own ``build()``,
+        does that). Left unpopped here, it would reach a pydantic-strict
+        vendor constructor unguarded — one key over from the exact gap rule 5
+        already closes for ``reasoning``."""
         if getattr(provider, "supports_reasoning", False):
             return provider.build(self.model, reasoning=self.reasoning, **params)
         if self.reasoning is not None and self.reasoning is not False:
@@ -78,6 +87,12 @@ class LLM:
                 "provider '%s' does not support reasoning — ignored",
                 getattr(provider, "name", type(provider).__name__),
             )
+        if "reasoning_effort" in params:
+            _log.warning(
+                "provider '%s' does not support reasoning — 'reasoning_effort' ignored",
+                getattr(provider, "name", type(provider).__name__),
+            )
+            params = {k: v for k, v in params.items() if k != "reasoning_effort"}
         return provider.build(self.model, **params)
 
     @property
@@ -133,18 +148,27 @@ class LLM:
         self._request_model_cache[key] = model
         return model
 
-    def _bound_model(self) -> "Runnable[Any, Any]":
-        """Chat model with the current request's generation params bound on top
-        of the class-level defaults. No params active → the bare model.
+    def _bound_model(self) -> "BaseChatModel":
+        """Chat model with the current request's generation params applied.
+        Used by LLMAgent (complete/stream/acomplete/astream).
 
-        Return type is the broader ``Runnable``, not ``BaseChatModel``:
-        ``.bind()`` wraps the model in a ``RunnableBinding``, a distinct
-        Runnable subtype, not a ``BaseChatModel``. Every caller only uses
-        ``invoke``/``stream``/``ainvoke``/``astream``, all Runnable-generic."""
-        from aixon.runtime import current_generation_params
+        Delegates straight to ``request_chat_model()`` — the SAME merge/
+        translate/cache path ToolAgent already uses. No params active -> the
+        bare cached model, unchanged.
 
-        params = current_generation_params()
-        return self.chat_model.bind(**params) if params else self.chat_model
+        This used to call ``.bind(**params)`` on the bare ``chat_model``
+        instead, attaching params at INVOKE time on top of an already-built
+        model. That bypassed ``Provider.build()`` (and therefore
+        ``resolve_reasoning_spec``) entirely for every per-request param:
+        a client ``reasoning_effort`` reached the vendor SDK as a raw,
+        untranslated invoke-time kwarg (the Anthropic/OpenAI SDKs reject it,
+        a 500), and a client ``temperature`` bound at invoke time could
+        override the constructor-forced ``temperature=1`` Anthropic's
+        extended-thinking API requires (a 400 from Anthropic). Routing
+        through ``request_chat_model()`` merges params in as constructor
+        kwargs BEFORE ``build()`` runs, so translation and the temperature
+        force both apply the same way they already do for ToolAgent."""
+        return self.request_chat_model()
 
     def complete(self, messages: list[Message]) -> Message:
         """Single-shot neutral completion. Used by LLMAgent.invoke."""

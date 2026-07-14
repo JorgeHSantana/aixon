@@ -65,6 +65,51 @@ def test_normalize_reasoning_both_given_kept_as_is():
     }
 
 
+# ── normalize_reasoning: unknown effort must never crash (final-review CRITICAL) ──
+#
+# "minimal" is a legit OpenAI reasoning_effort value aixon's fixed 3-tier
+# table doesn't know about; any typo is client-triggerable the same way via
+# the request-body `reasoning_effort` override. Before the fix, deriving the
+# missing `budget_tokens` half indexed `_EFFORT_TO_BUDGET[effort]` directly —
+# a bare KeyError, surfacing as a 500 to the client.
+
+def test_normalize_reasoning_unknown_effort_keeps_original_string():
+    # The ORIGINAL string must survive verbatim in spec["effort"] so
+    # OpenAIProvider (which forwards spec["effort"] straight to its own
+    # `reasoning_effort` ctor kwarg) passes "minimal" through untouched.
+    spec = normalize_reasoning({"effort": "minimal"})
+    assert spec["effort"] == "minimal"
+
+
+def test_normalize_reasoning_unknown_effort_defaults_to_medium_budget():
+    spec = normalize_reasoning({"effort": "minimal"})
+    assert spec["budget_tokens"] == 4096
+
+
+def test_normalize_reasoning_unknown_effort_warns_once(caplog):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.base"):
+        normalize_reasoning({"effort": "minimal"})
+    assert any(
+        "unknown reasoning effort" in m and "minimal" in m for m in caplog.messages
+    )
+
+
+def test_normalize_reasoning_garbage_effort_does_not_crash():
+    spec = normalize_reasoning({"effort": "xyz"})
+    assert spec == {"budget_tokens": 4096, "effort": "xyz"}
+
+
+def test_openai_unknown_effort_passes_through_verbatim(fake_openai):
+    model = fake_openai.build("gpt-5.4", reasoning={"effort": "minimal"})
+    assert model.kwargs["reasoning_effort"] == "minimal"
+
+
+def test_anthropic_unknown_effort_uses_medium_budget(fake_anthropic, caplog):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.base"):
+        model = fake_anthropic.build("claude-sonnet-5", reasoning={"effort": "minimal"})
+    assert model.kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+
+
 # ── pop_reasoning (pure) ──────────────────────────────────────────────────────
 
 def test_pop_reasoning_extracts_key():
@@ -182,6 +227,29 @@ def test_unsupporting_provider_request_chat_model_path_also_guarded(
     assert any("does not support reasoning" in m for m in caplog.messages)
 
 
+def test_unsupporting_provider_reasoning_effort_param_also_guarded(
+    recording_fake_build, caplog
+):
+    """IMPORTANT (final-review): rule 5 only ever guarded the class-level
+    `reasoning` knob. `reasoning_effort` — the PER-REQUEST override, a
+    GENERATION_PARAMS key that reaches LLM._build via request_chat_model's
+    param merge — is a separate key one line over, and was forwarded
+    unguarded straight into **params for providers without
+    supports_reasoning. Must be popped with the same ignored-with-warning
+    treatment: build() receives neither "reasoning" nor "reasoning_effort",
+    and a warning is logged."""
+    from aixon.runtime import generation_params
+
+    llm = make_llm()  # reasoning knob off; only the per-request override is on
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with generation_params({"reasoning_effort": "high"}):
+            llm.request_chat_model()  # must not raise
+
+    assert "reasoning" not in recording_fake_build[-1]
+    assert "reasoning_effort" not in recording_fake_build[-1]
+    assert any("does not support reasoning" in m for m in caplog.messages)
+
+
 def test_shipped_providers_declare_reasoning_support():
     from aixon.providers.anthropic import AnthropicProvider
     from aixon.providers.google import GoogleProvider
@@ -268,6 +336,52 @@ def test_anthropic_reasoning_effort_param_overrides_knob(fake_anthropic):
     )
     assert model.kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16384}
     assert "reasoning_effort" not in model.kwargs  # never leaks to the vendor ctor
+
+
+def test_anthropic_max_tokens_elevated_warns(fake_anthropic, caplog):
+    """MINOR (final-review): elevating an absent/too-low `max_tokens` to fit
+    the thinking budget silently overrides the caller — warn, symmetric with
+    the temperature-forcing warning right above it."""
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.anthropic"):
+        model = fake_anthropic.build("claude-sonnet-5", reasoning=True, max_tokens=100)
+    assert model.kwargs["max_tokens"] == 4096 + 4096
+    assert any("max_tokens" in m for m in caplog.messages)
+
+
+def test_anthropic_max_tokens_preserved_above_budget_does_not_warn(
+    fake_anthropic, caplog
+):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.anthropic"):
+        model = fake_anthropic.build("claude-sonnet-5", reasoning=True, max_tokens=20000)
+    assert model.kwargs["max_tokens"] == 20000
+    assert not any("max_tokens" in m for m in caplog.messages)
+
+
+# ── Anthropic: allow-listed params NOT accepted by ChatAnthropic (final-review CRITICAL) ──
+#
+# GENERATION_PARAMS includes presence_penalty/frequency_penalty (valid
+# ChatOpenAI ctor kwargs) but ChatAnthropic's pydantic model has no such
+# fields — model_config is `extra="ignore"`, so passing them silently
+# vanishes with NO feedback (verified against the installed langchain-
+# anthropic: neither field is in ChatAnthropic.model_fields). Pop + warn
+# instead of relying on that silent drop.
+
+def test_anthropic_pops_unsupported_penalty_params_and_warns(fake_anthropic, caplog):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.anthropic"):
+        model = fake_anthropic.build(
+            "claude-sonnet-5", presence_penalty=0.5, frequency_penalty=0.3
+        )
+    assert "presence_penalty" not in model.kwargs
+    assert "frequency_penalty" not in model.kwargs
+    assert any(
+        "presence_penalty" in m and "frequency_penalty" in m for m in caplog.messages
+    )
+
+
+def test_anthropic_without_penalty_params_does_not_warn(fake_anthropic, caplog):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.anthropic"):
+        fake_anthropic.build("claude-sonnet-5", temperature=0.5)
+    assert caplog.messages == []
 
 
 # ── OpenAI translation ────────────────────────────────────────────────────────
@@ -451,3 +565,20 @@ def test_google_reasoning_off_on_old_package_neither_warns_nor_breaks(
         model = fake_old_google.build("gemini-2.0-flash")
     assert "thinking_budget" not in model.kwargs
     assert caplog.messages == []
+
+
+# ── Google: allow-listed params NOT accepted by ChatGoogleGenerativeAI ────────
+#
+# Mirrors the Anthropic case: presence_penalty/frequency_penalty are not
+# fields on the installed langchain-google-genai's pydantic model either.
+
+def test_google_pops_unsupported_penalty_params_and_warns(fake_google, caplog):
+    with caplog.at_level(logging.WARNING, logger="aixon.providers.google"):
+        model = fake_google.build(
+            "gemini-2.0-flash", presence_penalty=0.5, frequency_penalty=0.3
+        )
+    assert "presence_penalty" not in model.kwargs
+    assert "frequency_penalty" not in model.kwargs
+    assert any(
+        "presence_penalty" in m and "frequency_penalty" in m for m in caplog.messages
+    )
