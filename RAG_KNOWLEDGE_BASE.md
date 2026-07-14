@@ -1,8 +1,8 @@
 # aixon Framework - RAG Knowledge Base
 
 > **What this file is.** A self-contained, retrieval-ready knowledge base about the **aixon** framework. It is meant to be ingested into a vector store and consumed by an AI agent operating with RAG (Retrieval-Augmented Generation) contexts: when the agent is asked about aixon, it retrieves the relevant sections below and grounds its answer in them. Every section is written to be self-contained, so it survives chunking and retrieves well on its own.
-> **How an agent should use it.** Treat every section as authoritative reference for aixon version 0.1.1. Quote APIs, class names, attributes, and code exactly as written here; do not invent behavior that is not described. Map the question to a topic (agents, LLM, tools, orchestrator, retrieval, server, CLI, async, errors), retrieve that section, and answer from it. For "how do I..." questions, the FAQ (section 25) and the complete worked example (section 26) are the best starting points.
-> **Framework version documented:** 0.1.1
+> **How an agent should use it.** Treat every section as authoritative reference for aixon version 0.1.15. Quote APIs, class names, attributes, and code exactly as written here; do not invent behavior that is not described. Map the question to a topic (agents, LLM, reasoning, tools, orchestrator, retrieval, server, usage, CLI, async, errors), retrieve that section, and answer from it. For "how do I..." questions, the FAQ (section 27) and the complete worked example (section 28) are the best starting points.
+> **Framework version documented:** 0.1.15
 > **Code and API identifiers are always in English.** Python required: 3.11 or newer. PyPI package: `aixon` (`pip install aixon`). License: MIT.
 
 ---
@@ -18,6 +18,7 @@ There are three building blocks of behavior:
 | `LLMAgent` | A single, direct LLM call (no tool loop). |
 | `ToolAgent` | An LLM plus a tool-calling loop (built on LangGraph's `create_agent`). |
 | `Orchestrator` | Multiple agents coordinated by a graph (supervisor, explicit graph, or raw LangGraph). |
+| `ReflectiveAgent` | Wraps a worker agent in a generate -> judge -> retry evaluator-optimizer loop. |
 
 Everything is an `Agent` with one uniform interface (`invoke`, `stream`, `ainvoke`, `astream`, `as_tool`). Because the interface is uniform, agents compose freely: a `ToolAgent` can be a node in an `Orchestrator`, an `Orchestrator` can be a tool inside a `ToolAgent`, and the `Server` never needs to know which subtype it is calling.
 
@@ -78,7 +79,9 @@ pip install "aixon[cli]"               # click + openai - the `aixon` command + 
 pip install "aixon[openai]"            # OpenAI provider binding (langchain-openai)
 pip install "aixon[anthropic]"         # Anthropic provider binding
 pip install "aixon[google]"            # Google provider binding (Gemini)
+pip install "aixon[zai]"               # z.AI provider binding (GLM models, via langchain-openai)
 pip install "aixon[retrieval]"         # httpx - Connector / HttpToolConnector
+pip install "aixon[mcp]"               # mcp SDK - MCPConnector (MCP servers)
 pip install "aixon[openai-embedding]"  # langchain-openai - OpenAIEmbedding
 pip install "aixon[weaviate]"          # Weaviate vector-store Retriever
 pip install "aixon[ragie]"             # Ragie managed-RAG Retriever
@@ -88,17 +91,18 @@ pip install "aixon[tiktoken]"          # token counting for the server `usage` f
 pip install "aixon[all]"               # everything above
 ```
 
-### 3.1 Dependency summary (aixon 0.1.1)
+### 3.1 Dependency summary (aixon 0.1.15)
 
 | Dependency | Version | Layer |
 |---|---|---|
 | langchain | >= 1.0 | core |
 | langchain-core | >= 1.0 | core |
 | langgraph | >= 1.0 | core |
+| click | >= 8.0 | core (the `aixon` command is available on a bare install) |
 | fastapi / uvicorn / pydantic | current | server extra |
 | httpx | >= 0.27 | server / retrieval extra |
-| click / openai | current | cli extra |
-| langchain-openai | >= 0.2 | openai / openai-embedding extra |
+| openai | >= 1.0 | cli extra (only needed for remote `aixon chat --url ...`) |
+| langchain-openai | >= 0.2 | openai / openai-embedding / zai extra |
 | langchain-anthropic | >= 0.2 | anthropic extra |
 | langchain-google-genai | >= 2.0 | google extra |
 | weaviate-client / langchain-weaviate | current | weaviate extra |
@@ -108,6 +112,20 @@ pip install "aixon[all]"               # everything above
 | tiktoken | >= 0.7 | tiktoken extra |
 
 aixon ships type hints (PEP 561 `py.typed`), so type checkers see real types.
+
+### 3.2 CI and packaging discipline
+
+CI runs `mypy aixon` (a hard type-check gate) plus the full test suite on
+every push/PR, in both `test.yml` and `publish.yml`. Both workflows also run a
+**bare-install smoke job**: `pip install .` with no extras, then `import
+aixon` and `aixon --help`, which guards the neutral-boundary/lazy-import
+discipline (no optional dependency may be required just to import the
+package or run the CLI). The push-to-main publish pipeline gates PyPI
+publishing on that smoke job passing, so a broken bare install can no longer
+reach PyPI. `aixon new`'s generated scaffold is verified buildable
+(`pip install -e .` then runs) as part of this discipline. The `dev` extra
+(`pip install -e ".[all,dev]"`) installs everything needed to run the suite
+(`pytest`, `mypy`, ...).
 
 ---
 
@@ -121,9 +139,12 @@ Everything below is importable directly from `aixon`, for example `from aixon im
 | Errors | `AixonError`, `AgentNotFoundError`, `CompositionCycleError`, `NamingError`, `RegistrationError` |
 | LLM and providers | `LLM`, `LLMAgent`, `Provider`, `get_provider`, `register_provider` |
 | Reasoning and tools | `emit_reasoning`, `reasoning_channel`, `ToolAgent` |
-| Orchestration | `Orchestrator`, `GraphState`, `END` (last two also in `aixon.state`) |
-| Retrieval / connectors / embeddings | `Connector`, `HttpToolConnector`, `Embedding`, `OpenAIEmbedding`, `Retriever`, `TypeAccess`, `TavilyRetriever`, `RagieRetriever`, `WeaviateRetriever` |
+| Orchestration | `Orchestrator`, `ReflectiveAgent`, `GraphState`, `END` (last two also in `aixon.state`) |
+| Retrieval / connectors / embeddings | `Connector`, `HttpToolConnector`, `MCPConnector`, `Embedding`, `OpenAIEmbedding`, `Retriever`, `TypeAccess`, `TavilyRetriever`, `RagieRetriever`, `WeaviateRetriever` |
 | Server (requires `aixon[server]`) | `Server`, `ProtocolAdapter`, `OpenAIAdapter`, `AnthropicAdapter`, `ParsedRequest` |
+| Usage tracking (in `aixon.usage`, not re-exported from top-level `aixon`) | `merge_usage`, `UsageAccumulator`, `usage_scope`, `add_usage`, `current_usage_accumulator` |
+
+`Message.usage` and `Chunk.tool_calls` are additional fields on the neutral types (section 5). `LLM(model, reasoning=...)` is a new keyword-only constructor argument on the existing `LLM` class, not a new export (section 8).
 
 ---
 
@@ -145,6 +166,7 @@ class Message:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: Optional[str] = None
     reasoning: Optional[str] = None
+    usage: Optional[dict[str, int]] = None
 
     def to_dict(self) -> dict[str, Any]: ...   # omits empty optional fields
 
@@ -152,10 +174,11 @@ class Message:
 class Chunk:
     content: str = ""
     reasoning: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     done: bool = False
 ```
 
-> Explanation: a `Message` carries one conversation turn (its `role` is one of `system`, `user`, `assistant`, `tool`). A `Chunk` is a streaming delta: `content` and `reasoning` are additive text fragments, and the final `Chunk` in a stream has `done=True`. After a non-streaming `invoke`, an agent's chain-of-thought is available on `Message.reasoning`.
+> Explanation: a `Message` carries one conversation turn (its `role` is one of `system`, `user`, `assistant`, `tool`). A `Chunk` is a streaming delta: `content` and `reasoning` are additive text fragments, and the final `Chunk` in a stream has `done=True`. After a non-streaming `invoke`, an agent's chain-of-thought is available on `Message.reasoning`. `Message.usage` (added in 0.1.13) carries the provider's real token usage in OpenAI shape (`{"prompt_tokens", "completion_tokens", "total_tokens"}`) when the provider reported it; `None` means it did not, and a consumer may fall back to an estimate (see section 19). `tool_calls` on both `Message` and `Chunk` (the latter added in 0.1.14) carries neutral tool-call dicts (`{"name", "args", "id"}`) for client-executed tools — see section 18.3.
 
 Example: building messages by hand.
 
@@ -205,7 +228,7 @@ for chunk in ResearchAgent().stream([Message(role="user", content="Latest on LLM
         print(chunk.content, end="", flush=True)
 ```
 
-> Explanation: `stream` yields incremental `Chunk` objects. A chunk may carry `content` (the answer text), `reasoning` (the agent's thinking, see section 10), or `done=True` at the end. This is what powers token-by-token UIs.
+> Explanation: `stream` yields incremental `Chunk` objects. A chunk may carry `content` (the answer text), `reasoning` (the agent's thinking, see section 12), `tool_calls` (client-executed tool calls, section 18.3), or `done=True` at the end. This is what powers token-by-token UIs.
 
 ### 6.1 Common attributes (available on every agent subtype)
 
@@ -232,7 +255,7 @@ class PlannerAgent(LLMAgent):
     prompt      = "You are a concise strategic planner. Use numbered lists."
 ```
 
-> Explanation: subclass `LLMAgent`, give it an `llm` and (optionally) a `prompt`. The class auto-registers under the name `planneragent` (the class name lowercased). The name must end with `Agent` (see section 19). `invoke` prepends the `prompt` as a system message and calls the model; `stream` yields the answer as `Chunk` deltas.
+> Explanation: subclass `LLMAgent`, give it an `llm` and (optionally) a `prompt`. The class auto-registers under the name `planneragent` (the class name lowercased). The name must end with `Agent` (see section 22). `invoke` prepends the `prompt` as a system message and calls the model; `stream` yields the answer as `Chunk` deltas. A leading `system` (or `developer` — OpenAI's system-role alias, treated identically) message in the caller's `messages` **wins** over the class-level `prompt` for that call instead of both reaching the provider as two separate system messages; if that leading message's content is empty, it falls back to `self.prompt`.
 
 LLMAgent attributes (in addition to the common ones in section 6.1):
 
@@ -284,10 +307,61 @@ llm = LLM("claude-3-5-haiku-20241022", provider="anthropic", temperature=0.3)
 | `gpt-*`, `o[0-9]*`, `text-*` | `"openai"` |
 | `claude-*` | `"anthropic"` |
 | `gemini-*` | `"google"` |
+| `glm*` | `"zai"` (added in 0.1.9) |
 
 Provider names are lowercase strings, not an enum. To override inference, pass `provider=` explicitly, for example `LLM("some-model", provider="openai")`.
 
-### 8.2 Custom provider
+**z.AI (GLM models), added in 0.1.9.** `LLM("glm-4.6", provider="zai")` (or a bare `glm-*` model name, inferred) reuses `langchain_openai.ChatOpenAI` pointed at the z.AI OpenAI-compatible endpoint. `ZAI_API_KEY` is **required** (since 0.1.12) — unlike the other providers, it does NOT fall back to `OPENAI_API_KEY` if unset; building the model raises `AixonError` instead of silently sending your OpenAI credential to the z.AI endpoint. `ZAI_BASE_URL` overrides the default (`https://api.z.ai/api/paas/v4`). Install with `pip install "aixon[zai]"` (pulls in `langchain-openai`).
+
+### 8.2 Reasoning / extended thinking (added in 0.1.15)
+
+`LLM(model, reasoning=...)` turns on the provider's native reasoning/thinking mode:
+
+```python
+llm = LLM("claude-sonnet-4-5", reasoning=True)                    # {"effort": "medium"}
+llm = LLM("claude-sonnet-4-5", reasoning={"effort": "high"})
+llm = LLM("claude-sonnet-4-5", reasoning={"budget_tokens": 8000})
+llm = LLM("gpt-5.4", reasoning={"effort": "low"})
+```
+
+- `None` / `False` (the default) — off; behavior is byte-for-byte unchanged from before the knob existed.
+- `True` — shorthand for `{"effort": "medium"}`.
+- A `dict` may give `budget_tokens`, `effort`, or both; whichever half is missing is derived from the fixed table below (an already-complete dict is kept exactly as given, no re-derivation):
+
+| Effort | Budget tokens |
+|---|---|
+| `low` | 1024 |
+| `medium` | 4096 |
+| `high` | 16384 |
+
+A bare `budget_tokens` is bucketed into the nearest effort tier the other way (`<= 1024` -> `low`, `<= 8192` -> `medium`, else `high`) for providers with only a coarse effort dial.
+
+**Per-provider translation:**
+
+| Provider | Translation |
+|---|---|
+| `anthropic` | `thinking={"type": "enabled", "budget_tokens": ...}`. Anthropic's extended-thinking API requires `temperature == 1` and does not accept `top_p`; the knob **forces** `temperature=1` (warning if the caller/request asked for a different value) and **drops** any `top_p`. `max_tokens` is raised to fit the budget when absent or not already comfortably above it. |
+| `openai` | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`. No budget dial — only the effort string reaches the API. An unknown/custom effort string is passed through verbatim (no validation against the low/medium/high table). |
+| `zai` (GLM) | `extra_body={"thinking": {"type": "enabled", ...}}` (merged with any caller-supplied `extra_body`). GLM has no budget/effort dial of its own — any non-off spec just turns thinking on. |
+| `google` (Gemini) | `thinking_budget=<budget_tokens>` and `include_thoughts=True` on `ChatGoogleGenerativeAI` — applied only if the installed `langchain-google-genai` declares those fields; an older install degrades gracefully (knob ignored, warning logged) instead of raising on an unknown kwarg. |
+| custom (no `supports_reasoning = True`) | the knob is **ignored** (with a warning) rather than forwarded — a pydantic-strict vendor constructor never sees the stray `reasoning` kwarg, so the build never breaks. |
+
+**Per-request override.** A per-request `reasoning_effort` field (see section 18.3) is allow-listed the same way as `temperature`/`max_tokens`/etc., and, when present, overrides the class-level `reasoning=` knob for that one build — translated as `{"effort": reasoning_effort}` through the same table above.
+
+**What actually comes back:**
+- **Anthropic** extracts `thinking` blocks into `Message.reasoning` / `Chunk.reasoning` — real, provider-generated chain-of-thought text.
+- **Gemini** does the same when `include_thoughts=True` is applied (always the case when the knob is on and the installed package supports it).
+- **OpenAI's API does not return raw chain-of-thought at all.** `reasoning_effort` makes the model think harder and improves the answer, but there is no reasoning text to extract — `Message.reasoning` stays `None` for OpenAI models regardless of the knob.
+- **z.AI (GLM)**: `thinking` IS enabled on the wire, but the installed `langchain-openai` does not populate `additional_kwargs["reasoning_content"]` from the Chat Completions response today — a provider/package gap, not something aixon papers over. Extraction already supports the `reasoning_content` convention the moment the installed SDK starts filling it in.
+- **Cost.** Thinking/reasoning tokens bill as output tokens and already show up in `Message.usage["completion_tokens"]` (section 19) — no separate accounting needed.
+
+**Limitation — Anthropic extended thinking + client-executed tools across requests.** A CLIENT-executed tool loop (section 18.3 — an agentic client like an editor/IDE that calls tools itself and sends results back on a *later* HTTP request) does not round-trip Anthropic's `thinking` blocks: the neutral boundary drops reasoning content on the way back into LangChain messages, and Anthropic's API rejects a request that mixes extended thinking with tool results whose matching thinking block isn't present in that same request. Concretely: a reasoning-enabled Claude model that returns a tool call to a client-executed tool, then receives that tool's result back on the NEXT request, gets a 400 from Anthropic. A normal in-process `ToolAgent` loop (aixon runs the tool loop within one request) is unaffected.
+
+### 8.3 Per-request generation params (request_chat_model)
+
+When an agent runs behind the `Server`, per-request generation params (`temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, `reasoning_effort`) are published on a `ContextVar` for the duration of the call and apply on top of the `LLM(...)` class-level defaults, without mutating them. Both `LLMAgent` and `ToolAgent` build the request-time model through the exact same `LLM.request_chat_model()` path (unified in 0.1.15 — `LLMAgent` used to bind params at invoke time on top of an already-built model instead, which bypassed provider translation, so a client `reasoning_effort` used to reach the vendor SDK raw and a client `temperature` could override the constructor-forced `temperature=1` Anthropic's extended thinking requires; that gap is closed now). `request_chat_model()` builds a provider model with the params merged in as constructor kwargs *before* `Provider.build()` runs, so they go through the same reasoning translation and validation every other constructor kwarg gets. No active params -> the cached `chat_model` (no rebuild). Models built for repeated identical param combinations are cached (bounded to 8 entries, oldest-evicted-first, added in 0.1.12) so a hot request path reuses one provider client (and its HTTP connection pool) instead of rebuilding an SDK client per call.
+
+### 8.4 Custom provider
 
 For a custom backend, subclass the `Provider` ABC and register a single instance before first use.
 
@@ -335,7 +409,7 @@ register_provider(DemoProvider())
 # then: LLM("demo-1", provider="demo")
 ```
 
-> Explanation: `DemoChatModel` is a real LangChain chat model that returns a fixed answer. `DemoProvider.build` returns it. Because `env_key` is empty, no API key is needed. This pattern lets a whole agent system run offline (the complete example in section 25 uses exactly this technique).
+> Explanation: `DemoChatModel` is a real LangChain chat model that returns a fixed answer. `DemoProvider.build` returns it. Because `env_key` is empty, no API key is needed. This pattern lets a whole agent system run offline (the complete example in section 28 uses exactly this technique). A provider that wants to support the reasoning knob (section 8.2) sets `supports_reasoning = True` on the class; otherwise a `reasoning=` argument is safely ignored with a warning rather than reaching `build()`.
 
 ---
 
@@ -368,7 +442,7 @@ ToolAgent attributes (in addition to the common ones in section 6.1):
 | `tools` | `list` | `[]` | Mix of `AgentTool`, `Retriever`, LangChain `@tool` functions, or any callable. All coerced to a LangChain tool internally via `coerce_tools`. |
 | `max_iterations` | `int` | `15` | Maximum tool-call rounds (maps to LangGraph's `recursion_limit` as `2 * max_iterations + 1`). |
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds (deadline semantics below). |
-| `tool_call_label` | `str` | `"Calling {name}..."` | A `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or for localization, for example `"Chamando {name}..."`. Added in aixon 0.1.1. |
+| `tool_call_label` | `str` | `"Calling {name}..."` | A `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or for localization, for example `"Chamando {name}..."`. Added in aixon 0.1.1; consecutive duplicate labels are emitted once since 0.1.5 (a run calling the same tool N times in a row shows a single line). |
 
 ### 9.1 Tool coercion: what counts as a tool
 
@@ -409,15 +483,73 @@ class DiagnosisAgent(ToolAgent):
     tool_call_label = "Chamando {name}..."   # emits, e.g., "Chamando check_battery..."
 ```
 
-> Explanation: when the agent calls the `check_battery` tool, it emits a reasoning line "Chamando check_battery..." instead of the English default. The `{name}` placeholder is replaced with the tool name. This attribute was added in version 0.1.1; before it, the label was hard-coded.
+> Explanation: when the agent calls the `check_battery` tool, it emits a reasoning line "Chamando check_battery..." instead of the English default. The `{name}` placeholder is replaced with the tool name. This attribute was added in version 0.1.1; before it, the label was hard-coded. Consecutive duplicate labels are deduplicated (since 0.1.5), so a loop calling the same tool repeatedly in a row emits the line once, not once per call.
 
 ### 9.3 Deadline semantics
 
-`max_execution_time` is a wall-clock deadline, not an interrupt. On the sync path, `invoke` checks it after the run completes and raises `AixonError` if exceeded; `stream` checks it between updates. Neither can abort a single in-flight tool call. On the async path, the deadline is enforced with `asyncio.wait_for`, so an overrun is cancelled at the next await point, provided the chain is genuinely async (an async model, async tools). See section 20.
+`max_execution_time` is a wall-clock deadline, not an interrupt. On the sync path, `invoke` checks it after the run completes and raises `AixonError` if exceeded; `stream` checks it between updates. Neither can abort a single in-flight tool call. On the async path, the deadline is enforced with `asyncio.wait_for`, so an overrun is cancelled at the next await point, provided the chain is genuinely async (an async model, async tools). See section 23.
+
+### 9.4 Model reasoning ordering in the live channel (added in 0.1.15)
+
+When `self.llm` has the reasoning knob (section 8.2) turned on, a turn's own model thinking/reasoning text is emitted into the same `ReasoningChannel` used by `tool_call_label` *before* that turn's tool-call label(s) — the model reasoned before deciding to call the tool, and the channel preserves that order. `Message.reasoning` (`invoke`) / `Chunk.reasoning` (`stream`) therefore interleave the model's own thinking with the `"Calling {name}..."` step labels, in the order they actually occurred. Consecutive duplicate reasoning lines are deduplicated the same way as tool-call labels. A per-request `reasoning_effort` param (section 18.3) overrides the class-level `reasoning=` knob for that one build.
 
 ---
 
-## 10. Nesting agents as tools (as_tool) and the AgentTool type
+## 10. ReflectiveAgent: evaluator-optimizer loop
+
+Added in aixon 0.1.7. Use `ReflectiveAgent` when a single generation pass isn't reliable enough: it wraps a worker `Agent` in a review loop — a judge LLM scores each answer against an objective rubric, and a rejected answer goes back to the worker together with the judge's critique, up to `max_rounds` attempts.
+
+```python
+from aixon import LLM, ReflectiveAgent
+from agents.gerente import GerenteAgent
+
+class GerenteRevisadoAgent(ReflectiveAgent):
+    name = "gerente-revisado"
+    agent = GerenteAgent                 # class OR instance (like Orchestrator nodes)
+    judge_llm = LLM("gpt-5.4-mini", temperature=0)
+    judge_rubric = (
+        "1. Every SQL statement returned was validated (no non-existent column).\n"
+        "2. Any number quoted matches what the tools returned.\n"
+        "3. The answer addresses the entire question."
+    )
+    max_rounds = 3
+```
+
+`ReflectiveAgent` attributes (in addition to the common ones in section 6.1):
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `agent` | `Agent` (class or instance) | Yes | The worker that produces answers. Resolved once, at `__init__`, with the same `_instantiate` helper `Orchestrator` uses for its nodes. |
+| `judge_llm` | `LLM` | Yes | The model that grades each answer. Often a cheaper/faster model than the worker's — judging is a classification task, not generation. |
+| `judge_rubric` | `str` | Yes | Objective approval criteria, non-empty. |
+| `max_rounds` | `int` | No (default `3`) | Worker attempts before giving up, `>= 1`. |
+| `judge_label` | `str` | No | Reasoning-channel label emitted before each judge call. Default: `"Avaliando a resposta..."`. |
+| `retry_label` | `str` | No | Reasoning-channel label emitted before a retry. `{round}`/`{max}` are interpolated. Default: `"Refinando a resposta (rodada {round}/{max})..."`. |
+| `exhausted_label` | `str` | No | Reasoning-channel label emitted when `max_rounds` is reached without approval. Default: `"Rodadas esgotadas — entregando a melhor tentativa."`. |
+
+Missing `agent`/`judge_llm`, an empty `judge_rubric`, or `max_rounds < 1` on a concrete subclass raises `AixonError` at import time — before registration, so a misconfigured `ReflectiveAgent` never leaves a ghost entry in the registry. The class name must end with `Agent` (same suffix rule as `LLMAgent`/`ToolAgent`, section 22).
+
+**How it works — the loop:**
+
+1. `invoke` runs the worker (`agent.invoke`) to get a first answer.
+2. `emit_reasoning(judge_label)`, then the judge grades it: `judge_llm.complete` is called with the rubric and the question/answer pair.
+3. The verdict is a text sentinel: if its first line (after `strip()`) is exactly `APROVADO`, the answer is returned as-is.
+4. Otherwise the verdict IS the critique. If rounds remain, `emit_reasoning(retry_label)` and the worker is re-invoked with the critique appended to the conversation (a new message list — the caller's is never mutated).
+5. If `max_rounds` is reached without an `APROVADO`, `exhausted_label` is emitted and the **last attempt is returned** — exhausting the rounds is *not* an exception. A quality shortfall must not crash a run that produced an answer; the caller decides what to do with a possibly-imperfect result.
+
+`stream`/`astream` mirror `Orchestrator`: they run the loop under a fresh reasoning channel, drain it as `Chunk(reasoning=...)` deltas, then yield the final `Chunk(content=...)` and `Chunk(done=True)`. `ainvoke`/`astream` are native (`agent.ainvoke` + `judge_llm.acomplete`), not thread-bridged.
+
+**Usage aggregation (added in 0.1.14).** `invoke`/`ainvoke` sum token usage across every worker attempt AND every judge call in the run (via `aixon.usage.merge_usage`, section 19) onto the returned `Message.usage` — a `max_rounds=3` run that rejected twice bills for 3 worker turns plus up to 3 judge turns, all reflected in the one usage total the caller sees.
+
+**Cost and latency.** Each round re-runs the full worker call (and, on rejection, a fresh judge call too) — a `max_rounds=3` run can cost up to 3x the worker's tokens/latency plus the judge overhead. Keep `max_rounds` as low as the rubric allows, and prefer a cheap `judge_llm`.
+
+**Write an objective rubric.** `judge_rubric` should state checkable facts, not vibes — "does it cite a source?", "do the numbers match the tool results?", "is every requested field present?". A vague rubric ("sounds right", "is helpful") degenerates into the judge approving on the first pass regardless of quality, defeating the point of the loop.
+
+A complete runnable example (scripted judge + worker, no API key needed) lives in `examples/reflective_review`.
+
+---
+
+## 11. Nesting agents as tools (as_tool) and the AgentTool type
 
 Any `Agent` exposes itself as a tool via `as_tool()`. The result is a neutral `AgentTool`.
 
@@ -429,9 +561,12 @@ from typing import Awaitable, Callable
 class AgentTool:
     name: str
     description: str
-    func: Callable[[str], str]
-    coroutine: Callable[[str], Awaitable[str]] | None = None  # optional async path
+    func: Callable[..., str]
+    coroutine: Callable[..., Awaitable[str]] | None = None  # optional async path
+    args_schema: dict | None = None  # optional JSON Schema for the arguments
 ```
+
+> Explanation (`args_schema`): without it, the tool takes a single free-text argument (`str -> str`). With it, the JSON Schema defines the LLM-facing argument surface and `func`/`coroutine` receive the schema's fields as `**kwargs` — `coerce_tools` forwards the dict to `StructuredTool` as-is. Schema-carrying sources (e.g. `MCPConnector.as_tools()`, section 17.4) use this so the LLM sees the published contract instead of a text wrapper.
 
 Example: composing agents.
 
@@ -448,11 +583,11 @@ class OrchestratorAgent(ToolAgent):
 
 > Explanation: `as_tool()` wraps `agent.invoke`. Each tool call creates a fresh `[Message(role="user", content=text)]`, so the wrapped agent's state never leaks between calls. `as_tool()` also sets `coroutine` (wrapping `ainvoke`), which makes the tool dual: `coerce_tools` registers both, so the tool runs on the sync path (`invoke` to `func`) and the async path (`ainvoke` to `coroutine`). The same `AgentTool` shape is returned by `Retriever.as_tool()`, so `ToolAgent.tools` handles agents and retrievers uniformly.
 
-> Explanation (reasoning propagation): when a nested agent emits reasoning (via the ReasoningChannel, section 10/11), that reasoning bubbles up through the outer `stream()` as `Chunk(reasoning=...)` deltas. Callers therefore see the full chain of thought across nesting levels.
+> Explanation (reasoning propagation): when a nested agent emits reasoning (via the ReasoningChannel, sections 11/12), that reasoning bubbles up through the outer `stream()` as `Chunk(reasoning=...)` deltas. Callers therefore see the full chain of thought across nesting levels.
 
 ---
 
-## 11. Reasoning: emit_reasoning, the ReasoningChannel, and thought_stream_mode
+## 12. Reasoning: emit_reasoning, the ReasoningChannel, and thought_stream_mode
 
 aixon surfaces an agent's thinking through a contextvars-based ReasoningChannel. A `ToolAgent` emits a label per tool call (see `tool_call_label`), and any code running inside an agent can push a reasoning line with `emit_reasoning`.
 
@@ -478,19 +613,21 @@ class OrdersAgent(ToolAgent):
 
 > Explanation: inside the `order_status` tool, `emit_reasoning(...)` pushes a human-readable line into the active reasoning channel. In `invoke()` this reasoning ends up on `Message.reasoning`; in `stream()` it is yielded as `Chunk(reasoning=...)` deltas. Reasoning from nested agents bubbles up to the outermost stream, so the caller sees a complete thought trace.
 
-### 11.1 thought_stream_mode (server, OpenAI adapter)
+### 12.1 thought_stream_mode (server, OpenAI adapter)
 
 When serving over the OpenAI adapter, a per-request `thought_stream_mode` field controls how reasoning reaches the wire on a stream:
 
 | Mode | Behavior |
 |---|---|
-| `content` (default) | Reasoning wrapped in a `<think>...</think>` block inside `delta.content` (how most OpenAI UIs render thinking). |
-| `custom` | Reasoning on a separate `delta.reasoning` field. |
+| `custom` (default) | Reasoning on a separate `delta.reasoning` field; `delta.content` is never mutated, so programmatic consumers parse it safely. |
+| `content` | Reasoning wrapped in a `<think>...</think>` block inside `delta.content` (opt-in for chat UIs that render think-blocks). |
 | `hidden` | Reasoning dropped; content only. |
+
+The server-side default is configurable per deploy: `OpenAIAdapter(default_thought_mode="content")` (added in 0.1.9) switches the default for chat UIs that render think-blocks. A per-request `thought_stream_mode` in the request body always wins over the adapter's default.
 
 ---
 
-## 12. Orchestrator: multi-agent coordination
+## 13. Orchestrator: multi-agent coordination
 
 `Orchestrator` is the `Agent` subtype for coordinating multiple agents. Like all agents it exposes `invoke`, `stream`, and `as_tool`, so an orchestrator can be a node inside another orchestrator, a tool inside a `ToolAgent`, or the top-level entry served by the `Server`.
 
@@ -501,7 +638,7 @@ from aixon import Orchestrator, LLM
 from aixon.state import END, GraphState
 ```
 
-### 12.1 Tier 1: Supervisor (default, natural-language routing)
+### 13.1 Tier 1: Supervisor (default, natural-language routing)
 
 An LLM decides which worker agent handles each turn and loops until it decides the conversation is complete.
 
@@ -514,7 +651,7 @@ class SupportOrchestrator(Orchestrator):
 
 > Explanation: the supervisor LLM receives the conversation history plus the list of workers (names and descriptions), selects the next worker, routes the turn, and decides whether to call another worker or return the final answer. Use Tier 1 when routing is best expressed in natural language ("send billing questions to BillingAgent").
 
-### 12.2 Tier 2: Explicit graph (deterministic routing in code)
+### 13.2 Tier 2: Explicit graph (deterministic routing in code)
 
 Use Tier 2 when routing is deterministic (or conditionally deterministic) and you want it in code.
 
@@ -572,7 +709,7 @@ def route_research(self, state) -> list[str]:
 
 > Explanation: a `route_<node>` method returning a string picks one next node. Returning a list runs all listed nodes in parallel and waits for all of them before continuing.
 
-### 12.3 Tier 3: LangGraph escape hatch
+### 13.3 Tier 3: LangGraph escape hatch
 
 Override `build_graph` and return a compiled LangGraph graph. Use this only when Tier 2's declarative surface cannot express the graph (dynamic nodes, native subgraphs, custom reducers, intentional cycles).
 
@@ -591,9 +728,9 @@ class WeirdOrchestrator(Orchestrator):
         return g.compile()
 ```
 
-> Explanation: this returns a raw compiled LangGraph graph, including a deliberate cycle (`refine` back to `analyze`). aixon runs it as-is. A cycle inside a single graph is legitimate and bounded by `recursion_limit` (section 12.6).
+> Explanation: this returns a raw compiled LangGraph graph, including a deliberate cycle (`refine` back to `analyze`). aixon runs it as-is. A cycle inside a single graph is legitimate and bounded by `recursion_limit` (section 13.6).
 
-### 12.4 Tier detection order
+### 13.4 Tier detection order
 
 aixon detects the tier in this order:
 
@@ -602,7 +739,7 @@ aixon detects the tier in this order:
 3. `supervisor` and `agents` are set -> Tier 1.
 4. None of the above on a concrete subclass -> `AixonError` at import time.
 
-### 12.5 State
+### 13.5 State
 
 `GraphState` is the default state type. It carries `messages` and `reasoning`.
 
@@ -627,7 +764,7 @@ class TriageOrchestrator(Orchestrator):
 
 > Explanation: nest a `State` subclass to add typed fields your routing logic needs. The `route_<node>` methods receive this extended state, so `state["needs_diagnosis"]` is available.
 
-### 12.6 Recursion guards
+### 13.6 Recursion guards
 
 Guard A: composition cycle detection (always on). A composition cycle is when agent A uses B as a tool and B uses A (directly or transitively). aixon walks the composition graph in `__init_subclass__`; if a class appears twice on a path, it raises `CompositionCycleError` at import time.
 
@@ -655,7 +792,7 @@ class ResearchOrchestrator(Orchestrator):
 
 > Explanation: `recursion_limit` is the real guard against runaway loops (passed to LangGraph's compiled graph). `timeout` is a post-hoc deadline: `invoke` checks it after the graph returns and raises `AixonError` if exceeded; it does not interrupt an in-flight node. Setting both to `None` is allowed but not recommended.
 
-### 12.7 Orchestrator as a tool or node
+### 13.7 Orchestrator as a tool or node
 
 ```python
 class RouterAgent(ToolAgent):
@@ -665,9 +802,13 @@ class RouterAgent(ToolAgent):
 
 > Explanation: because `Orchestrator` implements the full `Agent` interface, an orchestrator can be a tool inside a `ToolAgent` (as here) or a node inside another orchestrator. Each `invoke` on the wrapped orchestrator gets its own state, so conversation history never leaks between calls.
 
+### 13.8 Usage aggregation (added in 0.1.14)
+
+An `Orchestrator` run reports token usage summed over EVERY model turn in that run onto the returned `Message.usage`: the Tier-1 supervisor's own routing calls plus every worker turn (including a worker that is itself a multi-turn `ToolAgent`), or every Tier-2 node's turn. This uses the same thread-safe `aixon.usage.UsageAccumulator` (section 19) that `ToolAgent` uses internally, so parallel fan-out nodes (a `route_<node>` returning a list) contribute concurrently without dropping a turn's usage under LangGraph's threaded execution.
+
 ---
 
-## 13. Retriever: context search
+## 14. Retriever: context search
 
 `Retriever` is the base class for context search: vector stores, web search, hybrid retrievers, or any source that returns ranked text chunks.
 
@@ -686,7 +827,7 @@ class LibraryRetriever(Retriever):
 
 > Explanation: implement `search` to return a list of `{"text": ..., "metadata": ...}` dicts. The class name must end with `Retriever` (else `NamingError` at import time). Unlike agents, retrievers are not added to the agent registry; they are tools consumed by agents via `as_tool()`, so they never appear in `aixon list`. Install with `pip install "aixon[retrieval]"`.
 
-### 13.1 Retriever API
+### 14.1 Retriever API
 
 ```python
 class Retriever(ABC):
@@ -704,13 +845,17 @@ class Retriever(ABC):
     def write(self, texts: list[str], metadatas: list[dict] | None = None) -> list[str]:
         """Store documents. Raises AixonError if type_access is READ."""
 
+    async def awrite(self, texts: list[str], metadatas: list[dict] | None = None) -> list[str]:
+        """Async write, added in 0.1.12. Default bridges to write() in a thread;
+        override for a native async SDK (true non-blocking indexing)."""
+
     def as_tool(self, name=None, description=None, k=None) -> AgentTool:
         """Expose as a neutral AgentTool (same shape as Agent.as_tool())."""
 ```
 
-> Explanation: only `search` is required. `asearch` is optional; its default runs `search` in a worker thread, so every retriever works on the async agent path without blocking the event loop. `as_tool()` returns a dual `AgentTool` (sync `func` to `search`, async `coroutine` to `asearch`), so the retriever tool runs on both `invoke` and `ainvoke`.
+> Explanation: only `search` is required. `asearch` is optional; its default runs `search` in a worker thread, so every retriever works on the async agent path without blocking the event loop. `awrite` mirrors `asearch` for the write path (default bridges `write` to a worker thread; a vendor retriever backed by an async SDK may override it for true non-blocking indexing). `as_tool()` returns a dual `AgentTool` (sync `func` to `search`, async `coroutine` to `asearch`), so the retriever tool runs on both `invoke` and `ainvoke`.
 
-### 13.2 TypeAccess
+### 14.2 TypeAccess
 
 ```python
 from aixon import TypeAccess
@@ -721,7 +866,7 @@ class TypeAccess(Enum):
     ALL   = "all"    # both search and write
 ```
 
-### 13.3 Using a Retriever as a tool
+### 14.3 Using a Retriever as a tool
 
 ```python
 from aixon import LLM, ToolAgent
@@ -736,7 +881,7 @@ class ResearchAgent(ToolAgent):
 
 > Explanation: `as_tool(k=10)` produces a search tool that returns the top 10 hits. When the retriever returns no results, the tool yields the string `"No results found for query: '<query>'"`.
 
-### 13.4 Writing to a Retriever
+### 14.4 Writing to a Retriever
 
 Set `type_access = TypeAccess.ALL` and override `write()`.
 
@@ -764,7 +909,7 @@ ids = retriever.write(
 
 ---
 
-## 14. Vendor retrievers: Tavily, Ragie, Weaviate
+## 15. Vendor retrievers: Tavily, Ragie, Weaviate
 
 aixon ships three vendor-backed `Retriever` bases. Each is generic (configured by class attributes and environment variables), lazy (the vendor SDK is imported only on use), and hidden behind an optional extra. Importing aixon never requires the vendor SDK; instantiating or using without it raises a clear `ImportError` naming the extra. Vendor retrievers also do not validate API keys at construction time, so you can declare them in a class body at import or autodiscover time without keys present.
 
@@ -774,7 +919,7 @@ aixon ships three vendor-backed `Retriever` bases. Each is generic (configured b
 | `RagieRetriever` | `aixon[ragie]` | Ragie managed RAG | native (`retrieve_async`) |
 | `WeaviateRetriever` | `aixon[weaviate]` (plus `aixon[rerank]`) | Weaviate vector store | thread-bridge |
 
-### 14.1 TavilyRetriever (web search)
+### 15.1 TavilyRetriever (web search)
 
 ```python
 from aixon import TavilyRetriever
@@ -786,7 +931,7 @@ class WebRetriever(TavilyRetriever):
 
 > Explanation: read-only web search. The API key comes from the `api_key` argument or the `TAVILY_API_KEY` environment variable. It returns one document for the AI answer (when present) plus one per result.
 
-### 14.2 RagieRetriever (managed RAG)
+### 15.2 RagieRetriever (managed RAG)
 
 ```python
 from aixon import RagieRetriever
@@ -796,9 +941,9 @@ class KbRetriever(RagieRetriever):
     partition   = "knowledge-base"
 ```
 
-> Explanation: managed RAG, where Ragie handles chunking, embedding, and indexing. The API key comes from the `api_key` argument or `RAGIE_API_KEY`. Set `rerank = True` for Ragie's native reranking. Set `type_access = TypeAccess.ALL` to enable `write()` (it ingests via `create_raw`).
+> Explanation: managed RAG, where Ragie handles chunking, embedding, and indexing. The API key comes from the `api_key` argument or `RAGIE_API_KEY`. Set `rerank = True` for Ragie's native reranking. Set `type_access = TypeAccess.ALL` to enable `write()` (it ingests via `create_raw`, using the SDK 2.0 `data` field since 0.1.11). Each result's `metadata` merges `document_metadata` first and the chunk's own `metadata` second (so a chunk-level key wins over a document-level key with the same name, added in 0.1.12), then always sets `document_id`, `document_name`, and `score` last — those three computed fields win over anything the merged metadata might otherwise supply under the same key.
 
-### 14.3 WeaviateRetriever (vector store)
+### 15.3 WeaviateRetriever (vector store)
 
 ```python
 from aixon import OpenAIEmbedding, WeaviateRetriever, TypeAccess
@@ -810,7 +955,7 @@ class LibraryRetriever(WeaviateRetriever):
     type_access     = TypeAccess.READ
 ```
 
-> Explanation: vector-store retrieval. The neutral `aixon.Embedding` is bridged to LangChain internally. The connection is lazy (opened on first `search` or `write`), so instantiation is safe at import or autodiscover time. Connection comes from `host` / `port` arguments or `WEAVIATE_HOST` / `WEAVIATE_PORT`.
+> Explanation: vector-store retrieval. The neutral `aixon.Embedding` is bridged to LangChain internally. The connection is lazy (opened on first `search` or `write`) and thread-safe (double-checked locking, hardened in 0.1.12), so instantiation is safe at import or autodiscover time and concurrent first callers race into the lock but only one actually builds the client/vectorstore. Connection comes from `host` / `port` arguments or `WEAVIATE_HOST` / `WEAVIATE_PORT`.
 
 Optional flashrank reranking (`pip install "aixon[rerank]"`):
 
@@ -826,9 +971,11 @@ class DeepLibraryRetriever(WeaviateRetriever):
 
 > Explanation: with `rerank = True`, the retriever fetches `rerank_fetch_k` candidates and keeps the best `rerank_top_k` after reranking. `write()` (when `type_access` allows) chunks via `RecursiveCharacterTextSplitter` and supports deterministic IDs through `source_ids`.
 
+**Upsert semantics and stale-chunk purging (hardened in 0.1.12).** Passing `source_ids` to `write()` makes it an upsert: chunk IDs are derived deterministically from each `source_id` (a UUID namespace), so re-writing the same `source_id` with fewer chunks than before purges the now-obsolete tail chunks left over from the previous, longer write — otherwise stale chunks would linger in the vector store alongside the new content. The purge runs *after* the new content is committed and is best-effort: a transient delete failure is logged, not raised (the write already succeeded; worst case is a lingering stale tail until the next rewrite). `source_ids` must be unique within a single `write()` call — a duplicate raises `ValueError` before anything is written.
+
 ---
 
-## 15. Embedding: text embeddings
+## 16. Embedding: text embeddings
 
 `Embedding` is the abstract base for vector-embedding providers. All network calls are lazy: no connection is made until `embed_*` is first invoked.
 
@@ -842,7 +989,7 @@ class Embedding(ABC):
     def embed_query(self, text: str) -> list[float]: ...
 ```
 
-### 15.1 OpenAIEmbedding (built-in)
+### 16.1 OpenAIEmbedding (built-in)
 
 Install with `pip install "aixon[openai-embedding]"`.
 
@@ -859,7 +1006,7 @@ embedding = OpenAIEmbedding("text-embedding-3-large", api_key_env="MY_OPENAI_KEY
 
 > Explanation: `embed_documents` embeds a batch of texts (for indexing); `embed_query` embeds a single query. By default the API key comes from `OPENAI_API_KEY`, but `api_key_env` lets you point at a different variable.
 
-### 15.2 Custom embedding
+### 16.2 Custom embedding
 
 ```python
 from aixon import Embedding
@@ -877,7 +1024,7 @@ class LocalEmbedding(Embedding):
 
 ---
 
-## 16. Connector: external microservice client
+## 17. Connector: external microservice client
 
 `Connector` is a base HTTP client for calling external microservices. It reads its base URL and auth token from environment variables and exposes typed `get` / `post` (sync) and `aget` / `apost` (async) methods.
 
@@ -897,7 +1044,7 @@ class InventoryConnector(Connector):
 
 > Explanation: declare which environment variables hold the base URL and the Bearer token, then implement domain methods on top of `self.get` / `self.post`. The class name must end with `Connector` (else `NamingError`). `httpx` is imported lazily, so defining a subclass works on a bare install; the error only surfaces when `get()` or `post()` is actually called.
 
-### 16.1 Connector API
+### 17.1 Connector API
 
 ```python
 class Connector:
@@ -912,9 +1059,9 @@ class Connector:
     async def apost(self, path: str, json=None, **kw) -> dict: ...
 ```
 
-> Explanation: `get` / `post` return parsed JSON dicts; non-2xx responses raise `httpx.HTTPStatusError`. Constructor keyword arguments (`base_url`, `auth_token`) take precedence over the environment variables, which is handy for tests.
+> Explanation: `get` / `post` return parsed JSON dicts; non-2xx responses raise `httpx.HTTPStatusError`. Constructor keyword arguments (`base_url`, `auth_token`) take precedence over the environment variables, which is handy for tests. `headers`/`timeout` passed as keyword arguments to `get`/`post`/`aget`/`apost` (hardened in 0.1.12) are MERGED with, not clobbered by, the connector's defaults: extra headers add to the connector's default headers, and an explicit per-call `timeout` overrides `self.timeout` for that one call only.
 
-### 16.2 Async connector
+### 17.2 Async connector
 
 ```python
 class InventoryConnector(Connector):
@@ -924,9 +1071,13 @@ class InventoryConnector(Connector):
         return await self.aget(f"/products/{product_id}/stock")  # httpx.AsyncClient, non-blocking
 ```
 
-> Explanation: `aget` / `apost` use `httpx.AsyncClient` so they do not block the event loop. Use them from an async tool or an agent's `ainvoke` path for real non-blocking I/O.
+> Explanation: `aget` / `apost` use a **pooled** `httpx.AsyncClient` (kept alive across calls for connection reuse, hardened in 0.1.12) so they do not block the event loop. Use them from an async tool or an agent's `ainvoke` path for real non-blocking I/O.
+>
+> **Loop affinity.** An `httpx.AsyncClient`'s connection pool is bound to the event loop that created it. Caching one instance forever would eventually break across separate `asyncio.run()` calls (each with its own loop) with an "Event loop is closed" error, so the pooled client is rebuilt automatically whenever the currently running loop differs from (or has closed since) the one that built it — safe to call `aget`/`apost` from a fresh loop without managing this yourself.
+>
+> **Closing.** Call `await connector.aclose()` to close the pooled async client explicitly (idempotent — safe to call even if no async call was ever made). The sync `get`/`post` methods don't pool a client, so they need no closing.
 
-### 16.3 Using a Connector inside a ToolAgent
+### 17.3 Using a Connector inside a ToolAgent
 
 ```python
 from aixon import LLM, ToolAgent
@@ -941,13 +1092,44 @@ class InventoryAgent(ToolAgent):
 
 > Explanation: a connector's methods are plain callables, so you pass them directly as tools; `ToolAgent` coerces them to LangChain tools. `HttpToolConnector` builds on `Connector` for HTTP-JSON tool servers.
 
+### 17.4 MCPConnector: MCP servers (the LLM drives the catalog)
+
+`MCPConnector` plugs an MCP server into an agent. The server publishes its tool catalog (`tools/list`) and `as_tools()` turns every entry into a neutral `AgentTool` whose `args_schema` is the tool's published JSON Schema. Install with `pip install "aixon[mcp]"` (the SDK import is lazy).
+
+```python
+from aixon import LLM, MCPConnector, ToolAgent
+
+class MetabaseMCPConnector(MCPConnector):
+    base_url_env   = "MCP_METABASE_URL"     # streamable-HTTP endpoint URL
+    auth_token_env = "MCP_METABASE_TOKEN"   # optional Bearer token
+
+class AnalystAgent(ToolAgent):
+    llm   = LLM("gpt-4o-mini")
+    tools = [*MetabaseMCPConnector().as_tools(exclude=["delete_card"])]
+```
+
+> Explanation: `MCPConnector` is the complement of `HttpToolConnector`, not its replacement. `HttpToolConnector` = the flow is decided in code (each typed method is a curated tool you shaped). `MCPConnector` = the flow is decided by the LLM (the model works from the schemas the server publishes) — plug-and-play for servers, often third-party, where writing method-per-tool makes no sense.
+
+### 17.5 MCPConnector API
+
+```python
+class MCPConnector(Connector):
+    def as_tools(self, include=None, exclude=None) -> list[AgentTool]: ...
+    def list_tools(self) -> list[dict]: ...          # {name, description, inputSchema}; cached per instance
+    async def alist_tools(self) -> list[dict]: ...
+    def call(self, name: str, **params) -> str: ...  # None params dropped
+    async def acall(self, name: str, **params) -> str: ...
+```
+
+> Explanation: transport is MCP streamable HTTP at `base_url` (the full endpoint URL, e.g. `https://host/mcp`); env-var resolution and the `*Connector` suffix rule come from `Connector`. `as_tools(include=...)` raises `AixonError` for a tool the server does not expose (a typo must not silently shrink the toolbox); `exclude` ignores unknown names. Discovery is cached per instance; execution opens one fresh session per call (stateless, no event-loop affinity). A result with `isError` raises `AixonError`; text content is joined for the LLM, `structuredContent` is the JSON fallback. The sync paths use `asyncio.run`, so from a running event loop use `alist_tools`/`acall` (the async agent path already does). A fully offline runnable demo lives in `examples/mcp_tools/`.
+
 ---
 
-## 17. Server: serving agents over an API
+## 18. Server: serving agents over an API
 
 aixon ships a FastAPI/ASGI server (`Server`) backed by a pluggable `ProtocolAdapter` layer. Adapters translate wire formats to neutral `Message` / `Chunk`; agents never see a wire type. Install with `pip install "aixon[server]"`.
 
-### 17.1 Quick start
+### 18.1 Quick start
 
 ```python
 from aixon import Server, autodiscover
@@ -974,7 +1156,7 @@ if __name__ == "__main__":
 
 > Explanation: exposing `app = server.app` lets a production ASGI runner (uvicorn or gunicorn) import `main:app` and run multiple workers. The `if __name__` block keeps `python main.py` working for local runs.
 
-### 17.2 Server class
+### 18.2 Server class
 
 ```python
 class Server:
@@ -991,7 +1173,7 @@ class Server:
 
 Built-in route, always public and never requiring auth: `GET /health` returns `{"status": "healthy", "server": "aixon", "timestamp": "..."}`. The GET model-list routes from each adapter are also always public.
 
-### 17.3 OpenAIAdapter (default)
+### 18.3 OpenAIAdapter (default)
 
 Full OpenAI-compatible wire format. Routes:
 
@@ -1025,22 +1207,44 @@ with client.chat.completions.stream(
         print(text, end="", flush=True)
 ```
 
-> Explanation: the request's `model` field is the agent name (or alias). The `api_key` only matters if you enabled server auth (section 17.6). The same client supports both non-streaming and streaming calls.
+> Explanation: the request's `model` field is the agent name (or alias). The `api_key` only matters if you enabled server auth (section 18.6). The same client supports both non-streaming and streaming calls.
 
 Server behaviors (OpenAI adapter):
 
 | Behavior | Detail |
 |---|---|
-| `usage` | With `tiktoken` installed (`aixon[tiktoken]`), responses carry `prompt_tokens` / `completion_tokens` / `total_tokens`, counted in the Server layer. Without it, `usage` is omitted (never an error). On a stream, add `"stream_options": {"include_usage": true}` for a final usage chunk before `[DONE]`. |
-| `thought_stream_mode` | Request-body field: `content` (default), `custom`, or `hidden` (see section 11.1). |
-| Per-request generation params | `temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop` are allow-listed and forwarded to the model, overriding the agent's class-level `LLM(...)` defaults for that request. |
+| `usage` (updated in 0.1.13) | On a non-streaming response, **the provider's real usage wins**: when the LLM call reports usage (surfaced on the neutral `Message.usage`, summed over every model turn for a `ToolAgent` run — a multi-step tool loop bills every turn, not just the final answer), the server reports it as-is. Only when the provider reported none does the server fall back to a `tiktoken` estimate (`pip install aixon[tiktoken]`), counted in the Server layer. Without `tiktoken` AND no provider usage, the response carries an empty usage object (`"usage": {}`) — never an error. Streaming keeps the estimate-only path (provider usage isn't accumulated mid-stream); add `"stream_options": {"include_usage": true}` for a final usage chunk before `[DONE]`. See section 19. |
+| `thought_stream_mode` | Request-body field: `custom` (default, since 0.1.9), `content`, or `hidden` (see section 12.1). The adapter's own default is configurable via `OpenAIAdapter(default_thought_mode=...)`; a per-request field always wins. |
+| Per-request generation params | `temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, and `reasoning_effort` (added in 0.1.15) are allow-listed and forwarded to the model, overriding the agent's class-level `LLM(...)` defaults for that request. `reasoning_effort` specifically overrides the class-level `reasoning=` knob (section 8.2) for that one build, translated as `{"effort": reasoning_effort}`. |
+| Client tools (added in 0.1.9, full round-trip in 0.1.14) | Agentic clients (editors, IDEs) may send OpenAI `tools` on the request; the adapter extracts them into `ParsedRequest.tools` and the Server publishes them per request via `aixon.runtime.client_tools` — agents that support client-executed tools read them with `aixon.runtime.current_client_tools()` and answer with `Message.tool_calls` (or `Chunk.tool_calls` on a stream). The adapter emits OpenAI-shaped `tool_calls` with `finish_reason: "tool_calls"`, and parses the follow-up history (`assistant.tool_calls` + `role: "tool"` results) back into neutral form. Agents that ignore client tools keep working unchanged. Runnable demo: `examples/client_tools/`. |
 | Non-blocking | The server awaits `agent.ainvoke` / `agent.astream`, so concurrent requests overlap instead of serializing. |
 
-### 17.4 AnthropicAdapter
+**Client tools over the Anthropic dialect too (0.1.14).** The client-tool round-trip also works over `/v1/messages`, using the SAME `Message.tool_calls` / `Chunk.tool_calls` neutral shapes. Outbound, `Message.tool_calls` becomes `tool_use` content blocks (`stop_reason: "tool_use"`); on a stream, each call opens a `content_block_start` (`type: "tool_use"`), one `input_json_delta` carrying the full arguments, and a `content_block_stop` — the final `message_delta` uses `stop_reason: "tool_use"` when the stream emitted one. Inbound, an `assistant` history message with `tool_use` blocks parses back into `Message.tool_calls`, and a `user` message with `tool_result` blocks parses into one `role: "tool"` neutral message per block (`tool_call_id` from `tool_use_id`).
 
-A thin proof-of-concept adapter serving Anthropic's structurally different wire format (`POST /v1/messages`, `GET /v1/models`). It exists to prove the neutral types are genuinely neutral: Anthropic's typed content blocks, `stop_reason` field, and named SSE events all translate through the same `Message` / `Chunk` boundary.
+**Limitation.** Anthropic extended thinking (`reasoning=` on a `claude-*` `LLM`, section 8.2) does not round-trip through a CLIENT-executed tool loop: the neutral boundary drops `thinking` content on the way back into LangChain messages, so a follow-up request carrying the client's tool result — but not the matching signed thinking block — gets rejected by Anthropic's API. This only affects tool calls the CLIENT executes across separate HTTP requests; a normal `ToolAgent` (aixon runs the tool loop in-process, within one request) is unaffected.
 
-### 17.5 Serving two dialects together
+### 18.4 AnthropicAdapter
+
+A production-grade dialect adapter serving Anthropic's Messages API from the SAME neutral `Message`/`Chunk` types the OpenAI adapter uses — proof that the neutral boundary is genuinely dialect-neutral, not OpenAI types in disguise. Served routes: `POST /v1/messages` (non-streaming and streaming) and `GET /v1/models`.
+
+Wire-format differences the adapter absorbs (agents see none of these): the system prompt is a separate top-level field (hoisted into a leading neutral `system` `Message`); the response body uses typed content blocks (`[{"type": "text", "text": "..."}]`); the stop-reason field is `stop_reason` instead of `finish_reason`; client-declared `tools` (`{name, description, input_schema}`) are normalized to the OpenAI wire shape before reaching `ParsedRequest.tools` (section 18.7), so `aixon.runtime.current_client_tools()` is dialect-neutral regardless of which adapter parsed the request.
+
+**Streaming envelope (production-grade since 0.1.13/0.1.14).** `AnthropicAdapter.open_stream` returns a stateful session (not the stateless default) that emits the real Anthropic SSE sequence a production SDK expects, tracking per-block indices across the whole request:
+
+```
+message_start
+content_block_start (index 0, "thinking" or "text")
+content_block_delta  (thinking_delta | text_delta) ...
+content_block_stop   (index 0)
+content_block_start (index 1, the other kind — only if the run interleaves)
+...
+message_delta  (stop_reason, usage.output_tokens)
+message_stop
+```
+
+Blocks are a true sequence, not a fixed thinking-then-text pair: whichever modality (reasoning vs. content) is NOT the currently open block closes the open one and opens a fresh block at the next index — indices are never reused. A mid-stream failure closes whatever block is currently open (`content_block_stop`) *before* the `error` event, so the client's SDK (which tracks block state) never sees a delta/stop against a block it doesn't know is still open; `message_stop` still follows to close the request. `usage.output_tokens` on the final `message_delta` reflects real Anthropic usage.
+
+### 18.5 Serving two dialects together
 
 Both built-in adapters declare `GET /v1/models`, which would collide. Give one a `mount_prefix`.
 
@@ -1058,7 +1262,7 @@ server.serve()
 
 > Explanation: `mount_prefix` is prepended to every route an adapter declares, so the two `/v1/models` routes no longer collide. If two adapters still claim the same method and path, the Server raises `AixonError` at app-build time instead of silently shadowing a route.
 
-### 17.6 Auth
+### 18.6 Auth
 
 Set `AUTH_API_KEY` to enable Bearer-token auth (unset means no auth). `/health` and model-list (GET) routes stay public; all others require `Authorization: Bearer <key>`. Multiple keys are comma-separated.
 
@@ -1070,7 +1274,7 @@ AUTH_API_KEY=my-secret-key aixon serve
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="my-secret-key")
 ```
 
-### 17.7 Custom adapter
+### 18.7 Custom adapter
 
 Implement `ProtocolAdapter` to support any wire format.
 
@@ -1111,15 +1315,75 @@ server.serve()
 ```python
 @dataclass
 class ParsedRequest:
-    model:    str            # requested agent name / alias
+    model:    str                  # requested agent name / alias
     messages: list[Message]
-    params:   dict           # temperature, max_tokens, stream, etc.
+    params:   dict                 # temperature, max_tokens, etc. (transport fields already stripped)
     stream:   bool
+    tools:    list[dict] | None = None
 ```
+
+`tools` (added in 0.1.9, dialect-neutral shape guaranteed since 0.1.13) carries the tool definitions the CLIENT declared on the request, always normalized to the OpenAI wire shape (`{"type": "function", "function": {"name", "description", "parameters"}}`) regardless of which adapter parsed the request, or `None` if the client sent none.
+
+### 18.8 Errors
+
+Every chat route returns a dialect-appropriate JSON error body (never a raw traceback) with a matching HTTP status, hardened in 0.1.12:
+
+| Status | When | Body shape |
+|---|---|---|
+| `400` | Request body isn't a JSON object, or `adapter.parse_request` raises (e.g. a malformed `messages` entry or unknown role). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
+| `404` | `model` doesn't resolve to a registered agent (`AgentNotFoundError`). | `{"error": {"message": ..., "type": "model_not_found"}}` |
+| `500` | The agent raised while running (non-streaming). The real exception is logged server-side only; the client gets a generic message — `str(exc)` never leaks. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
+
+**Mid-stream failures** cannot use an HTTP status — the `200`/`text/event-stream` headers already went out. Instead, once streaming has started, an exception from `agent.astream` is caught and turned into one final dialect-shaped SSE error event (never propagated into Starlette, which would otherwise abort the response mid-stream) — the full exception goes to the server log, never to the client:
+
+- OpenAI: `data: {"error": {"message": "The server encountered an error while generating the response.", "type": "server_error"}}\n\n`
+- Anthropic: `event: error\ndata: {"type": "error", "error": {"type": "api_error", "message": "..."}}\n\n`, with any currently-open content block closed first (`content_block_stop`) so the client's SDK never sees a delta/stop against a block it doesn't know is still open.
+
+The stream's terminal event (`[DONE]` / `message_stop`) is still emitted after the error event either way. The OpenAI adapter also accepts a `developer` role (mapped the same as `system`) instead of rejecting it as an unknown role.
 
 ---
 
-## 18. CLI: the aixon command
+## 19. Usage tracking: Message.usage and the aixon.usage module
+
+Added across 0.1.13/0.1.14. aixon tracks REAL provider token usage, not just an estimate, and sums it correctly across every kind of multi-turn run.
+
+**`Message.usage`** (section 5) is `Optional[dict[str, int]]` in OpenAI shape (`{"prompt_tokens", "completion_tokens", "total_tokens"}`). On a non-streaming call, the provider's reported usage wins whenever the LLM reports it; `None` means the provider reported none, and a consumer (like the Server, section 18.3) may fall back to a `tiktoken` estimate. Streaming keeps the estimate-only path (provider usage isn't accumulated mid-stream token-by-token).
+
+**Per-agent-type aggregation:**
+
+| Agent type | What gets summed |
+|---|---|
+| `ToolAgent` | Every model turn of the tool-calling loop (a multi-step run bills every turn, not just the final answer). |
+| `Orchestrator` | Every model turn in the whole run: the Tier-1 supervisor's routing calls PLUS every worker turn, or every Tier-2 node's turn (section 13.8). |
+| `ReflectiveAgent` | Every worker attempt PLUS every judge call across all rounds (section 10). |
+
+**`aixon.usage` module** (not re-exported from top-level `aixon` — import from `aixon.usage`):
+
+```python
+from aixon.usage import merge_usage, UsageAccumulator, usage_scope, add_usage, current_usage_accumulator
+
+# merge_usage: sum two neutral OpenAI-shaped usage dicts.
+# A side reporting no usage (None or an empty dict) contributes zero and does NOT
+# erase a total already accumulated from the other side. Only when NEITHER side
+# reported anything does the merge stay None (so a fallback estimate still applies).
+merged = merge_usage({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}, None)
+
+# usage_scope(): a context manager that activates a fresh UsageAccumulator for
+# the duration of one run. A nested usage_scope() (e.g. a nested Orchestrator
+# run invoked as a worker) gets its own fresh accumulator and does NOT leak its
+# turns into the outer total; exiting restores the outer accumulator (LIFO),
+# mirroring aixon.reasoning's ReasoningChannel nesting behavior.
+with usage_scope() as accumulator:
+    add_usage({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})  # e.g. a supervisor routing call
+    # ... run workers, which call add_usage(...) themselves via the same mechanism ...
+    total = accumulator.total   # merged usage dict, or None if nothing was ever added
+```
+
+`UsageAccumulator` is thread-safe (guarded by a `threading.Lock`): LangGraph runs fan-out nodes of one superstep on real threads, so parallel worker nodes call `add()` concurrently against ONE accumulator, and the read-merge-write must be atomic or a preemption mid-window silently drops a thread's turn from the total. `add_usage` is a no-op when no `usage_scope()` is active (mirrors `emit_reasoning`'s no-op-when-inactive contract), so a call site can call it unconditionally without knowing whether it's inside a scope. Usage totals are never mutated in place on the caller's `Message` — they are copied via `dataclasses.replace`, so a worker's returned `Message` object is never silently altered out from under the caller.
+
+---
+
+## 20. CLI: the aixon command
 
 Install with `pip install "aixon[cli]"`. Commands:
 
@@ -1132,7 +1396,7 @@ Commands:
   serve  Start the API server
 ```
 
-### 18.1 aixon list
+### 20.1 aixon list
 
 ```bash
 aixon list                      # default package: agents
@@ -1149,7 +1413,7 @@ supportorchestrator  [Orchestrator]  Routes support tickets to the right special
 
 > Explanation: each line is `name  [Type]  description`. Retrievers and connectors do not appear here because they are not agents.
 
-### 18.2 aixon chat
+### 20.2 aixon chat
 
 ```bash
 aixon chat                              # in-process (default)
@@ -1159,7 +1423,7 @@ aixon chat --url http://localhost:8000  # remote, against a running `aixon serve
 
 > Explanation: in-process mode imports and invokes agents directly (no server needed); remote mode uses an OpenAI client against a running server's `/v1/models` and `/v1/chat/completions`. Reasoning is shown dimmed, content normally. In-session commands: `/menu` (back to selection, resets history), `/exit` (quit), and Ctrl+C (interrupt generation; press again at an empty prompt to return to the menu).
 
-### 18.3 aixon new
+### 20.3 aixon new
 
 ```bash
 aixon new my-agents
@@ -1181,7 +1445,7 @@ my-agents/
 
 > Explanation: `aixon new` scaffolds a ready-to-run consumer project. Drop new `.py` files into `agents/` and `autodiscover` registers them automatically; there is no list to maintain. The generated `pyproject.toml` pins `aixon[server,cli]`.
 
-### 18.4 aixon serve
+### 20.4 aixon serve
 
 ```bash
 aixon serve                              # 0.0.0.0:8000, package "agents"
@@ -1190,11 +1454,11 @@ aixon serve --package myagents           # or -p myagents
 AUTH_API_KEY=my-secret-key aixon serve   # with auth
 ```
 
-> Explanation: starts uvicorn and mounts the OpenAI adapter at `/v1`. Requires `aixon[server]`. To mount additional adapters, construct `Server(adapters=[...])` in code instead (section 17.5).
+> Explanation: starts uvicorn and mounts the OpenAI adapter at `/v1`. Requires `aixon[server]`. To mount additional adapters, construct `Server(adapters=[...])` in code instead (section 18.5).
 
 ---
 
-## 19. Auto-registration, the Registry, and autodiscover
+## 21. Auto-registration, the Registry, and autodiscover
 
 Agents self-register at class-definition time. `autodiscover(package)` imports every non-underscore module in a package, which triggers each class body, and therefore each registration, with no explicit list to maintain.
 
@@ -1218,7 +1482,7 @@ registry.resolve("planner") # by name or alias
 
 ---
 
-## 20. Naming conventions (suffix enforcement)
+## 22. Naming conventions (suffix enforcement)
 
 Every concrete subclass of a base type must end with the declared suffix. The check runs at import time (in `__init_subclass__`), before the server starts, so a mis-named class never reaches runtime.
 
@@ -1227,8 +1491,10 @@ Every concrete subclass of a base type must end with the declared suffix. The ch
 | `LLMAgent` | `Agent` | `PlannerAgent` | `Planner`, `PlannerLLM` |
 | `ToolAgent` | `Agent` | `ResearchAgent` | `Research`, `ResearchTool` |
 | `Orchestrator` | `Orchestrator` | `SupportOrchestrator` | `Support`, `SupportAgent` |
+| `ReflectiveAgent` | `Agent` | `ReviewedWriterAgent` | `ReviewedWriter` |
 | `Retriever` | `Retriever` | `LibraryRetriever` | `Library` |
 | `Connector` | `Connector` | `CRMConnector` | `CRM` |
+| `MCPConnector` | `Connector` | `MetabaseMCPConnector` | `Metabase` |
 
 Abstract intermediate classes opt out with `abstract=True` and are never registered; their concrete subclasses are still validated.
 
@@ -1245,7 +1511,7 @@ class BillingAgent(BaseSupportAgent):   # valid: ends with "Agent"
 
 ---
 
-## 21. Async model (ainvoke and astream)
+## 23. Async model (ainvoke and astream)
 
 Every agent exposes async methods. Sync is the default; async is purely additive, so existing sync code is untouched and you opt into async only where you want it.
 
@@ -1269,13 +1535,15 @@ Key facts:
 
 ---
 
-## 22. Environment variables
+## 24. Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | required for OpenAI | API key for the OpenAI provider. |
 | `ANTHROPIC_API_KEY` | required for Anthropic | API key for the Anthropic provider. |
 | `GOOGLE_API_KEY` | required for Google | API key for the Google (Gemini) provider. |
+| `ZAI_API_KEY` | required for z.AI | API key for the z.AI (GLM) provider, added in 0.1.9. Does NOT fall back to `OPENAI_API_KEY` (0.1.12) — building the model raises `AixonError` instead if unset. |
+| `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4` | Overrides the z.AI endpoint. |
 | `AUTH_API_KEY` | disabled | Bearer token for the server. Unset means no auth. Multiple keys comma-separated. |
 | `LOG_LEVEL` | `INFO` | Framework log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 
@@ -1283,7 +1551,7 @@ Vendor-retriever variables: `TAVILY_API_KEY`, `RAGIE_API_KEY`, `WEAVIATE_HOST`, 
 
 ---
 
-## 23. Exception hierarchy
+## 25. Exception hierarchy
 
 Every error subclasses `AixonError` and carries a human-readable `.message`.
 
@@ -1299,7 +1567,7 @@ Every error subclasses `AixonError` and carries a human-readable `.message`.
 
 ---
 
-## 24. Glossary
+## 26. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -1307,36 +1575,49 @@ Every error subclasses `AixonError` and carries a human-readable `.message`.
 | LLMAgent | Agent that is one direct LLM call (no tools). |
 | ToolAgent | Agent with an LLM plus a tool-calling loop (LangGraph `create_agent`). |
 | Orchestrator | Agent that coordinates multiple agents via a graph (three tiers). |
+| ReflectiveAgent | Agent that wraps a worker in a generate -> judge -> retry evaluator-optimizer loop (added in 0.1.7). |
 | Neutral boundary | The rule that agents speak only `Message` / `Chunk`; no provider or wire type crosses in. |
-| LLM | A lazy, declarative handle to a chat model; hides the provider SDK. |
+| LLM | A lazy, declarative handle to a chat model; hides the provider SDK. `LLM(model, reasoning=...)` (0.1.15) turns on native extended thinking. |
 | Provider | Pluggable backend that builds a LangChain chat model for a given model name. |
-| Retriever | Context-search tool (`search` / `asearch` / `write` / `as_tool`). |
+| Reasoning knob | `LLM(model, reasoning=...)`: `None`/`False` off, `True`/`dict` on, translated per provider into that provider's native thinking mode (section 8.2). |
+| Retriever | Context-search tool (`search` / `asearch` / `write` / `awrite` / `as_tool`). |
 | Embedding | Vector-embedding provider (`embed_documents` / `embed_query`). |
-| Connector | HTTP client base for external microservices (`get` / `post` / `aget` / `apost`). |
+| Connector | HTTP client base for external microservices (`get` / `post` / `aget` / `apost` / `aclose`). |
+| MCPConnector | `Connector` subclass that turns an MCP server's published tool catalog into `AgentTool`s via `as_tools()`. |
 | AgentTool | Neutral tool descriptor returned by `Agent.as_tool()` and `Retriever.as_tool()`. |
-| ReasoningChannel | Contextvars channel through which `emit_reasoning` lines and tool labels flow. |
+| ReasoningChannel | Contextvars channel through which `emit_reasoning` lines, tool labels, and (since 0.1.15) model reasoning flow. |
+| UsageAccumulator | Thread-safe accumulator (`aixon.usage`) summing token usage across every model turn of one run (section 19). |
 | ProtocolAdapter | Translates a wire format to and from neutral types; mounted on the `Server`. |
 | Registry | Process-global map of registered agents (`get_registry()`). |
 | autodiscover | Imports every module in a package, triggering self-registration. |
 | TypeAccess | Retriever access mode: `READ`, `WRITE`, or `ALL`. |
-| thought_stream_mode | Server option for how reasoning reaches the wire (`content` / `custom` / `hidden`). |
+| thought_stream_mode | Server option for how reasoning reaches the wire (`custom` default / `content` / `hidden`). |
 | END | Sentinel from `aixon.state` marking a terminal node in a Tier-2 graph. |
 
 ---
 
-## 25. Frequently asked questions
+## 27. Frequently asked questions
 
 **How does an agent get registered? Do I call a register function?**
 No. An agent registers itself when Python evaluates its class body. Call `autodiscover("agents")` to import all modules in a package and trigger every registration. There is no list to maintain.
 
 **Which agent type should I use?**
-`LLMAgent` for a single LLM call with no tools. `ToolAgent` for an LLM that calls tools, retrievers, or other agents in a loop. `Orchestrator` to coordinate multiple agents via a graph.
+`LLMAgent` for a single LLM call with no tools. `ToolAgent` for an LLM that calls tools, retrievers, or other agents in a loop. `Orchestrator` to coordinate multiple agents via a graph. `ReflectiveAgent` (section 10) to wrap any of the above in a generate -> judge -> retry review loop when a single pass isn't reliable enough.
 
 **Why did I get a NamingError at import time?**
-A concrete subclass name must end with its base's suffix: `Agent` for `LLMAgent` and `ToolAgent`, `Orchestrator` for `Orchestrator`, `Retriever` for `Retriever`, `Connector` for `Connector`. Rename the class, or pass `abstract=True` for an intermediate base.
+A concrete subclass name must end with its base's suffix: `Agent` for `LLMAgent`, `ToolAgent`, and `ReflectiveAgent`, `Orchestrator` for `Orchestrator`, `Retriever` for `Retriever`, `Connector` (and `MCPConnector`) for `Connector`. Rename the class, or pass `abstract=True` for an intermediate base.
 
 **How do I switch LLM providers?**
-Change the `LLM(...)` model name (the provider is inferred from the prefix: `gpt-*` to openai, `claude-*` to anthropic, `gemini-*` to google), or pass `provider=` explicitly. No agent or orchestrator code changes, because of the neutral boundary.
+Change the `LLM(...)` model name (the provider is inferred from the prefix: `gpt-*` to openai, `claude-*` to anthropic, `gemini-*` to google, `glm*` to z.AI), or pass `provider=` explicitly. No agent or orchestrator code changes, because of the neutral boundary.
+
+**How do I turn on extended thinking / reasoning?**
+`LLM(model, reasoning=True)` (medium effort) or `LLM(model, reasoning={"effort": "high"})` / `{"budget_tokens": ...}` (section 8.2). Anthropic and Gemini return real reasoning text on `Message.reasoning`/`Chunk.reasoning`; OpenAI's API never returns raw chain-of-thought (the knob only improves the answer); GLM enables thinking server-side but the installed `langchain-openai` doesn't yet surface the reasoning text. A per-request `reasoning_effort` field overrides the class-level knob for one call.
+
+**Do I need to instrument anything to get token usage right?**
+No. `Message.usage` (section 19) carries the provider's real usage automatically when the provider reports it, summed correctly across `ToolAgent` tool-call turns, `Orchestrator` supervisor + worker turns, and `ReflectiveAgent` worker + judge turns. Install `aixon[tiktoken]` only as a fallback estimate for providers/paths that don't report usage.
+
+**Can a client (an editor/IDE) execute its own tools instead of aixon running them?**
+Yes — declare OpenAI-shaped `tools` on the request; the Server reads them via `aixon.runtime.current_client_tools()` and an agent that supports this answers with `Message.tool_calls` / `Chunk.tool_calls` (section 18.3). This works over both the OpenAI and the Anthropic (`/v1/messages`) dialects. One limitation: Anthropic extended thinking does not round-trip through a client-executed tool loop spanning multiple HTTP requests (section 8.2).
 
 **Can an agent call another agent?**
 Yes. `other_agent.as_tool()` returns an `AgentTool` you put in `ToolAgent.tools`, or you use an agent class as a node or worker in an `Orchestrator`.
@@ -1354,7 +1635,7 @@ Composition cycles (A uses B as a tool and B uses A) are detected at import time
 Install `aixon[tiktoken]`. The server then reports `prompt_tokens` / `completion_tokens` / `total_tokens`. On a stream, add `"stream_options": {"include_usage": true}`.
 
 **How is reasoning (thinking) shown to clients?**
-Via `thought_stream_mode` on the request: `content` (default; a `<think>...</think>` block inside content), `custom` (a `delta.reasoning` field), or `hidden`.
+Via `thought_stream_mode` on the request: `custom` (default since 0.1.9; a separate `delta.reasoning` field), `content` (a `<think>...</think>` block inside content, opt-in for chat UIs), or `hidden`. The adapter-level default is configurable via `OpenAIAdapter(default_thought_mode=...)`.
 
 **Is async required?**
 No. Sync `invoke` / `stream` is the default and fully supported. `ainvoke` / `astream` are additive; the server uses them so concurrent requests do not serialize.
@@ -1367,11 +1648,11 @@ Gemini returns message content as a list of structured parts (unlike OpenAI's pl
 
 ---
 
-## 26. Complete worked example: Acme Support Assistant
+## 28. Complete worked example: Acme Support Assistant
 
 A runnable customer-support assistant that routes each request to the right specialist and serves it over an OpenAI-compatible API, from one codebase. It exercises the full stack (`Provider` to `LLM` to `LLMAgent` / `ToolAgent` to `Orchestrator` to `Server`, plus `Retriever`, `Embedding`, and `Connector`) and runs with no API key and no external services: a bundled offline `demo` provider answers, an in-memory FAQ backs the retriever, and the orders connector falls back to a fixture. Set `OPENAI_API_KEY` and the same code uses `gpt-4o-mini` and OpenAI embeddings instead, with no other change.
 
-### 26.1 Architecture
+### 28.1 Architecture
 
 ```mermaid
 flowchart TD
@@ -1387,7 +1668,7 @@ flowchart TD
 
 > Explanation: a request reaches the `SupportOrchestrator`, a Tier-2 graph. Its entry node `triage` is an `LLMAgent` that classifies the message into a single word. The `route_triage` method reads that word and routes to either the `orders` specialist (a `ToolAgent` backed by a `Connector`) or the `knowledge` specialist (a `ToolAgent` backed by a `Retriever`). Both specialists are terminal nodes, so the chosen specialist's answer is the orchestrator's answer.
 
-### 26.2 Project layout
+### 28.2 Project layout
 
 ```
 support_assistant/
@@ -1404,7 +1685,7 @@ support_assistant/
     support.py                 # Orchestrator (public entry point)
 ```
 
-### 26.3 llm_config.py: one place to choose the model
+### 28.3 llm_config.py: one place to choose the model
 
 ```python
 import os
@@ -1422,7 +1703,7 @@ def make_llm(*, temperature: float = 0.2) -> LLM:
 
 > Explanation: every agent calls `make_llm()` in its class body instead of hard-coding a model. When `OPENAI_API_KEY` is set, all agents use `gpt-4o-mini`; otherwise they fall back to the offline `demo` provider. Swapping the model in one place changes the whole system.
 
-### 26.4 agents/triage.py: an LLMAgent (no tools)
+### 28.4 agents/triage.py: an LLMAgent (no tools)
 
 ```python
 from aixon import LLMAgent
@@ -1442,7 +1723,7 @@ class TriageAgent(LLMAgent):
 
 > Explanation: a pure `LLMAgent` (no tools) that outputs one classification word. It is `hidden`, so it does not show up in the public model list; only the orchestrator is a public entry point. `temperature=0.0` keeps the classification deterministic.
 
-### 26.5 connectors/orders.py: a Connector (HTTP, fixture fallback)
+### 28.5 connectors/orders.py: a Connector (HTTP, fixture fallback)
 
 ```python
 import re
@@ -1475,7 +1756,7 @@ def extract_order_id(text: str) -> str:
 
 > Explanation: `lookup_order` issues a real HTTP GET when `ORDERS_API_URL` is set, and otherwise returns an in-memory fixture, so the example runs with zero infrastructure. `alookup_order` is the non-blocking async variant. Point the env var at a real service and the same method calls it, with no code change.
 
-### 26.6 agents/orders_agent.py: a ToolAgent with a plain-callable tool and emit_reasoning
+### 28.6 agents/orders_agent.py: a ToolAgent with a plain-callable tool and emit_reasoning
 
 ```python
 from aixon import ToolAgent, emit_reasoning
@@ -1511,7 +1792,7 @@ class OrdersAgent(ToolAgent):
 
 > Explanation: `order_status` is a plain function used as a tool (its docstring is the tool description the model reads). It calls `emit_reasoning(...)` so the lookup step shows up as reasoning in `stream()` and on `Message.reasoning` from `invoke()`. The agent loops: the model calls the tool, gets the result, and writes the final answer.
 
-### 26.7 knowledge/faq_retriever.py: a Retriever (embedding search, read-only)
+### 28.7 knowledge/faq_retriever.py: a Retriever (embedding search, read-only)
 
 ```python
 import math
@@ -1551,7 +1832,7 @@ class KnowledgeRetriever(Retriever):
 
 > Explanation: a read-only `Retriever` that embeds the FAQ and the query, then ranks by cosine similarity. It uses `OpenAIEmbedding` when a key is present and an offline `DemoEmbedding` otherwise. The document vectors are computed lazily on the first search and cached, so importing the module is cheap and needs no key.
 
-### 26.8 agents/knowledge_agent.py: a ToolAgent using a retriever via as_tool()
+### 28.8 agents/knowledge_agent.py: a ToolAgent using a retriever via as_tool()
 
 ```python
 from aixon import ToolAgent
@@ -1579,7 +1860,7 @@ class KnowledgeAgent(ToolAgent):
 
 > Explanation: the retriever is exposed as a tool named `faq_search` returning the top 3 hits. The model calls it, then synthesizes a concise answer from the results. The agent is `hidden` because it is reached through the orchestrator.
 
-### 26.9 agents/support.py: a Tier-2 Orchestrator (the public entry point)
+### 28.9 agents/support.py: a Tier-2 Orchestrator (the public entry point)
 
 ```python
 from aixon import Orchestrator
@@ -1604,7 +1885,7 @@ class SupportOrchestrator(Orchestrator):
 
 > Explanation: this is the only public agent (the workers are hidden). It is reachable as `support`, `assistant`, or `help` (its aliases). `entry = "triage"` runs the classifier first; `route_triage` reads the one-word verdict and dispatches to the matching specialist. The specialists have no outgoing edge, so they are terminal and their reply is the final answer.
 
-### 26.10 main.py: autodiscover and serve
+### 28.10 main.py: autodiscover and serve
 
 ```python
 import os
@@ -1621,7 +1902,7 @@ if __name__ == "__main__":
 
 > Explanation: `autodiscover("agents")` imports every module under `agents/`, which registers the orchestrator and the (hidden) workers, and transitively imports the provider, retriever, and connector. `Server()` mounts the OpenAI adapter; `serve` starts it.
 
-### 26.11 Run and call it
+### 28.11 Run and call it
 
 ```bash
 cd support_assistant
@@ -1666,14 +1947,14 @@ reply = await get_registry().resolve("support").ainvoke(
 
 ---
 
-## 27. Quick reference card (aixon 0.1.1)
+## 29. Quick reference card (aixon 0.1.15)
 
 ```python
 # Imports
 from aixon import (
-    LLM, LLMAgent, ToolAgent, Orchestrator, Agent, AgentTool,
+    LLM, LLMAgent, ToolAgent, Orchestrator, ReflectiveAgent, Agent, AgentTool,
     Message, Chunk, Role,
-    Retriever, TypeAccess, Embedding, OpenAIEmbedding, Connector, HttpToolConnector,
+    Retriever, TypeAccess, Embedding, OpenAIEmbedding, Connector, HttpToolConnector, MCPConnector,
     TavilyRetriever, RagieRetriever, WeaviateRetriever,
     autodiscover, get_registry, reset_registry,
     emit_reasoning, reasoning_channel,
@@ -1681,6 +1962,7 @@ from aixon import (
     AixonError, NamingError, RegistrationError, AgentNotFoundError, CompositionCycleError,
 )
 from aixon.state import END, GraphState
+from aixon.usage import merge_usage, UsageAccumulator, usage_scope, add_usage  # not top-level
 
 # Minimal agent
 class HelloAgent(LLMAgent):
@@ -1699,15 +1981,20 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 |---|---|
 | One LLM call | `LLMAgent` (`llm`, `prompt`) |
 | LLM plus tools loop | `ToolAgent` (`llm`, `prompt`, `tools`, `max_iterations`, `tool_call_label`) |
+| Evaluator-optimizer review loop | `ReflectiveAgent` (`agent`, `judge_llm`, `judge_rubric`, `max_rounds`) |
 | Coordinate agents | `Orchestrator` (Tier 1: `supervisor` + `agents`; Tier 2: `nodes` + `entry` + `route_*`; Tier 3: `build_graph`) |
-| Context search | `Retriever` (`search` / `asearch` / `write` / `as_tool`, `TypeAccess`) |
+| Extended thinking / reasoning | `LLM(model, reasoning=True \| {"effort": ...} \| {"budget_tokens": ...})` |
+| Context search | `Retriever` (`search` / `asearch` / `write` / `awrite` / `as_tool`, `TypeAccess`) |
 | Vector embeddings | `Embedding` / `OpenAIEmbedding` |
-| HTTP microservice | `Connector` (`get` / `post` / `aget` / `apost`) |
+| HTTP microservice | `Connector` (`get` / `post` / `aget` / `apost` / `aclose`) |
+| MCP server as tools | `MCPConnector` (`as_tools()`, `pip install aixon[mcp]`) |
 | Vendor RAG | `TavilyRetriever` / `RagieRetriever` / `WeaviateRetriever` |
 | Serve over HTTP | `Server` plus `OpenAIAdapter` / `AnthropicAdapter` / custom `ProtocolAdapter` |
-| Reasoning to client | `emit_reasoning` plus `thought_stream_mode` (`content` / `custom` / `hidden`) |
-| Token usage | install `aixon[tiktoken]` |
+| Reasoning to client | `emit_reasoning` plus `thought_stream_mode` (`custom` default / `content` / `hidden`) |
+| Client-executed tools | request `tools` -> `aixon.runtime.current_client_tools()` -> `Message.tool_calls` / `Chunk.tool_calls` |
+| Token usage (real, provider-reported) | `Message.usage`, summed automatically per agent type (section 19) |
+| Token usage (estimate fallback) | install `aixon[tiktoken]` |
 
 ---
 
-End of the aixon technical reference, framework version 0.1.1.
+End of the aixon technical reference, framework version 0.1.15.
