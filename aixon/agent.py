@@ -44,6 +44,13 @@ class Agent(ABC):
     aliases: list[str] = []
     hidden: bool = False
     owned_by: str = "aixon"
+    # Per-agent default for the wire thought mode ("custom" | "content" |
+    # "hidden"). None inherits the adapter's default. Precedence at the server
+    # boundary: request ``thought_stream_mode`` > agent ``thought_mode`` >
+    # adapter ``default_thought_mode``. Lets programmatic agents (protocol
+    # parsers, plugins) pin "hidden" without changing the server-wide default
+    # that chat UIs rely on.
+    thought_mode: str | None = None
 
     # Required class-name suffix; abstract subtypes may override (e.g. "Orchestrator").
     _suffix: str = "Agent"

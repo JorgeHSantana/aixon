@@ -134,10 +134,25 @@ class OpenAIAdapter(ProtocolAdapter):
         )
 
     # --- outbound (non-stream) ------------------------------------------
-    def format_response(self, *, model: str, message: Message, usage: dict) -> dict:
+    def format_response(self, *, model: str, message: Message, usage: dict,
+                        params: dict | None = None) -> dict:
         msg: dict = {"role": "assistant", "content": message.content}
-        if message.reasoning is not None:
-            msg["reasoning"] = message.reasoning
+        # Non-stream honors only an EXPLICIT mode (request param, or the
+        # agent-level thought_mode the Server injected into params). The
+        # adapter-wide default_thought_mode is a STREAMING default and must
+        # not change the historical non-stream shape (reasoning as a separate
+        # field, content untouched).
+        mode = (params or {}).get("thought_stream_mode")
+        if message.reasoning is not None and mode != "hidden":
+            if mode == "content" and not message.tool_calls:
+                msg["content"] = (
+                    "<think>\n" + message.reasoning + "\n</think>\n"
+                    + (message.content or "")
+                )
+            else:
+                # custom/None — and "content" on a tool-calls turn, where the
+                # tool_calls branch below owns the content field.
+                msg["reasoning"] = message.reasoning
         finish_reason = "stop"
         if message.tool_calls:
             # OpenAI semantics: content is null on a tool-calls-only turn.

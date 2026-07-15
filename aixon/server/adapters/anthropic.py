@@ -167,7 +167,10 @@ class AnthropicAdapter(ProtocolAdapter):
         )
 
     # --- outbound (non-stream) ------------------------------------------
-    def format_response(self, *, model: str, message: Message, usage: dict) -> dict:
+    def format_response(self, *, model: str, message: Message, usage: dict,
+                        params: dict | None = None) -> dict:
+        # ``params`` unused: the Anthropic dialect has native thinking blocks,
+        # not the OpenAI thought_stream_mode presentation knob.
         out_usage = {}
         if "prompt_tokens" in usage or "completion_tokens" in usage:
             out_usage = {

@@ -101,8 +101,14 @@ class ProtocolAdapter(ABC):
         the matched route, so one adapter can serve several paths."""
 
     @abstractmethod
-    def format_response(self, *, model: str, message: Message, usage: dict) -> dict:
-        """Wrap a final neutral ``Message`` in the dialect's non-stream envelope."""
+    def format_response(self, *, model: str, message: Message, usage: dict,
+                        params: dict | None = None) -> dict:
+        """Wrap a final neutral ``Message`` in the dialect's non-stream envelope.
+
+        ``params`` are the request's passthrough knobs (``ParsedRequest.params``)
+        so dialects with per-request presentation modes (e.g. OpenAI's
+        ``thought_stream_mode``) can honor them; dialects without such modes
+        ignore the argument."""
 
     @abstractmethod
     def format_stream_chunk(self, *, model: str, chunk: Chunk) -> str:
