@@ -92,3 +92,33 @@ def test_tap_never_records_authorization(client, tmp_path, monkeypatch):
     raw = "".join(f.read_text() for f in tmp_path.glob("*.jsonl"))
     assert "super-secret-token" not in raw
     assert "uthorization" not in raw
+
+
+# --- filtro por agente (reduz blast radius em servidor compartilhado) ------
+
+def test_tap_agent_filter_records_only_named_agents(tmp_path, monkeypatch):
+    make_echo("alpha")
+    make_echo("beta")
+    client = TestClient(Server(adapters=[OpenAIAdapter()]).app)
+    monkeypatch.setenv("AIXON_DEBUG_REQUESTS", "alpha")
+    monkeypatch.setenv("AIXON_DEBUG_REQUESTS_DIR", str(tmp_path))
+    for model in ("alpha", "beta", "alpha"):
+        r = client.post("/v1/chat/completions", json={
+            "model": model, "stream": False,
+            "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 200
+    recs = records(tmp_path)
+    assert [r["agent"] for r in recs] == ["alpha", "alpha"]
+
+
+def test_tap_agent_filter_accepts_comma_list_with_spaces(tmp_path, monkeypatch):
+    make_echo("alpha")
+    make_echo("beta")
+    client = TestClient(Server(adapters=[OpenAIAdapter()]).app)
+    monkeypatch.setenv("AIXON_DEBUG_REQUESTS", "alpha, beta")
+    monkeypatch.setenv("AIXON_DEBUG_REQUESTS_DIR", str(tmp_path))
+    for model in ("alpha", "beta"):
+        client.post("/v1/chat/completions", json={
+            "model": model, "stream": False,
+            "messages": [{"role": "user", "content": "hi"}]})
+    assert sorted(r["agent"] for r in records(tmp_path)) == ["alpha", "beta"]

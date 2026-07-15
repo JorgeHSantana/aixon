@@ -44,8 +44,18 @@ def _valid_token(raw: str) -> bool:
 # recorded — Authorization can't leak by construction. Env is checked per
 # request (like auth) so tests/hot-reload can toggle it without a rebuild.
 
-def _tap_enabled() -> bool:
-    return os.getenv("AIXON_DEBUG_REQUESTS", "").strip().lower() in ("1", "true", "yes")
+def _tap_enabled(agent_name: str) -> bool:
+    """Truthy values ("1"/"true"/"yes") record EVERY agent; anything else is a
+    comma-separated allowlist of agent names — only those are recorded. The
+    allowlist keeps the blast radius contained on shared servers: agents
+    handling sensitive conversations never touch the disk while one specific
+    integration is under diagnosis."""
+    raw = os.getenv("AIXON_DEBUG_REQUESTS", "").strip()
+    if not raw:
+        return False
+    if raw.lower() in ("1", "true", "yes"):
+        return True
+    return agent_name in {n.strip() for n in raw.split(",") if n.strip()}
 
 
 def _tap_write(record: dict) -> None:
@@ -263,7 +273,7 @@ class Server:
             if agent_mode and "thought_stream_mode" not in (pr.params or {}):
                 pr.params = {**(pr.params or {}), "thought_stream_mode": agent_mode}
 
-            tap = _tap_enabled()
+            tap = _tap_enabled(agent.name)
 
             if pr.stream:
                 session = adapter.open_stream(model=model, request=pr)
