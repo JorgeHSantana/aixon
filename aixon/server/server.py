@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import datetime as dt
 import hmac
+import json
 import os
+from pathlib import Path
 from typing import Optional
 
 from aixon.exceptions import AgentNotFoundError, AixonError
@@ -33,6 +35,32 @@ _log = Logger("aixon.server")
 def _valid_token(raw: str) -> bool:
     keys = [k.strip() for k in os.getenv("AUTH_API_KEY", "").split(",") if k.strip()]
     return bool(raw) and any(hmac.compare_digest(raw, k) for k in keys)
+
+
+# --- debug tap (AIXON_DEBUG_REQUESTS) --------------------------------------
+# Opt-in diagnostic recorder for client integrations: one JSONL record per
+# chat POST with the verbatim body, the resolved agent and the response (the
+# non-stream payload, or the raw SSE lines of a stream). Headers are NEVER
+# recorded — Authorization can't leak by construction. Env is checked per
+# request (like auth) so tests/hot-reload can toggle it without a rebuild.
+
+def _tap_enabled() -> bool:
+    return os.getenv("AIXON_DEBUG_REQUESTS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _tap_write(record: dict) -> None:
+    """Append one JSONL record; tap failures must never break the request."""
+    try:
+        dirpath = Path(os.getenv("AIXON_DEBUG_REQUESTS_DIR") or "./aixon-debug")
+        dirpath.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now(dt.timezone.utc)
+        record = {"ts": stamp.isoformat(), **record}
+        path = dirpath / f"requests-{stamp.strftime('%Y%m%d')}.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        _log.info(f"debug tap: request recorded at {path}")
+    except Exception as exc:  # diagnóstico nunca derruba a request
+        _log.error(f"debug tap failed: {exc}")
 
 
 class _AuthMiddleware:
@@ -226,6 +254,17 @@ class Server:
             _log.info(f"{adapter.name}: {path} -> agent '{agent.name}' (stream={pr.stream})")
             model = pr.model or agent.name
 
+            # Agent-level thought mode: fills the gap between the per-request
+            # param (which always wins — only injected when absent) and the
+            # adapter-wide default. Injected into params so both the stream
+            # session and format_response see one resolved knob. Safe for the
+            # provider: thought_stream_mode is not in GENERATION_PARAMS.
+            agent_mode = getattr(agent, "thought_mode", None)
+            if agent_mode and "thought_stream_mode" not in (pr.params or {}):
+                pr.params = {**(pr.params or {}), "thought_stream_mode": agent_mode}
+
+            tap = _tap_enabled()
+
             if pr.stream:
                 session = adapter.open_stream(model=model, request=pr)
 
@@ -235,25 +274,39 @@ class Server:
                     # headers went out, so it must not propagate into Starlette
                     # (which would abort the response with a truncated stream).
                     # Emit an error event instead, then still close the stream.
+                    sse_lines: list[str] = []  # collected only when tap is on
+
+                    def emit(line: str) -> str:
+                        if tap:
+                            sse_lines.append(line)
+                        return line
+
                     try:
                         with generation_params(pr.params), client_tools(pr.tools):
                             async for chunk in agent.astream(pr.messages):
                                 line = session.chunk(chunk)
                                 if line:
-                                    yield line
+                                    yield emit(line)
                         tail = session.finish()
                         if tail:
-                            yield tail
+                            yield emit(tail)
                     except Exception as exc:
                         _log.error(
                             f"{adapter.name}: stream via agent '{agent.name}' "
                             f"failed: {exc}"
                         )
-                        yield session.error(exc)
+                        yield emit(session.error(exc))
                     try:
-                        yield session.done()
+                        yield emit(session.done())
                     except Exception:
                         pass  # never re-raise through Starlette mid-stream
+                    if tap:
+                        _tap_write({
+                            "adapter": adapter.name, "path": path,
+                            "agent": agent.name, "model": model,
+                            "stream": True, "body": body,
+                            "response": sse_lines,
+                        })
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -280,7 +333,16 @@ class Server:
                 if message.reasoning:
                     completion_text += "\n" + message.reasoning
                 usage = build_usage(model, prompt_text, completion_text)
-            return adapter.format_response(model=model, message=message, usage=usage)
+            payload = adapter.format_response(
+                model=model, message=message, usage=usage, params=pr.params
+            )
+            if tap:
+                _tap_write({
+                    "adapter": adapter.name, "path": path,
+                    "agent": agent.name, "model": model,
+                    "stream": False, "body": body, "response": payload,
+                })
+            return payload
 
         # `from __future__ import annotations` (module-level) turns
         # `request: Request` into the *string* "Request". FastAPI resolves
