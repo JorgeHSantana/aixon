@@ -42,11 +42,19 @@ class LLM:
         *,
         provider: str | None = None,
         reasoning: bool | dict[str, Any] | None = None,
+        cache: bool = False,
         **params: Any,
     ):
         self.model = model
         self.params = params
         self.reasoning = reasoning               # None/False off, True/dict on
+        # Prompt-cache knob (#4): on providers with explicit cache breakpoints
+        # (Anthropic's cache_control), True marks the system message and the
+        # LAST message of every call — marking the last message each call
+        # yields INCREMENTAL caching across retry rounds (round N's breakpoint
+        # becomes round N+1's cached prefix). Providers without the flag
+        # ignore it (OpenAI caches long prefixes automatically).
+        self.cache = cache
         self._provider_name = provider          # None → inferred from model name
         self._chat_model: "BaseChatModel | None" = None  # lazy
         self._request_model_cache: dict[tuple, "BaseChatModel"] = {}
@@ -170,9 +178,55 @@ class LLM:
         force both apply the same way they already do for ToolAgent."""
         return self.request_chat_model()
 
+    def _to_wire(self, messages: list[Message]) -> list:
+        """``to_langchain`` + the prompt-cache breakpoints when ``cache=True``
+        and the provider declares ``supports_prompt_cache`` (Anthropic). The
+        FIRST system message and the LAST message get a ``cache_control``
+        block; everything in between stays untouched, so the prefix remains
+        byte-stable across retry rounds."""
+        lc_messages = to_langchain(messages)
+        if not self.cache or not lc_messages:
+            return lc_messages
+        if not getattr(self._provider(), "supports_prompt_cache", False):
+            return lc_messages
+
+        def mark(lc_message) -> None:
+            content = lc_message.content
+            if isinstance(content, str):
+                lc_message.content = [{
+                    "type": "text", "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            elif isinstance(content, list):
+                for block in reversed(content):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        block["cache_control"] = {"type": "ephemeral"}
+                        return
+
+        if getattr(lc_messages[0], "type", "") == "system":
+            mark(lc_messages[0])
+        if len(lc_messages) > 1 or getattr(lc_messages[0], "type", "") != "system":
+            mark(lc_messages[-1])
+        return lc_messages
+
+    def _invoke_kwargs(self) -> dict:
+        """Per-invocation kwargs derived from runtime context (#6): when a
+        predicted output is active (ReflectiveAgent retry) AND the provider
+        declares ``supports_prediction`` (OpenAI's Predicted Outputs), attach
+        it; any other provider gets nothing — silent no-op, same precedent as
+        the ``reasoning`` knob."""
+        from aixon.runtime import current_prediction
+
+        prediction = current_prediction()
+        if prediction and getattr(self._provider(), "supports_prediction", False):
+            return {"prediction": {"type": "content", "content": prediction}}
+        return {}
+
     def complete(self, messages: list[Message]) -> Message:
         """Single-shot neutral completion. Used by LLMAgent.invoke."""
-        lc_result = self._bound_model().invoke(to_langchain(messages))
+        lc_result = self._bound_model().invoke(
+            self._to_wire(messages), **self._invoke_kwargs()
+        )
         return from_langchain(lc_result)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
@@ -186,7 +240,8 @@ class LLM:
         (the fake, which has no _stream). No reasoning present -> unchanged
         byte-for-byte from before reasoning extraction existed.
         """
-        for lc_chunk in self._bound_model().stream(to_langchain(messages)):
+        for lc_chunk in self._bound_model().stream(
+                self._to_wire(messages), **self._invoke_kwargs()):
             reasoning = reasoning_from_chunk(lc_chunk)
             if reasoning:
                 yield Chunk(reasoning=reasoning)
@@ -199,14 +254,16 @@ class LLM:
     async def acomplete(self, messages: list[Message]) -> Message:
         """Async single-shot completion. Used by LLMAgent.ainvoke. Delegates to
         the LangChain model's native ``ainvoke`` (does not block the loop)."""
-        lc_result = await self._bound_model().ainvoke(to_langchain(messages))
+        lc_result = await self._bound_model().ainvoke(
+            self._to_wire(messages), **self._invoke_kwargs())
         return from_langchain(lc_result)
 
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """Async neutral streaming. Used by LLMAgent.astream. Mirrors stream()
         over the model's native ``astream`` (same reasoning-before-content
         ordering per chunk; see stream())."""
-        async for lc_chunk in self._bound_model().astream(to_langchain(messages)):
+        async for lc_chunk in self._bound_model().astream(
+                self._to_wire(messages), **self._invoke_kwargs()):
             reasoning = reasoning_from_chunk(lc_chunk)
             if reasoning:
                 yield Chunk(reasoning=reasoning)

@@ -25,6 +25,10 @@ class OpenAIProvider(Provider):
     name = "openai"
     env_key = "OPENAI_API_KEY"
     supports_reasoning = True
+    # Predicted Outputs (#6): LLM._invoke_kwargs attaches the previous
+    # attempt's text as `prediction` on ReflectiveAgent retries. OpenAI-only
+    # feature; providers without this flag never see the kwarg.
+    supports_prediction = True
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_openai import ChatOpenAI  # lazy import

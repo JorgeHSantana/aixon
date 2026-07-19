@@ -52,6 +52,11 @@ class ToolAgent(Agent, abstract=True):
     tools: list = []
     max_iterations: int = 15
     max_execution_time: int = 600
+    # Error shield (#9): True (default) converts ANY exception raised by a tool
+    # into a readable error result handed back to the model, so one failing
+    # tool/service reports instead of killing the whole run/stream. Set False
+    # for a strict policy where tool exceptions propagate (pre-#9 behavior).
+    shield_tool_errors: bool = True
     tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
 
     @classmethod
@@ -83,7 +88,7 @@ class ToolAgent(Agent, abstract=True):
             system_prompt = messages[0].content or system_prompt
             messages = messages[1:]
 
-        lc_tools = coerce_tools(list(self.tools))
+        lc_tools = coerce_tools(list(self.tools), shield_errors=self.shield_tool_errors)
         # _validate_subclass() (__init_subclass__ hook, above) already refuses
         # to register any concrete ToolAgent subclass with `llm=None`.
         assert self.llm is not None

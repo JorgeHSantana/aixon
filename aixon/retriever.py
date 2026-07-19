@@ -109,6 +109,7 @@ class Retriever(ABC):
         name: str | None = None,
         description: str | None = None,
         k: int | None = None,
+        memoize: bool = True,
     ) -> AgentTool:
         """Expose this retriever as a neutral AgentTool.
 
@@ -152,4 +153,5 @@ class Retriever(ABC):
             description=description or self.description,
             func=_run,
             coroutine=_arun,
+            memoize=memoize,
         )

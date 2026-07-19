@@ -35,6 +35,11 @@ class AgentTool:
     # a single free-text argument — the schema, not the signature, is what the
     # LLM sees. Used by schema-carrying sources (e.g. MCPConnector.as_tools()).
     args_schema: dict | None = None
+    # Request-scoped memoization (aixon.toolcache): identical (name, args)
+    # calls within one active cache return the first result instead of
+    # re-executing. Set False for intentionally non-deterministic tools
+    # (e.g. "current time", dice) via `.as_tool(..., memoize=False)`.
+    memoize: bool = True
 
 
 class Agent(ABC):
@@ -191,10 +196,13 @@ class Agent(ABC):
             await fut
 
     def as_tool(
-        self, name: str | None = None, description: str | None = None
+        self, name: str | None = None, description: str | None = None,
+        memoize: bool = True,
     ) -> "AgentTool":
         """Expose this agent as a tool. Each call runs with a fresh message
-        list, so the wrapped agent's state never leaks across invocations."""
+        list, so the wrapped agent's state never leaks across invocations.
+        ``memoize=False`` opts this tool out of the request-scoped tool-call
+        cache (see ``aixon.toolcache``)."""
 
         def _run(text: str) -> str:
             result = self.invoke([Message(role="user", content=text)])
@@ -209,4 +217,5 @@ class Agent(ABC):
             description=description or self.description,
             func=_run,
             coroutine=_arun,
+            memoize=memoize,
         )

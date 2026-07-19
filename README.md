@@ -233,6 +233,18 @@ critique — up to `max_rounds`. Exhausting the rounds returns the last attempt
 rather than raising. See [docs/agents.md](docs/agents.md#reflectiveagent--evaluator-optimizer-loop)
 and the runnable [examples/reflective_review](examples/reflective_review).
 
+**Cost/latency per round.** Retries only append messages (byte-stable prefix),
+so OpenAI prompt caching applies automatically; for Anthropic, opt in with
+`LLM(..., cache=True)` (cache_control breakpoints, incremental per round).
+Tool calls repeated with identical args across rounds are memoized for the run
+(`aixon.toolcache`; opt out per tool with `as_tool(memoize=False)`). OpenAI
+workers receive the previous attempt as a Predicted Output on retries (latency
+win). `revision_mode = "patch"` (opt-in) asks retries for SEARCH/REPLACE edit
+blocks instead of a full rewrite — output-cost saver for long answers, with
+automatic fallback to full regeneration when a patch doesn't apply. Tool
+exceptions never kill a run: they come back to the model as readable
+`TOOL ERROR` results (strict mode: `shield_tool_errors = False` on the agent).
+
 ---
 
 ## Retrieval — Retriever, Connector, Embedding

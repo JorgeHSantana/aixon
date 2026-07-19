@@ -25,6 +25,7 @@ from aixon.exceptions import AgentNotFoundError, AixonError
 from aixon.logging import Logger
 from aixon.registry import get_registry
 from aixon.runtime import client_tools, generation_params
+from aixon.toolcache import tool_call_cache
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.usage import build_usage
 from aixon.server.protocol import ProtocolAdapter
@@ -292,7 +293,8 @@ class Server:
                         return line
 
                     try:
-                        with generation_params(pr.params), client_tools(pr.tools):
+                        with generation_params(pr.params), client_tools(pr.tools), \
+                                tool_call_cache():
                             async for chunk in agent.astream(pr.messages):
                                 line = session.chunk(chunk)
                                 if line:
@@ -324,7 +326,8 @@ class Server:
             # never blocks the event loop. Request generation params are active
             # for the duration of the call via the runtime contextvar.
             try:
-                with generation_params(pr.params), client_tools(pr.tools):
+                with generation_params(pr.params), client_tools(pr.tools), \
+                        tool_call_cache():
                     message = await agent.ainvoke(pr.messages)
             except Exception as exc:
                 _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")

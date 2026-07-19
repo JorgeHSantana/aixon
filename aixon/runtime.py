@@ -96,3 +96,28 @@ def client_tools(tools: list[dict] | None) -> Iterator[list[dict]]:
         yield value or []
     finally:
         _client_tools.reset(token)
+
+
+# Predicted output (#6): the previous attempt's full text, published by the
+# ReflectiveAgent around a RETRY call only. Providers that support OpenAI's
+# Predicted Outputs read it via current_prediction() and attach it to the
+# invocation; everyone else ignores it. Latency win only — rejected predicted
+# tokens are still billed as output.
+_prediction: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "aixon_prediction", default=None
+)
+
+
+def current_prediction() -> str | None:
+    """The predicted-output text active for this context, or None."""
+    return _prediction.get()
+
+
+@contextmanager
+def prediction_scope(text: str | None) -> Iterator[str | None]:
+    """Publish (or clear, with None) the predicted-output text for the block."""
+    token = _prediction.set(text or None)
+    try:
+        yield text or None
+    finally:
+        _prediction.reset(token)

@@ -33,6 +33,10 @@ class AnthropicProvider(Provider):
     name = "anthropic"
     env_key = "ANTHROPIC_API_KEY"
     supports_reasoning = True
+    # Anthropic requires EXPLICIT cache breakpoints (cache_control blocks);
+    # LLM(cache=True)._to_wire marks them. Providers without this flag ignore
+    # the knob (OpenAI caches long prefixes automatically, no marking needed).
+    supports_prompt_cache = True
 
     def build(self, model: str, **params: Any) -> "BaseChatModel":
         from langchain_anthropic import ChatAnthropic  # lazy import
