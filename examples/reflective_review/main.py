@@ -132,21 +132,89 @@ class ReviewedWriterAgent(ReflectiveAgent):
     max_rounds = 3
 
 
-def main() -> None:
-    question = [Message(role="user", content="What is the capital of Ceará?")]
-    print(f"> {question[0].content}\n")
+# ── variant: revision_mode="patch" (0.1.19) ─────────────────────────────────
+# Instead of rewriting the whole answer on a rejected round, the retry emits
+# SEARCH/REPLACE edit blocks that the agent applies programmatically over the
+# previous answer — an output-cost saver for long answers. A patch that does
+# not apply falls back to full regeneration automatically.
 
+
+class PatchWriterAgent(Agent):
+    """Round 1: draft without a source. Retry: a SEARCH/REPLACE edit block."""
+
+    name = "patch-writer"
+    hidden = True
+    description = "Toy generator that revises via SEARCH/REPLACE on retry."
+
+    ANSWERS = [
+        "Fortaleza is the capital of Ceará.",
+        (
+            "<<<<<<< SEARCH\n"
+            "Fortaleza is the capital of Ceará.\n"
+            "=======\n"
+            "Fortaleza is the capital of Ceará (source: IBGE).\n"
+            ">>>>>>> REPLACE"
+        ),
+    ]
+    calls: list = []
+
+    def invoke(self, messages: list[Message]) -> Message:
+        type(self).calls.append(list(messages))
+        i = min(len(type(self).calls) - 1, len(self.ANSWERS) - 1)
+        return Message(role="assistant", content=self.ANSWERS[i])
+
+    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+        yield Chunk(content=self.invoke(messages).content)
+        yield Chunk(done=True)
+
+
+class PatchReviewedWriterAgent(ReflectiveAgent):
+    """Same loop, but rejected rounds revise by patch (revision_mode)."""
+
+    name = "patch-reviewed-writer"
+    description = "Reviews and revises by SEARCH/REPLACE patches."
+    agent = PatchWriterAgent
+    judge_llm = scripted_llm(
+        [
+            "1. The answer does not cite a source for the fact stated.",
+            "APROVADO",
+        ]
+    )
+    judge_rubric = "The answer must cite the source of the fact it states."
+    max_rounds = 3
+    revision_mode = "patch"          # <- the only change vs ReviewedWriterAgent
+
+
+def run(agent_cls, question: list[Message]) -> str:
     content = ""
-    for chunk in ReviewedWriterAgent().stream(question):
+    for chunk in agent_cls().stream(question):
         if chunk.reasoning:
             print(f"[reasoning] {chunk.reasoning}", end="")
         if chunk.content:
             content += chunk.content
+    return content
 
+
+def main() -> None:
+    question = [Message(role="user", content="What is the capital of Ceará?")]
+    print(f"> {question[0].content}\n")
+
+    print("── full regeneration (default) " + "─" * 30)
+    content = run(ReviewedWriterAgent, question)
     print(f"\nFinal answer: {content}")
     print(
-        f"\nDraftWriterAgent was called {len(DraftWriterAgent.calls)} time(s) — "
-        "the judge rejected round 1 (no source) and approved round 2."
+        f"DraftWriterAgent was called {len(DraftWriterAgent.calls)} time(s) — "
+        "the judge rejected round 1 (no source) and approved round 2.\n"
+    )
+
+    print("── revision_mode=\"patch\" (0.1.19) " + "─" * 27)
+    content = run(PatchReviewedWriterAgent, question)
+    print(f"\nFinal answer: {content}")
+    print(
+        f"PatchWriterAgent was called {len(PatchWriterAgent.calls)} time(s) — "
+        "the retry produced a SEARCH/REPLACE block; the agent applied it over "
+        "the previous answer and the judge approved the PATCHED text. Note the "
+        "raw patch never appears in the streamed content."
     )
 
 

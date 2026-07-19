@@ -55,8 +55,10 @@ class Retriever(ABC):
         """Async write. Default bridges to write() in a thread; override for a
         native async SDK."""
 
-    def as_tool(self, name=None, description=None, k=None) -> AgentTool:
-        """Expose as a neutral AgentTool (same shape as Agent.as_tool())."""
+    def as_tool(self, name=None, description=None, k=None, memoize=True) -> AgentTool:
+        """Expose as a neutral AgentTool (same shape as Agent.as_tool()).
+        memoize=False opts this tool out of the request-scoped tool-call cache
+        (aixon.toolcache) — use for intentionally non-deterministic tools."""
 ```
 
 **Sync and async.** `search` is required; `asearch` is optional — its default

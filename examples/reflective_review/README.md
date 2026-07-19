@@ -19,6 +19,7 @@ works.
 | `class ReviewedWriterAgent(ReflectiveAgent)` with an objective `judge_rubric` | [main.py](main.py) |
 | `stream()` surfacing the loop's reasoning labels (`judge_label` / `retry_label`) | [main.py](main.py) — `main()` |
 | A real reject-then-approve round trip (not just the happy path) | the printed output below |
+| `revision_mode = "patch"` (0.1.19): the retry emits a SEARCH/REPLACE block, applied programmatically — raw patch text never reaches the stream | [main.py](main.py) — `PatchWriterAgent` / `PatchReviewedWriterAgent` |
 
 ## Run it
 
@@ -54,9 +55,27 @@ Final answer: Fortaleza is the capital of Ceará (source: IBGE).
 DraftWriterAgent was called 2 time(s) — the judge rejected round 1 (no source) and approved round 2.
 ```
 
+A second section then runs the SAME loop with `revision_mode = "patch"`
+(`PatchReviewedWriterAgent`): the retry answers with a `<<<<<<< SEARCH /
+======= / >>>>>>> REPLACE` block, the agent applies it over the previous
+answer, and the judge approves the PATCHED text — same final answer, but the
+worker only paid for the edit, not a full rewrite. A patch that doesn't apply
+falls back to full regeneration automatically.
+
 (The reasoning labels are Portuguese — `ReflectiveAgent`'s defaults; override
-`judge_label`/`retry_label`/`exhausted_label` on your own subclass to
-customize or translate them.)
+`judge_label`/`retry_label`/`exhausted_label`/`patch_fallback_label` on your
+own subclass to customize or translate them.)
+
+## Retries got cheaper in 0.1.19 (automatic)
+
+Beyond `revision_mode`, three optimizations apply to every `ReflectiveAgent`
+without code changes: the prompt prefix is byte-stable across rounds (OpenAI
+prompt caching applies; `LLM(..., cache=True)` adds Anthropic breakpoints),
+tool calls repeated with identical args are memoized for the run
+(`aixon.toolcache` — see [examples/tool_shield_memo](../tool_shield_memo)),
+and OpenAI workers receive the previous attempt as a Predicted Output on
+retries (latency win). Details: CHANGELOG 0.1.19 and
+[docs/agents.md](../../docs/agents.md#reflectiveagent--evaluator-optimizer-loop).
 
 ## Make it real
 

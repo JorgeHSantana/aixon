@@ -167,7 +167,27 @@ Full OpenAI-compatible wire format. Served routes:
 >
 > The server-side default is configurable per deploy:
 > `OpenAIAdapter(default_thought_mode="content")` for chat UIs that render
-> think-blocks. A per-request `thought_stream_mode` always wins.
+> think-blocks. Agents may pin their own mode with the class attribute
+> `thought_mode = "hidden"` — made for programmatic clients (protocol parsers,
+> editor plugins) that must never see `<think>` in content, immune to a
+> chat-UI-oriented server default. Precedence: request `thought_stream_mode`
+> > agent `thought_mode` > adapter `default_thought_mode`. Non-stream
+> responses honor only EXPLICIT modes (request/agent); the adapter default
+> stays streaming-only, preserving the historical non-stream shape.
+
+> **Debug tap (`AIXON_DEBUG_REQUESTS`).** Opt-in diagnostic recorder for
+> client integrations: when set, each chat POST is appended as one JSONL
+> record — verbatim body, resolved agent, and the response (non-stream
+> payload, or the raw SSE lines of a stream) — under
+> `AIXON_DEBUG_REQUESTS_DIR` (default `./aixon-debug/`). Headers are never
+> recorded, so `Authorization` can't leak. Values `1`/`true`/`yes` record
+> every agent; anything else is a comma-separated **allowlist of agent
+> names** (`AIXON_DEBUG_REQUESTS="OnlyOffice,Redator"`), keeping agents with
+> sensitive conversations off the disk while one integration is under
+> diagnosis. The env is checked per request (toggle without rebuild); tap
+> failures never break the request. It is a temporary diagnostic tool: run it
+> locally or in short windows, then unset the env and DELETE the directory —
+> never leave it on in production.
 
 > **Generation params.** Per-request `temperature`, `top_p`, `max_tokens`,
 > `presence_penalty`, `frequency_penalty`, `stop`, and `reasoning_effort` are

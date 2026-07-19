@@ -262,6 +262,16 @@ class ResearchAgent(ToolAgent):
 | `max_iterations` | `int` | `15` | Maximum tool-call rounds before the loop stops. |
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds. |
 | `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
+| `shield_tool_errors` | `bool` | `True` | Error shield: any exception a tool raises (`httpx.ReadTimeout`, DB down, ...) becomes a readable `TOOL ERROR (...)` result handed back to the model — the agent reports the outage and/or proceeds, instead of the whole run/stream dying with an opaque server error. `False` restores the strict pre-shield behavior (exceptions propagate). Raw `BaseTool` entries are NOT shielded (see `coerce_tools`). |
+
+**Tool-call memoization (request scope).** Within one served request (and
+within one `ReflectiveAgent` run), a tool called again with the SAME arguments
+returns the first result instead of re-executing — retry loops stop re-running
+identical DB queries/web searches, and the corrected answer stays consistent
+with the data the judge criticized. The cache dies with the request; errors
+are never cached. Opt out per tool for intentionally non-deterministic or
+write tools: `retriever.as_tool(memoize=False)`, `agent.as_tool(memoize=False)`,
+or `my_function.aixon_memoize = False` on a plain callable.
 
 Like `LLMAgent`, a leading `system` (or `developer`) message in `messages`
 overrides `self.prompt` as the graph's `system_prompt` rather than both being
@@ -338,9 +348,11 @@ class GerenteRevisadoAgent(ReflectiveAgent):
 | `judge_llm` | `LLM` | **Yes** | The model that grades each answer. Often a cheaper/faster model than the worker's — judging is a classification task, not generation. |
 | `judge_rubric` | `str` | **Yes** | Objective approval criteria, non-empty. See "Write an objective rubric" below. |
 | `max_rounds` | `int` | No (default `3`) | Worker attempts before giving up, `>= 1`. |
+| `revision_mode` | `str` | No (default `"full"`) | `"full"` regenerates the whole answer on a rejected round. `"patch"` (opt-in) asks the retry for SEARCH/REPLACE edit blocks applied programmatically over the previous answer — output-cost saver for long answers; a patch that doesn't apply falls back to full regeneration for that round, and raw patch text never reaches the stream as content. |
 | `judge_label` | `str` | No | Reasoning-channel label emitted before each judge call. Default: `"Avaliando a resposta…"`. |
 | `retry_label` | `str` | No | Reasoning-channel label emitted before a retry. `{round}`/`{max}` are interpolated. Default: `"Refinando a resposta (rodada {round}/{max})…"`. |
 | `exhausted_label` | `str` | No | Reasoning-channel label emitted when `max_rounds` is reached without approval. Default: `"Rodadas esgotadas — entregando a melhor tentativa."`. |
+| `patch_fallback_label` | `str` | No | Label emitted when a `"patch"` retry didn't apply and the round falls back to full regeneration. |
 
 Missing `agent`/`judge_llm`, an empty `judge_rubric`, or `max_rounds < 1` on a
 concrete subclass raises `AixonError` at import time — before registration
@@ -369,10 +381,29 @@ reasoning channel, drain it as `Chunk(reasoning=...)` deltas, then yield the
 final `Chunk(content=...)` and `Chunk(done=True)`. `ainvoke`/`astream` are
 native (`agent.ainvoke` + `judge_llm.acomplete`), not thread-bridged.
 
-**Cost and latency.** Each round re-runs the full worker call (and, on
-rejection, a fresh judge call too) — a `max_rounds=3` run can cost up to 3×
-the worker's tokens/latency plus the judge overhead. Keep `max_rounds` as low
-as the rubric allows, and prefer a cheap `judge_llm`.
+**Cost and latency.** Each round re-runs the worker (and, on rejection, a
+fresh judge call) — but since 0.1.19 the retries are far cheaper than naive
+reruns, automatically:
+
+- **Prompt caching** — retries only APPEND messages (the prefix is
+  byte-identical across rounds, guaranteed by test), so OpenAI's automatic
+  prompt caching bills the repeated prefix as cache hits. For Anthropic
+  workers/judges, opt in with `LLM(..., cache=True)` (explicit `cache_control`
+  breakpoints on the system + last message; each round's breakpoint becomes
+  the next round's cached prefix).
+- **Tool-call memoization** — a retry that re-issues a tool call with the same
+  arguments (same DB query, same web search) reuses the first result instead
+  of re-executing (see the ToolAgent section; opt-out per tool with
+  `as_tool(memoize=False)` — recommended for write tools).
+- **Predicted Outputs (OpenAI)** — the previous attempt is sent as the
+  `prediction` on retries, so unchanged spans regenerate by speculative
+  decoding (latency win; rejected predicted tokens still bill as output).
+  Other providers ignore it.
+- **`revision_mode = "patch"`** (opt-in) — retries emit SEARCH/REPLACE edits
+  instead of rewriting the whole answer (output-cost saver for long answers),
+  with automatic fallback to full regeneration when a patch doesn't apply.
+
+Keep `max_rounds` as low as the rubric allows, and prefer a cheap `judge_llm`.
 
 **Write an objective rubric.** `judge_rubric` should state checkable facts,
 not vibes — "does it cite a source?", "do the numbers match the tool

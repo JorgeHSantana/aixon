@@ -5,6 +5,64 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.19] - 2026-07-19
+
+Eficiência do loop reflexivo (evaluator-optimizer) + robustez de tools. Na
+prática: rodadas de retry ficam mais baratas e mais rápidas sem perder rigor,
+e falha de infraestrutura numa tool vira mensagem explicada em vez de derrubar
+o run com erro opaco.
+
+### Added
+- **Tool error shield (#9)**: qualquer exceção levantada por uma tool
+  (AgentTool/callable) vira um resultado `TOOL ERROR (...)` legível devolvido
+  ao modelo (`str(e) or repr(e)` — cobre `httpx.ReadTimeout`, cujo `str()` é
+  vazio); o agente relata a indisponibilidade e/ou prossegue. Opt-out estrito
+  por agente: `ToolAgent.shield_tool_errors = False`. `BaseTool` cru passa sem
+  shield (documentado em `coerce_tools`)
+- **Memoização de tool calls por request (#5)** — `aixon.toolcache`
+  (ContextVar): dentro de uma request servida (e de um run do
+  ReflectiveAgent), tool chamada de novo com os MESMOS argumentos devolve o
+  primeiro resultado sem re-executar; erros nunca são cacheados; cache morre
+  com a request. Opt-out por tool: `as_tool(memoize=False)` (Agent e
+  Retriever) ou atributo `aixon_memoize = False` num callable
+- **Prompt caching entre rodadas (#4)**: teste fixa que retries só ACRESCENTAM
+  mensagens (prefixo byte-idêntico — o caching automático da OpenAI aplica);
+  `LLM(..., cache=True)` marca `cache_control` (system + última mensagem) em
+  providers com `supports_prompt_cache` (Anthropic) para caching incremental
+  por rodada
+- **Predicted Outputs no retry (#6)**: o ReflectiveAgent publica a resposta
+  anterior via `prediction_scope` e o LLM anexa `prediction` na invocação
+  quando o provider declara `supports_prediction` (OpenAI) — trechos
+  inalterados regeneram por decodificação especulativa (ganho de latência);
+  demais providers ignoram
+- **`revision_mode = "patch"` no ReflectiveAgent (#7, opt-in)**: o retry emite
+  blocos SEARCH/REPLACE aplicados programaticamente sobre a resposta anterior
+  (economia de output em respostas longas); patch que não casa → fallback
+  automático para regeneração completa; texto de patch nunca vaza como
+  content. Default `"full"` byte-idêntico ao comportamento anterior
+
+## [0.1.18] - 2026-07-15
+
+### Added
+- Debug tap com **allowlist de agentes**: `AIXON_DEBUG_REQUESTS` aceita, além
+  de `1`/`true`/`yes` (grava tudo), uma lista `"Agente1,Agente2"` — só esses
+  agentes são gravados, contendo o blast radius em servidores compartilhados
+  (agentes com conversas sensíveis nunca tocam o disco)
+
+## [0.1.17] - 2026-07-15
+
+### Added
+- **`Agent.thought_mode`** (`"custom" | "content" | "hidden"`): modo de
+  reasoning POR AGENTE, com precedência request `thought_stream_mode` >
+  agente > `default_thought_mode` do adapter. Protege clientes programáticos
+  (parsers de protocolo, plugins de editor) do `<think>` no content sem mudar
+  o default do servidor voltado a chat UIs. Não-stream honra só modos
+  explícitos (request/agente) — shape histórico preservado
+- **Debug tap de requests** (`AIXON_DEBUG_REQUESTS=1`): 1 registro JSONL por
+  POST de chat (body verbatim + agente resolvido + resposta/linhas SSE) em
+  `AIXON_DEBUG_REQUESTS_DIR` (default `./aixon-debug/`); headers nunca
+  gravados; falha do tap nunca derruba a request; zero overhead desligado
+
 ## [0.1.16] - 2026-07-14
 
 ### Added
