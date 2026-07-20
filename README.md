@@ -372,12 +372,14 @@ never registered.
 - [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, `ReflectiveAgent`, declarative API, `as_tool`, async
 - [Orchestrator](docs/orchestrator.md) — three tiers, entry/topology, branching, recursion guards
 - [Server](docs/server.md) — `ProtocolAdapter`, adapters, auth, SSE
+- [Tracing](docs/tracing.md) — observability with LangSmith / Langfuse (self-hosted) / console: zero framework changes
 - [Retrieval](docs/retrieval.md) — `Retriever`, `Embedding`, `Connector`, `MCPConnector`
 - [Vendor retrievers](docs/retrievers.md) — `Weaviate`, `Ragie`, `Tavily`
 - [CLI](docs/cli.md) — `chat`, `new`, `serve`, `list`
 - [Quickstart](docs/quickstart.md) — consumer project walkthrough
 - [Example](examples/support_assistant) — a complete multi-agent support assistant, runnable offline
 - [Example: Reflective Review](examples/reflective_review) — the `ReflectiveAgent` loop, runnable offline
+- [Example: Tracing](examples/tracing) — the execution tree a tracer captures, runnable offline
 
 ---
 
