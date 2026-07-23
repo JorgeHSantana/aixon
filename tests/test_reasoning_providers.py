@@ -467,6 +467,53 @@ def test_zai_reasoning_effort_param_overrides_knob(fake_zai):
     assert model.kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
+# ── xAI / Grok translation ────────────────────────────────────────────────────
+
+@pytest.fixture
+def fake_xai(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", _FakeChatOpenAI)
+    from aixon.providers.xai import XAIProvider
+
+    return XAIProvider()
+
+
+def test_xai_reasoning_off_is_byte_identical(fake_xai):
+    model = fake_xai.build("grok-4.5", temperature=0.2)
+    assert "reasoning_effort" not in model.kwargs
+    assert model.kwargs["temperature"] == 0.2
+
+
+def test_xai_reasoning_true_sets_reasoning_effort_medium(fake_xai):
+    model = fake_xai.build("grok-4.5", reasoning=True)
+    assert model.kwargs["reasoning_effort"] == "medium"
+
+
+def test_xai_reasoning_effort_forwarded_verbatim(fake_xai):
+    # xAI is the authority on which effort strings it accepts — unknown
+    # values pass through untouched, same posture as the OpenAI provider.
+    model = fake_xai.build("grok-4.5", reasoning={"effort": "xhigh"})
+    assert model.kwargs["reasoning_effort"] == "xhigh"
+
+
+def test_xai_reasoning_budget_spec_translates_to_effort(fake_xai):
+    model = fake_xai.build("grok-4.5", reasoning={"budget_tokens": 200})
+    assert model.kwargs["reasoning_effort"] == "low"
+
+
+def test_xai_reasoning_effort_param_overrides_knob(fake_xai):
+    model = fake_xai.build(
+        "grok-4.5", reasoning={"effort": "low"}, reasoning_effort="high"
+    )
+    assert model.kwargs["reasoning_effort"] == "high"
+
+
+def test_xai_supports_reasoning_flag(fake_xai):
+    assert fake_xai.supports_reasoning is True
+    assert getattr(fake_xai, "supports_prediction", False) is False
+
+
 # ── Google translation ────────────────────────────────────────────────────────
 
 class _FakeChatGoogleGenerativeAI:
