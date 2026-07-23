@@ -186,3 +186,49 @@ def test_zai_base_url_env_override(monkeypatch):
     monkeypatch.setenv("ZAI_BASE_URL", "https://proxy.example.com/v4")
     model = get_provider("zai").build("glm-5.2")
     assert "proxy.example.com" in str(model.openai_api_base)
+
+
+# ── xAI (Grok) ────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("model", ["grok-4.5", "grok-4.3", "grok-4.20-0309-reasoning"])
+def test_resolve_xai_models(model):
+    importlib.import_module("aixon.providers.xai")  # self-registers
+    assert resolve_provider_for_model(model).name == "xai"
+
+
+def test_xai_provider_build_returns_base_chat_model():
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.xai")
+    os.environ.setdefault("XAI_API_KEY", "test-key")
+    from langchain_core.language_models.chat_models import BaseChatModel
+    model = get_provider("xai").build("grok-4.5")
+    assert isinstance(model, BaseChatModel)
+
+
+def test_xai_build_without_api_key_raises(monkeypatch):
+    """Same guard as z.AI: without an explicit key the OpenAI SDK would fall
+    back to OPENAI_API_KEY and send that credential to the xAI endpoint."""
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.xai")
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    with pytest.raises(AixonError, match="XAI_API_KEY"):
+        get_provider("xai").build("grok-4.5")
+
+
+def test_xai_build_points_to_xai_base_url_and_resilience():
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.xai")
+    os.environ.setdefault("XAI_API_KEY", "test-key")
+    model = get_provider("xai").build("grok-4.5")
+    assert "api.x.ai" in str(model.openai_api_base)
+    assert model.request_timeout == DEFAULT_TIMEOUT_S
+    assert model.max_retries == DEFAULT_MAX_RETRIES
+
+
+def test_xai_base_url_env_override(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    importlib.import_module("aixon.providers.xai")
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    monkeypatch.setenv("XAI_BASE_URL", "https://proxy.example.com/v1")
+    model = get_provider("xai").build("grok-4.5")
+    assert "proxy.example.com" in str(model.openai_api_base)

@@ -235,6 +235,7 @@ _INFERENCE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^claude"), "anthropic"),
     (re.compile(r"^gemini"), "google"),
     (re.compile(r"^glm"), "zai"),
+    (re.compile(r"^grok"), "xai"),
 ]
 
 
@@ -246,6 +247,7 @@ def resolve_provider_for_model(model: str) -> Provider:
     - claude*                    → anthropic
     - gemini*                    → google
     - glm*                       → zai (z.AI, OpenAI-compatible)
+    - grok*                      → xai (Grok, OpenAI-compatible)
 
     Raises:
         AixonError: if no rule matches or the inferred provider is not registered.
