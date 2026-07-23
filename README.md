@@ -61,6 +61,7 @@ pip install "aixon[openai]"            # OpenAI provider binding (langchain-open
 pip install "aixon[anthropic]"         # Anthropic provider binding
 pip install "aixon[google]"            # Google provider binding
 pip install "aixon[zai]"               # z.AI provider binding (GLM via langchain-openai)
+pip install "aixon[xai]"               # xAI provider binding (Grok via langchain-openai)
 pip install "aixon[retrieval]"         # httpx — Connector / HttpToolConnector
 pip install "aixon[mcp]"               # mcp SDK — MCPConnector (MCP servers)
 pip install "aixon[openai-embedding]"  # langchain-openai — OpenAIEmbedding
@@ -343,6 +344,7 @@ See [docs/server.md](docs/server.md) for Anthropic adapter, auth, and SSE stream
 | `ANTHROPIC_API_KEY` | _(required for Anthropic)_ | API key for the Anthropic provider. |
 | `GOOGLE_API_KEY` | _(required for Google)_ | API key for the Google provider. |
 | `ZAI_API_KEY` | _(required for z.AI)_ | API key for the z.AI provider (GLM models). `ZAI_BASE_URL` overrides the default `https://api.z.ai/api/paas/v4`. |
+| `XAI_API_KEY` | _(required for xAI)_ | API key for the xAI provider (Grok models). `XAI_BASE_URL` overrides the default `https://api.x.ai/v1`. |
 
 ---
 
@@ -410,7 +412,7 @@ click                 >= 8.0    (core — the `aixon` command)
 fastapi / uvicorn / pydantic    (server extra)
 httpx                 >= 0.27   (server / retrieval extra)
 openai                >= 1.0    (cli extra — remote `aixon chat --url`)
-langchain-openai      >= 0.2    (openai / openai-embedding / zai extra)
+langchain-openai      >= 0.2    (openai / openai-embedding / zai / xai extra)
 langchain-anthropic   >= 0.2    (anthropic extra)
 langchain-google-genai >= 2.0   (google extra)
 weaviate-client / langchain-weaviate  (weaviate extra)

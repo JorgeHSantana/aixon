@@ -90,6 +90,7 @@ API key to be present at import time.
 | `claude-*` | `"anthropic"` |
 | `gemini-*` | `"google"` |
 | `glm*` | `"zai"` |
+| `grok*` | `"xai"` |
 
 Provider names are lowercase strings, not an enum. To override inference, pass
 `provider=` explicitly: `LLM("some-model", provider="openai")`.
@@ -101,6 +102,14 @@ providers, it does not fall back to `OPENAI_API_KEY` if unset; building the
 model raises `AixonError` instead of silently sending your OpenAI credential
 to the z.AI endpoint. `ZAI_BASE_URL` overrides the default
 (`https://api.z.ai/api/paas/v4`).
+
+**xAI (Grok models).** `LLM("grok-4", provider="xai")` (or a bare `grok-*`
+model name, inferred) reuses `langchain_openai.ChatOpenAI` pointed at the xAI
+OpenAI-compatible endpoint. `XAI_API_KEY` is **required** — unlike the other
+providers, it does not fall back to `OPENAI_API_KEY` if unset; building the
+model raises `AixonError` instead of silently sending your OpenAI credential
+to the xAI endpoint. `XAI_BASE_URL` overrides the default
+(`https://api.x.ai/v1`).
 
 ### Reasoning (extended thinking / reasoning effort)
 
@@ -137,6 +146,7 @@ a coarse effort dial.
 |---|---|
 | `anthropic` | `thinking={"type": "enabled", "budget_tokens": ...}`. Anthropic's extended-thinking API requires `temperature == 1`; the knob **forces** it (logging a warning if the caller/request asked for a different value). `max_tokens` is raised to `budget_tokens + 4096` when absent or not already comfortably above the budget. |
 | `openai` | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`. No budget dial — only the effort string reaches the API. |
+| `xai` (Grok) | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`, forwarded verbatim — same translation as `openai`. |
 | `zai` (GLM) | `extra_body={"thinking": {"type": "enabled", ...}}` (merged with any caller-supplied `extra_body`). GLM has no budget/effort dial of its own — any non-off spec just turns thinking on. |
 | `google` (Gemini) | `thinking_budget=<budget_tokens>` and `include_thoughts=True` on `ChatGoogleGenerativeAI` — applied only if the installed `langchain-google-genai` declares those fields; an older install degrades gracefully (knob ignored, warning logged) instead of raising on an unknown kwarg. |
 | custom (no `supports_reasoning = True`) | the knob is **ignored** (with a warning) rather than forwarded — a pydantic-strict vendor constructor never sees the stray `reasoning` kwarg, so the build never breaks. |

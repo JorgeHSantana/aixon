@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Provider xAI (Grok).** `LLM("grok-4.5")` resolve e constrói sozinho —
+  novo provider `xai` (OpenAI-compatível em `https://api.x.ai/v1`, override
+  via `XAI_BASE_URL`), chave `XAI_API_KEY` obrigatória (erro claro em vez de
+  vazar `OPENAI_API_KEY` para o endpoint), regra de inferência `^grok`,
+  knob `reasoning` traduzido para `reasoning_effort` verbatim, extra
+  `aixon[xai]`.
+
 ## [0.1.19] - 2026-07-19
 
 Eficiência do loop reflexivo (evaluator-optimizer) + robustez de tools. Na
