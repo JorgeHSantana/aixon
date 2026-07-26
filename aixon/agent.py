@@ -10,9 +10,19 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Awaitable, Callable, Iterator
 
-from aixon.exceptions import NamingError
+from aixon.exceptions import AixonError, NamingError
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry
+
+# Subagent frame (#15): appended to the user text when as_tool(audience="agent")
+# — the callee must return dense facts for ANOTHER AGENT, not prose for a human.
+# A user-text suffix, NOT a leading system message: a leading system would
+# override the subagent's own prompt (see ToolAgent._build_agent contract).
+_AGENT_AUDIENCE_SUFFIX = (
+    "\n\n[Contexto: sua resposta será consumida por OUTRO AGENTE, não por um "
+    "humano. Devolva apenas os fatos relevantes à pergunta, densos e "
+    "estruturados, sem saudação, cortesia ou oferta de ajuda.]"
+)
 
 
 @dataclass
@@ -197,19 +207,28 @@ class Agent(ABC):
 
     def as_tool(
         self, name: str | None = None, description: str | None = None,
-        memoize: bool = True,
+        memoize: bool = True, audience: str = "human",
     ) -> "AgentTool":
         """Expose this agent as a tool. Each call runs with a fresh message
         list, so the wrapped agent's state never leaks across invocations.
         ``memoize=False`` opts this tool out of the request-scoped tool-call
-        cache (see ``aixon.toolcache``)."""
+        cache (see ``aixon.toolcache``).
+        ``audience="agent"`` (#15) appends the subagent frame to each call's
+        text, instructing the callee to answer with dense facts for another
+        agent instead of human-facing prose."""
+        if audience not in ("human", "agent"):
+            raise AixonError(
+                f"as_tool(audience={audience!r}): use 'human' (default) ou "
+                f"'agent' (anexa a moldura de subagente ao texto da chamada)."
+            )
+        suffix = _AGENT_AUDIENCE_SUFFIX if audience == "agent" else ""
 
         def _run(text: str) -> str:
-            result = self.invoke([Message(role="user", content=text)])
+            result = self.invoke([Message(role="user", content=text + suffix)])
             return result.content
 
         async def _arun(text: str) -> str:
-            result = await self.ainvoke([Message(role="user", content=text)])
+            result = await self.ainvoke([Message(role="user", content=text + suffix)])
             return result.content
 
         return AgentTool(

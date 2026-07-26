@@ -6,7 +6,7 @@ of subtype — exposes the same interface:
 ```python
 agent.invoke(messages: list[Message]) -> Message
 agent.stream(messages: list[Message]) -> Iterator[Chunk]
-agent.as_tool(name=None, description=None) -> AgentTool
+agent.as_tool(name=None, description=None, memoize=True, audience="human") -> AgentTool
 ```
 
 This uniformity means a `ToolAgent` can be a node in an `Orchestrator`, an
@@ -326,6 +326,27 @@ class OrchestratorAgent(ToolAgent):
     ]
 ```
 
+**Framing the callee as a subagent (`audience="agent"`, #15).** By default
+(`audience="human"`, unchanged), the nested agent gets the caller's text
+verbatim — as if a person had typed it — and tends to answer accordingly:
+greetings, hedging, "let me know if you need anything else." That's fine when
+a human really is the ultimate reader, but when the caller is itself an
+agent, that human-facing prose is just noise burning the parent's context
+window. `as_tool(audience="agent")` appends a fixed suffix
+(`aixon.agent._AGENT_AUDIENCE_SUFFIX`) to each call's user text, asking the
+callee to answer with dense, structured facts instead of human-facing prose:
+
+```python
+CobradorAgent().as_tool(name="clientes", audience="agent")
+```
+
+The frame is appended to the **user message text**, never sent as a leading
+system message: a leading system message would override the subagent's own
+prompt (see the `ToolAgent`/`_build_agent` contract — the leading system
+message wins), which would defeat the callee's own instructions instead of
+just adding context to them. An invalid `audience` (anything other than
+`"human"`/`"agent"`) raises `AixonError` immediately.
+
 **Reasoning propagation:** when a nested agent emits reasoning (via the
 `ReasoningChannel`), that reasoning bubbles up through the outer `stream()` as
 `Chunk(reasoning=...)` deltas — so callers see the full chain of thought even
@@ -497,6 +518,7 @@ class AgentTool:
 ```python
 tool = agent.as_tool()
 tool = agent.as_tool(name="planner", description="Decomposes goals")
+tool = agent.as_tool(audience="agent")  # #15 — see "Nesting agents as tools"
 ```
 
 `func` wraps `agent.invoke`: each call creates a fresh
@@ -506,6 +528,12 @@ is **dual**: `coerce_tools` registers both, and the tool runs on the sync
 (`invoke` → `func`) and async (`ainvoke` → `coroutine`) paths. The same
 `AgentTool` shape is returned by `Retriever.as_tool()`, so
 `ToolAgent.tools` handles both uniformly.
+
+`audience` (default `"human"`, zero behavior change) controls the framing of
+the text handed to the callee: `"agent"` appends the subagent frame
+(`_AGENT_AUDIENCE_SUFFIX`) so the callee answers with dense facts for another
+agent instead of human-facing prose. See "Nesting agents as tools" above for
+the rationale and an example. Any other value raises `AixonError`.
 
 ---
 

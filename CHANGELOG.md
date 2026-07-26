@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Agent.as_tool(audience="agent")`: moldura de subagente opt-in (#15).**
+  Novo parâmetro `audience` (default `"human"`, zero mudança de
+  comportamento). Com `audience="agent"`, cada chamada anexa um sufixo fixo
+  (`aixon.agent._AGENT_AUDIENCE_SUFFIX`) ao texto do usuário enviado ao
+  subagente, pedindo fatos densos e estruturados em vez de prosa
+  humano-orientada — reduz ruído no contexto do agente pai quando o callee é
+  outro agente, não uma pessoa. O frame vai como sufixo do texto do usuário,
+  NUNCA como mensagem system (uma system à frente sobrescreveria o prompt do
+  próprio subagente). Valor inválido de `audience` levanta `AixonError` com
+  mensagem clara. Exemplo em `examples/tool_shield_memo/main.py`; documentado
+  em `docs/agents.md` ("Nesting agents as tools").
 - **`ReflectiveAgent`: gate `should_judge` — juiz opcional por resposta (#14).**
   Novo método sobrescrevível `should_judge(self, messages, answer) -> bool`
   (default `True`, zero mudança de comportamento). Retornar `False` devolve a

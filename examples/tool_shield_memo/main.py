@@ -128,6 +128,12 @@ def main() -> None:
     print(f"get_weather was asked twice with the same args but executed "
           f"{CALLS['weather']} time(s) — the second call was memoized.")
 
+    # audience="agent" (#15): a caller that is ANOTHER agent, not a human, gets
+    # the subagent frame appended to its call text (see docs/agents.md).
+    peer_tool = FieldAssistantAgent().as_tool(audience="agent")
+    print(f"\nas_tool(audience='agent') built: '{peer_tool.name}' — dense-facts "
+          f"framing for a subagent caller instead of human-facing prose.")
+
 
 if __name__ == "__main__":
     main()
