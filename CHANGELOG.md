@@ -90,6 +90,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   do `revision_mode="patch"` antes de promovê-lo a default. Zero mudança de
   comportamento.
 
+### Fixed
+- **`tool_choice` do adapter OpenAI agora é campo de transporte, não passthrough
+  descartado (#18b).** `tool_choice` saiu do params-passthrough e entrou em
+  `_TRANSPORT_FIELDS`/`ParsedRequest.tool_choice`; o `Server` publica
+  `tool_choice_scope(pr.tool_choice)` junto de `client_tools(pr.tools)` nos
+  dois caminhos (sync e stream), então `LLMAgent(client_tools=True)` (#18a) e
+  qualquer agente que leia `current_tool_choice()` agora o recebem de fato.
+  `tool_choice` sem `tools` no mesmo request agora responde 400 (antes:
+  descarte silencioso). Adapter Anthropic fica de fora desta task — dialeto de
+  `tool_choice` da Anthropic tem shape próprio (`{"type": "auto"|"any"|"tool",
+  "name": ...}`); registrado como follow-up da issue #18.
+
 ## [0.1.20] - 2026-07-23
 
 ### Added

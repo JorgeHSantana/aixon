@@ -16,7 +16,7 @@ from aixon.server.protocol import Chunk, Message, ParsedRequest, ProtocolAdapter
 
 # Transport-level fields the adapter consumes itself; everything else in the
 # body is a passthrough param handed to the agent's params.
-_TRANSPORT_FIELDS = frozenset({"model", "messages", "stream", "tools"})
+_TRANSPORT_FIELDS = frozenset({"model", "messages", "stream", "tools", "tool_choice"})
 
 # Roles accepted on an inbound `messages` entry. "developer" is OpenAI's
 # modern spec addition (superseding "system" for newer models); to_langchain
@@ -124,6 +124,13 @@ class OpenAIAdapter(ProtocolAdapter):
                     tool_call_id=m.get("tool_call_id"),
                 )
             )
+        tool_choice = body.get("tool_choice")
+        if tool_choice is not None and not body.get("tools"):
+            # Same signaling mechanism as the message-shape checks above (a
+            # plain ValueError): the Server's chat() handler catches any
+            # Exception out of parse_request and turns it into a 400 with
+            # str(exc) as the message — no bespoke error type needed here.
+            raise ValueError("'tool_choice' requires 'tools' on the same request.")
         params = {k: v for k, v in body.items() if k not in _TRANSPORT_FIELDS}
         return ParsedRequest(
             model=body.get("model") or "",
@@ -131,6 +138,7 @@ class OpenAIAdapter(ProtocolAdapter):
             params=params,
             stream=bool(body.get("stream", False)),
             tools=body.get("tools") or None,
+            tool_choice=tool_choice,
         )
 
     # --- outbound (non-stream) ------------------------------------------

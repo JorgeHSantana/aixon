@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 # Re-export the neutral types (the SAME objects, not copies) so adapter modules
 # can do `from aixon.server.protocol import Message, Chunk`.
@@ -39,6 +40,9 @@ class ParsedRequest:
       ``None``. The Server publishes them via ``aixon.runtime.client_tools``
       so agents that support client-executed tools can read a single dialect
       via ``current_client_tools()``; agents that don't simply ignore.
+    - ``tool_choice``: the client's wire-shaped ``tool_choice`` (#18b), or
+      ``None``. Published by the Server via ``aixon.runtime.tool_choice_scope``
+      alongside ``tools`` so agents read it via ``current_tool_choice()``.
     """
 
     model: str
@@ -46,6 +50,7 @@ class ParsedRequest:
     params: dict
     stream: bool
     tools: list[dict] | None = None
+    tool_choice: Any = None
 
 
 class StreamSession:
