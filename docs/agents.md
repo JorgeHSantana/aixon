@@ -394,6 +394,10 @@ class GuardedAgent(ToolAgent):
 - Como os hooks do #9/#5, só se aplicam a entradas `AgentTool`/callable; um
   `BaseTool` cru passado em `tools` continua sem guard (sem shield, sem memo,
   sem hooks).
+- Pela mesma razão, os proxies de client tools do `client_tools="merge"|
+  "replace"` (#18c, abaixo) TAMBÉM ficam fora do alcance de `on_tool_start`/
+  `on_tool_end`: a call de uma tool do cliente nunca executa server-side, então
+  não há chamada de tool ali para o hook observar.
 
 ### Client tools mesclados no loop (#18c)
 

@@ -16,6 +16,12 @@ every `ToolAgent` gets since 0.1.19 (see
    returns the first result without re-executing. Errors are never cached.
    Opt out per tool: `as_tool(memoize=False)` or `fn.aixon_memoize = False`.
 
+Also demonstrated, same offline style: **`on_tool_start`/`on_tool_end`**
+(#17) hooks around a tool call (`AuditedAssistantAgent`, logged to
+`HOOK_LOG`), and **`prune_tool_results_after`** (#16) stubbing an old tool
+result out of a synthetic history via `ToolAgent._prune_history`, printed
+before/after.
+
 No API key, no network call: the driving model is scripted.
 
 ## Run

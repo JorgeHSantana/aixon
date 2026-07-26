@@ -56,3 +56,44 @@ def test_valor_invalido_rejeitado_no_registro():
             "name": "pr16inv", "llm": llm, "tools": [],
             "prune_tool_results_after": 0,
         })
+
+
+def test_invoke_com_prune_manda_stub_para_o_modelo(monkeypatch):
+    """Integração: prune_tool_results_after via invoke — o histórico que
+    chega ao MODELO (create_agent) já traz o stub no lugar do tool result
+    antigo, não o dump original de 3000 caracteres. Captura via subclasse do
+    FakeChatModel (idioma de tests/_fakes.py), como em
+    test_tool_agent_invoke.py::test_toolagent_developer_role_overrides_class_prompt."""
+    from langchain_core.messages import AIMessage
+    from tests._fakes import FakeChatModel, make_llm
+
+    llm = make_llm()
+    fake = FakeChatModel(script=[AIMessage(content="Maio estável, junho subiu.")])
+    captured: list[list] = []
+    original_generate = fake._generate
+
+    def capturing_generate(messages, stop=None, run_manager=None, **kwargs):
+        captured.append(list(messages))
+        return original_generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    fake._generate = capturing_generate
+    monkeypatch.setattr(type(llm), "chat_model", property(lambda self: fake))
+
+    from aixon.registry import get_registry
+
+    type("Pr16IntAgent", (ToolAgent,), {
+        "name": "pr16int", "llm": llm, "tools": [],
+        "prune_tool_results_after": 2,
+    })
+    agent = get_registry().resolve("pr16int")
+
+    out = agent.invoke(_hist())
+
+    assert out.content == "Maio estável, junho subiu."
+    assert captured, "o modelo nunca foi chamado"
+    tool_msgs = [m for m in captured[0] if type(m).__name__ == "ToolMessage"]
+    assert len(tool_msgs) == 2
+    # maio (fora da janela de 2 turnos) chega como stub; junho (dentro) intacto.
+    assert "omitido" in tool_msgs[0].content
+    assert "linha;" not in tool_msgs[0].content
+    assert "linha;" in tool_msgs[1].content

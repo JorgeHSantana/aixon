@@ -11,7 +11,13 @@ Two behaviors every `ToolAgent` now gets for free:
    again with the SAME arguments returns the first result without
    re-executing — watch the call counter.
 
-Both the driving model and the tools are scripted/deterministic: **no API key,
+Also shown, in the same offline style: **`on_tool_start`/`on_tool_end`
+hooks** (#17) — a tool call logged before and after it runs — and
+**`prune_tool_results_after`** (#16) — old tool results stubbed out of the
+payload, demonstrated directly on a synthetic history so it stays
+deterministic (no extra LLM round-trip needed for that part).
+
+The driving model(s) and the tools are scripted/deterministic: **no API key,
 no network call**:
 
     cd examples/tool_shield_memo
@@ -113,6 +119,46 @@ class FieldAssistantAgent(ToolAgent):
     shield_tool_errors = True
 
 
+# ── on_tool_start / on_tool_end hooks (#17) ──────────────────────────────────
+# A separate scripted LLM (its own script/cursor) driving one tool call, so
+# the hook log below is not entangled with FieldAssistantAgent's script.
+
+HOOK_LOG: list[str] = []
+
+
+def get_time(city: str) -> str:
+    """Fake clock lookup — the tool the hooks demo calls."""
+    return f"14:32 in {city}"
+
+
+llm_hooks = LLM("scripted-tools-1", provider="scripted-tools")
+llm_hooks.chat_model.script = [
+    AIMessage(content="", tool_calls=[
+        {"name": "get_time", "args": {"city": "Recife"}, "id": "h1"}]),
+    AIMessage(content="It's 14:32 in Recife."),
+]
+
+
+class AuditedAssistantAgent(ToolAgent):
+    """Toy agent demonstrating on_tool_start/on_tool_end (#17): both hooks
+    just append a line to HOOK_LOG, proving they fire around the tool call
+    without changing the run's outcome (on_tool_start returns None -> args
+    unchanged)."""
+
+    name = "audited-assistant"
+    hidden = True
+    description = "Toy agent demonstrating tool-call hooks (#17)."
+    llm = llm_hooks
+    tools = [get_time]
+
+    def on_tool_start(self, name: str, args: dict):
+        HOOK_LOG.append(f"on_tool_start: {name}({args})")
+        return None  # keep args unchanged
+
+    def on_tool_end(self, name: str, args: dict, result, error) -> None:
+        HOOK_LOG.append(f"on_tool_end:   {name} -> result={result!r} error={error!r}")
+
+
 class TicketEchoAgent(Agent):
     """Offline callee for the audience="agent" demo (#15): echoes the exact
     text it received, so the printed output PROVES the subagent frame was
@@ -152,6 +198,33 @@ def main() -> None:
     peer_tool = TicketEchoAgent().as_tool(audience="agent")
     print("\nas_tool(audience='agent') — text the subagent actually received:")
     print(repr(peer_tool.func("Resuma o chamado 4711")))
+
+    # on_tool_start/on_tool_end hooks (#17): fire around the get_time call —
+    # the log proves both ran without changing what the model saw.
+    print("\non_tool_start/on_tool_end (#17):")
+    hooked = AuditedAssistantAgent().invoke(
+        [Message(role="user", content="What time is it in Recife?")])
+    print(f"Final answer: {hooked.content}")
+    for line in HOOK_LOG:
+        print(f"  {line}")
+
+    # prune_tool_results_after (#16): tool results older than the last
+    # `keep_turns` assistant turns get stubbed out of the payload sent to the
+    # model. Shown directly on a synthetic history (deterministic, no LLM
+    # call needed for this part) — see ToolAgent._prune_history.
+    print("\nprune_tool_results_after (#16):")
+    old_result = "linha;" * 200
+    history = [
+        Message(role="user", content="vendas de maio?"),
+        Message(role="assistant", content="", tool_calls=[
+            {"name": "sql", "args": {"q": "..."}, "id": "c1"}]),
+        Message(role="tool", content=old_result, tool_call_id="c1"),
+        Message(role="assistant", content="Maio: R$ 10k."),
+        Message(role="user", content="e junho?"),
+    ]
+    print(f"before: tool result has {len(history[2].content)} chars")
+    pruned = ToolAgent._prune_history(history, keep_turns=1)
+    print(f"after:  tool result -> {pruned[2].content!r}")
 
 
 if __name__ == "__main__":

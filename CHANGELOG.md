@@ -145,6 +145,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   do `revision_mode="patch"` antes de promovê-lo a default. Zero mudança de
   comportamento.
 
+### Docs
+- Backfill de exemplos: `examples/providers_grok/` (provider xAI/Grok) e
+  apontador para o debug tap (`AIXON_DEBUG_REQUESTS`) em
+  `examples/tracing/README.md`.
+
 ## [0.1.20] - 2026-07-23
 
 ### Added
