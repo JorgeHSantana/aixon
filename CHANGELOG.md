@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ToolAgent`: poda opt-in de tool results antigos do payload (#16).** Novo
+  atributo `prune_tool_results_after: int | None = None` (default `None`,
+  zero mudança de comportamento). Com um `int N`, mensagens `role="tool"`
+  ANTES das últimas `N` mensagens `role="assistant"` do histórico têm o
+  content substituído por um stub curto (`[resultado de ferramenta omitido
+  (M caracteres) — já utilizado em resposta anterior]`) só no payload enviado
+  ao provider — o histórico do cliente não é tocado. Helper puro e testável
+  `ToolAgent._prune_history(messages, keep_turns)` (staticmethod, nunca muta a
+  lista/mensagens do chamador), chamado no início de `_build_agent`. Útil para
+  agentes de banco (`CropnetDB`, `sql_static`) cujas queries tendem a devolver
+  payloads grandes que já foram consumidos e resumidos em turnos anteriores.
+  Documentado em `docs/agents.md` ("Poda de tool results antigos (#16)").
 - **`Agent.as_tool(audience="agent")`: moldura de subagente opt-in (#15).**
   Novo parâmetro `audience` (default `"human"`, zero mudança de
   comportamento). Com `audience="agent"`, cada chamada anexa um sufixo fixo

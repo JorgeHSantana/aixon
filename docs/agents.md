@@ -273,6 +273,7 @@ class ResearchAgent(ToolAgent):
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds. |
 | `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
 | `shield_tool_errors` | `bool` | `True` | Error shield: any exception a tool raises (`httpx.ReadTimeout`, DB down, ...) becomes a readable `TOOL ERROR (...)` result handed back to the model — the agent reports the outage and/or proceeds, instead of the whole run/stream dying with an opaque server error. `False` restores the strict pre-shield behavior (exceptions propagate). Raw `BaseTool` entries are NOT shielded (see `coerce_tools`). |
+| `prune_tool_results_after` | `int \| None` | `None` | Opt-in pruning of old tool results (#16). `None` disables it (zero behavior change). See "Poda de tool results antigos (#16)" below. |
 
 **Tool-call memoization (request scope).** Within one served request (and
 within one `ReflectiveAgent` run), a tool called again with the SAME arguments
@@ -309,6 +310,40 @@ two tools that each `await asyncio.sleep(0.4)` complete a turn in ~0.4s, not
 ~0.8s. Prefer `async def` tools with `ainvoke`/`astream` regardless — the
 thread pool backing the sync path is an implementation detail of the
 installed langgraph version, not a contract aixon pins with its own test.
+
+### Poda de tool results antigos (#16)
+
+Agentes que ficam muito tempo em conversas com múltiplos turnos de consulta a
+banco (ex.: a família Analista/Gerente sobre `CropnetDB`) acumulam, no
+histórico, os resultados brutos de tool calls de turnos já respondidos — cada
+turno novo reenvia esses dumps ao provider mesmo que o modelo já os tenha
+consumido e resumido na resposta anterior. `prune_tool_results_after` é opt-in
+para esse caso: ligue-o em agentes cujas queries tendem a devolver payloads
+grandes (`sql_static`, `cropnet_db`, etc.).
+
+```python
+class GerenteAgent(ToolAgent):
+    llm = LLM("gpt-5.4", temperature=0.2)
+    tools = [...]
+    prune_tool_results_after = 2  # mantém as tool results das últimas 2 respostas
+```
+
+Com um `int N`, toda mensagem `role="tool"` que apareça ANTES das últimas `N`
+mensagens `role="assistant"` do histórico é substituída, só no payload
+enviado ao provider, por um stub curto:
+
+```
+[resultado de ferramenta omitido (3000 caracteres) — já utilizado em resposta anterior]
+```
+
+Uma janela maior que o número de turnos `assistant` no histórico não poda
+nada (comportamento idempotente para conversas curtas). O corte é feito por
+`ToolAgent._prune_history` (staticmethod pura, chamada no início de
+`_build_agent`) e NUNCA muta a lista ou as mensagens recebidas — o histórico
+do cliente (o que o Server/OnlyOffice/CLI guardam e reenviam) continua
+completo; a poda é efêmera, recomputada a cada request a partir do histórico
+original. Default `None` desliga a poda inteiramente (zero mudança de
+comportamento).
 
 ### Nesting agents as tools
 

@@ -58,6 +58,10 @@ class ToolAgent(Agent, abstract=True):
     # for a strict policy where tool exceptions propagate (pre-#9 behavior).
     shield_tool_errors: bool = True
     tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
+    # Context pruning (#16): with an int N, tool results OLDER than the last N
+    # assistant turns are replaced by a short stub when building the payload —
+    # already-consumed query dumps stop re-billing every turn. None = off.
+    prune_tool_results_after: int | None = None
 
     @classmethod
     def _validate_subclass(cls) -> None:
@@ -76,12 +80,34 @@ class ToolAgent(Agent, abstract=True):
 
     # ---- internal: build the langgraph agent + neutral message prep -------
 
+    @staticmethod
+    def _prune_history(messages: list[Message], keep_turns: int) -> list[Message]:
+        """Copy of *messages* with tool results before the last *keep_turns*
+        assistant messages stubbed out (#16). Never mutates the caller's list."""
+        import dataclasses
+
+        assistant_idx = [i for i, m in enumerate(messages) if m.role == "assistant"]
+        cutoff = assistant_idx[-keep_turns] if len(assistant_idx) >= keep_turns else 0
+        out: list[Message] = []
+        for i, m in enumerate(messages):
+            if m.role == "tool" and i < cutoff and m.content:
+                stub = (f"[resultado de ferramenta omitido "
+                        f"({len(m.content)} caracteres) — já utilizado em "
+                        f"resposta anterior]")
+                out.append(dataclasses.replace(m, content=stub))
+            else:
+                out.append(m)
+        return out
+
     def _build_agent(self, messages: list[Message]):
         """Return (compiled_agent, lc_messages, config). A leading neutral
         system (or developer — OpenAI's system-role alias) message overrides
         self.prompt."""
         from langchain.agents import create_agent
         from aixon._interop.messages import to_langchain
+
+        if self.prune_tool_results_after is not None:
+            messages = self._prune_history(messages, self.prune_tool_results_after)
 
         system_prompt = self.prompt or None
         if messages and messages[0].role in ("system", "developer"):
