@@ -43,3 +43,16 @@ def test_janela_maior_que_o_historico_nao_poda_nada():
 
 def test_default_desligado_nao_poda():
     assert ToolAgent.prune_tool_results_after is None
+
+
+def test_valor_invalido_rejeitado_no_registro():
+    import pytest
+    from aixon.exceptions import AixonError
+    from tests._fakes import make_llm
+
+    llm = make_llm()
+    with pytest.raises(AixonError, match="prune_tool_results_after"):
+        type("Pr16invAgent", (ToolAgent,), {
+            "name": "pr16inv", "llm": llm, "tools": [],
+            "prune_tool_results_after": 0,
+        })

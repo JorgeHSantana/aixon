@@ -77,6 +77,17 @@ class ToolAgent(Agent, abstract=True):
                 f"ToolAgent subclass '{cls.__name__}' must declare an `llm` "
                 f"attribute (e.g. `llm = LLM(\"gpt-4o-mini\")`). It was missing or None."
             )
+        # #16: values <= 0 are INVALID configuration, rejected at registration
+        # (same precedent as ReflectiveAgent's max_rounds). keep_turns=0 would
+        # hit `assistant_idx[-0]` == `assistant_idx[0]` (Python: -0 == 0) — an
+        # IndexError on a history with no assistant message yet, and a
+        # near-no-op otherwise; both the opposite of the attribute's name.
+        prune = getattr(cls, "prune_tool_results_after", None)
+        if prune is not None and (not isinstance(prune, int) or prune < 1):
+            raise AixonError(
+                f"'{cls.__name__}' has prune_tool_results_after={prune!r}; "
+                f"use None (off) or an int >= 1 (keep the last N assistant turns)."
+            )
 
     # ---- internal: build the langgraph agent + neutral message prep -------
 

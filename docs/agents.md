@@ -343,7 +343,9 @@ nada (comportamento idempotente para conversas curtas). O corte é feito por
 do cliente (o que o Server/OnlyOffice/CLI guardam e reenviam) continua
 completo; a poda é efêmera, recomputada a cada request a partir do histórico
 original. Default `None` desliga a poda inteiramente (zero mudança de
-comportamento).
+comportamento). Valores `<= 0` (ou não-int) são configuração inválida,
+rejeitada no registro da subclasse com `AixonError` — use `None` para
+desligar ou um `int >= 1`.
 
 ### Nesting agents as tools
 
