@@ -24,15 +24,36 @@ def _hist():
 
 
 def test_poda_stub_no_turno_antigo_preserva_o_recente():
+    # keep_turns=1: âncora por ROUNDS COMPLETOS (um round termina numa
+    # assistant SEM tool_calls) — o round de maio (mais antigo) é estubado,
+    # o de junho (o round completo mais recente) fica intacto.
     msgs = _hist()
-    out = ToolAgent._prune_history(msgs, keep_turns=2)
-    # tool result do turno de maio (fora das 2 últimas assistants) -> stub
+    out = ToolAgent._prune_history(msgs, keep_turns=1)
+    # tool result do round de maio (fora do último round completo) -> stub
     assert "omitido" in out[2].content and "3000" in out[2].content
-    # tool result do turno de junho (dentro da janela) -> intacto
+    # tool result do round de junho (o último round completo) -> intacto
     assert out[6].content == msgs[6].content
     # nada além de tool messages foi tocado; caller intacto
     assert out[3].content == "Maio: R$ 10k."
     assert "linha;" in msgs[2].content  # lista original não mutada
+
+
+def test_poda_por_rounds_completos_nao_estuba_tool_do_round_mais_recente():
+    # Regressão do bug: âncorar em TODA assistant (inclusive a que ABRIU a
+    # tool_call) fazia keep_turns=1 estubar o tool result do round MAIS
+    # RECENTE (o único round aqui, ainda em andamento — sem resposta final
+    # ainda). Com a âncora por rounds completos, len(finals)=1 <= keep_turns
+    # (1) e nada é podado: o tool result do round corrente sobrevive intacto.
+    msgs = [
+        Message(role="user", content="vendas de maio?"),
+        Message(role="assistant", content="", tool_calls=[
+            {"name": "sql", "args": {"q": "..."}, "id": "c1"}]),
+        Message(role="tool", content="dump grande de maio", tool_call_id="c1"),
+        Message(role="assistant", content="Maio: R$ 10k."),
+        Message(role="user", content="e junho?"),
+    ]
+    out = ToolAgent._prune_history(msgs, keep_turns=1)
+    assert out[2].content == "dump grande de maio"
 
 
 def test_janela_maior_que_o_historico_nao_poda_nada():
@@ -83,7 +104,7 @@ def test_invoke_com_prune_manda_stub_para_o_modelo(monkeypatch):
 
     type("Pr16IntAgent", (ToolAgent,), {
         "name": "pr16int", "llm": llm, "tools": [],
-        "prune_tool_results_after": 2,
+        "prune_tool_results_after": 1,
     })
     agent = get_registry().resolve("pr16int")
 
@@ -93,7 +114,8 @@ def test_invoke_com_prune_manda_stub_para_o_modelo(monkeypatch):
     assert captured, "o modelo nunca foi chamado"
     tool_msgs = [m for m in captured[0] if type(m).__name__ == "ToolMessage"]
     assert len(tool_msgs) == 2
-    # maio (fora da janela de 2 turnos) chega como stub; junho (dentro) intacto.
+    # maio (fora do último round completo) chega como stub; junho (o round
+    # completo mais recente) intacto.
     assert "omitido" in tool_msgs[0].content
     assert "linha;" not in tool_msgs[0].content
     assert "linha;" in tool_msgs[1].content

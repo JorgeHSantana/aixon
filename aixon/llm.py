@@ -33,6 +33,36 @@ _log = Logger("aixon.llm")
 _REQUEST_MODEL_CACHE_MAX = 8
 
 
+def _drain_chunk(lc_chunk: Any, agg: Any, *, tools: list[dict] | None) -> tuple[list[Chunk], Any]:
+    """Per-delta drain shared by ``LLM.stream``/``LLM.astream`` (#18a): the
+    neutral ``Chunk``(s) this ONE underlying provider chunk produces
+    (reasoning before content, matching a single delta that carries both —
+    e.g. a Claude thinking block followed by text), plus the updated
+    tool-call aggregator.
+
+    ``agg`` accumulates chunks via LangChain's summable ``AIMessageChunk``
+    (``+``) only when ``tools`` is active — real providers stream deltas that
+    sum into the full tool_calls; the fake test model streams one
+    already-complete message, so the "sum" is a no-op. No ``tools`` -> `agg`
+    is returned unchanged (always ``None``), preserving the exact no-tools
+    byte-for-byte behavior.
+
+    Pure function, no yielding: `stream`/`astream` differ only in their
+    surrounding for/async-for loop, so the actual Chunk delivery stays in
+    each of them; this only says WHAT to emit for one chunk."""
+    chunks: list[Chunk] = []
+    reasoning = reasoning_from_chunk(lc_chunk)
+    if reasoning:
+        chunks.append(Chunk(reasoning=reasoning))
+    # Some providers stream list-of-blocks deltas; flatten to text.
+    content = _flatten_content(getattr(lc_chunk, "content", ""))
+    if content:
+        chunks.append(Chunk(content=content))
+    if tools:
+        agg = lc_chunk if agg is None else agg + lc_chunk
+    return chunks, agg
+
+
 class LLM:
     """Declarative handle for a LangChain chat model behind a neutral boundary."""
 
@@ -292,15 +322,9 @@ class LLM:
         agg = None
         for lc_chunk in model.stream(
                 self._to_wire(messages), **self._invoke_kwargs()):
-            reasoning = reasoning_from_chunk(lc_chunk)
-            if reasoning:
-                yield Chunk(reasoning=reasoning)
-            # Some providers stream list-of-blocks deltas; flatten to text.
-            content = _flatten_content(getattr(lc_chunk, "content", ""))
-            if content:
-                yield Chunk(content=content)
-            if tools:
-                agg = lc_chunk if agg is None else agg + lc_chunk
+            chunks, agg = _drain_chunk(lc_chunk, agg, tools=tools)
+            for c in chunks:
+                yield c
         tool_calls = getattr(agg, "tool_calls", None) if agg is not None else None
         if tool_calls:
             yield Chunk(tool_calls=[dict(tc) for tc in tool_calls])
@@ -335,15 +359,9 @@ class LLM:
         agg = None
         async for lc_chunk in model.astream(
                 self._to_wire(messages), **self._invoke_kwargs()):
-            reasoning = reasoning_from_chunk(lc_chunk)
-            if reasoning:
-                yield Chunk(reasoning=reasoning)
-            # Some providers stream list-of-blocks deltas; flatten to text.
-            content = _flatten_content(getattr(lc_chunk, "content", ""))
-            if content:
-                yield Chunk(content=content)
-            if tools:
-                agg = lc_chunk if agg is None else agg + lc_chunk
+            chunks, agg = _drain_chunk(lc_chunk, agg, tools=tools)
+            for c in chunks:
+                yield c
         tool_calls = getattr(agg, "tool_calls", None) if agg is not None else None
         if tool_calls:
             yield Chunk(tool_calls=[dict(tc) for tc in tool_calls])

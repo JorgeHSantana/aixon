@@ -273,6 +273,18 @@ Full OpenAI-compatible wire format. Served routes:
 >   put document/client-side actions in their own turn, separate from
 >   internal lookups.
 >
+>   **SIDE EFFECTS (beyond wasted cost/fabricated text).** The turns
+>   generated AFTER that first client call are discarded as a *response*,
+>   but any INTERNAL tool the model calls in those discarded turns actually
+>   EXECUTES — LangGraph's `ToolNode` runs the call before the turn's text
+>   is thrown away. An internal tool with a side effect (write to a file,
+>   trigger an export, send a notification) based on the proxy's placeholder
+>   "result" fires anyway, and it cannot be undone afterward. Mitigation: on
+>   agents with `client_tools` enabled, avoid mixing internal tools that
+>   have side effects into the same `tools` list, or prompt the model to
+>   keep client-side (document) actions in their own turn, BEFORE any
+>   internal tool that writes/exports/notifies.
+>
 >   Runnable demos: `examples/client_tools/main.py` (raw passthrough, #18a)
 >   and `examples/client_tools/merge_demo.py` (first-class merge + resume,
 >   #18c).

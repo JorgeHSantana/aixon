@@ -507,6 +507,14 @@ class Orchestrator(Agent, abstract=True):
                 yield Chunk(reasoning=line + "\n")
         if final.reasoning:
             yield Chunk(reasoning=final.reasoning)
+        # A worker that surfaced client tool_calls (#18c) is not a final text
+        # answer — repassing it as Chunk(content=final.content) would drop the
+        # calls silently (final.content is "" for that Message). Surface them
+        # instead and end the stream here.
+        if final.tool_calls:
+            yield Chunk(tool_calls=final.tool_calls)
+            yield Chunk(done=True)
+            return
         yield Chunk(content=final.content)
         yield Chunk(done=True)
 
@@ -562,5 +570,11 @@ class Orchestrator(Agent, abstract=True):
                 yield Chunk(reasoning=line + "\n")
         if final.reasoning:
             yield Chunk(reasoning=final.reasoning)
+        # See stream(): a worker's surfaced client tool_calls must not be
+        # silently dropped as an empty content chunk.
+        if final.tool_calls:
+            yield Chunk(tool_calls=final.tool_calls)
+            yield Chunk(done=True)
+            return
         yield Chunk(content=final.content)
         yield Chunk(done=True)

@@ -331,20 +331,31 @@ grandes (`sql_static`, `cropnet_db`, etc.).
 class GerenteAgent(ToolAgent):
     llm = LLM("gpt-5.4", temperature=0.2)
     tools = [...]
-    prune_tool_results_after = 2  # mantém as tool results das últimas 2 respostas
+    prune_tool_results_after = 1  # mantém as tool results do round mais recente
 ```
 
-Com um `int N`, toda mensagem `role="tool"` que apareça ANTES das últimas `N`
-mensagens `role="assistant"` do histórico é substituída, só no payload
-enviado ao provider, por um stub curto:
+Com um `int N`, a âncora é por **rounds completos** — um round termina numa
+mensagem `role="assistant"` SEM `tool_calls` (sua resposta final); a mensagem
+`assistant` que EMITIU a tool call pertence ao round que ela abriu, não é um
+limite de round. Toda mensagem `role="tool"` que apareça ANTES do início dos
+últimos `N` rounds completos é substituída, só no payload enviado ao
+provider, por um stub curto:
 
 ```
 [resultado de ferramenta omitido (3000 caracteres) — já utilizado em resposta anterior]
 ```
 
-Uma janela maior que o número de turnos `assistant` no histórico não poda
-nada (comportamento idempotente para conversas curtas). O corte é feito por
-`ToolAgent._prune_history` (staticmethod pura, chamada no início de
+`N=1` preserva sempre o round MAIS RECENTE (inclusive um round ainda em
+andamento — histórico terminando em `assistant(tool_calls=...)` sem resposta
+final ainda). Uma versão anterior desta poda ancorava em toda mensagem
+`assistant` (contando também a que emitiu a tool call): isso fazia
+`keep_turns=1` estubar o tool result do PRÓPRIO round mais recente — o
+oposto do pretendido. Se seu código trazia `prune_tool_results_after = 2`
+como contorno para esse bug, `N=1` agora é o valor correto.
+
+Uma janela maior ou igual ao número de rounds completos no histórico não
+poda nada (comportamento idempotente para conversas curtas). O corte é feito
+por `ToolAgent._prune_history` (staticmethod pura, chamada no início de
 `_build_agent`) e NUNCA muta a lista ou as mensagens recebidas — o histórico
 do cliente (o que o Server/OnlyOffice/CLI guardam e reenviam) continua
 completo; a poda é efêmera, recomputada a cada request a partir do histórico
@@ -456,6 +467,17 @@ class RedatorAgent(ToolAgent):
   tabela `client_tools` × `client_tools_conflict`:
   [server.md](server.md#openaiadapter) ("Client tools"). Demo executável:
   `examples/client_tools/merge_demo.py`.
+  **EFEITOS COLATERAIS (além de custo/texto fabricado)**: os turnos gerados
+  DEPOIS daquela primeira call do cliente são descartados como *resposta*,
+  mas qualquer tool INTERNA que o modelo chame nesses turnos EXECUTA de
+  verdade — o `ToolNode` do LangGraph roda a call antes de o texto do turno
+  ser jogado fora. Uma tool interna com efeito colateral (gravar, exportar,
+  notificar) baseada no "resultado" placeholder do proxy dispara mesmo
+  assim, e não há como desfazer depois. Mitigação: em agentes com
+  `client_tools` ativo, evite combinar tools internas com efeito colateral
+  no mesmo `tools`, ou instrua no prompt que ações do cliente (documento)
+  fiquem em turno próprio, ANTES de qualquer tool interna que
+  grave/exporte/notifique.
 
 ### Nesting agents as tools
 

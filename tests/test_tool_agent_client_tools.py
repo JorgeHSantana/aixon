@@ -2,6 +2,8 @@
 """#18c — merge de client tools no ToolAgent: interna executa, do cliente borbulha."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -180,3 +182,39 @@ def test_surface_client_calls_e_funcao_pura():
     with client_tools(DOC_TOOL):
         agent.invoke(USER)
     assert not hasattr(agent, "_client_tool_names")
+
+
+def test_surfaced_preserva_reasoning_do_run():
+    # O caminho de surface (#18c) não pode perder o reasoning acumulado no
+    # run (labels de tool call internas) só porque a resposta virou
+    # tool_calls do cliente em vez de texto.
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "soma", "args": {"a": 2, "b": 3}, "id": "c1"}]),
+        AIMessage(content="", tool_calls=[
+            {"name": "inserir_no_documento", "args": {"texto": "5"},
+             "id": "c2"}]),
+    ]
+    agent = _merge_agent("mg18k", script)
+    with client_tools(DOC_TOOL):
+        out = agent.invoke(USER)
+    assert out.tool_calls == [
+        {"name": "inserir_no_documento", "args": {"texto": "5"}, "id": "c2"}]
+    assert out.reasoning is not None and "soma" in out.reasoning
+
+
+def test_ainvoke_surfaced_preserva_reasoning_do_run():
+    # Paridade async do teste acima.
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "soma", "args": {"a": 2, "b": 3}, "id": "c1"}]),
+        AIMessage(content="", tool_calls=[
+            {"name": "inserir_no_documento", "args": {"texto": "5"},
+             "id": "c2"}]),
+    ]
+    agent = _merge_agent("mg18l", script)
+    with client_tools(DOC_TOOL):
+        out = asyncio.run(agent.ainvoke(USER))
+    assert out.tool_calls == [
+        {"name": "inserir_no_documento", "args": {"texto": "5"}, "id": "c2"}]
+    assert out.reasoning is not None and "soma" in out.reasoning

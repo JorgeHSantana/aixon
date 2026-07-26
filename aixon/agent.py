@@ -11,8 +11,11 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Awaitable, Callable, Iterator
 
 from aixon.exceptions import AixonError, NamingError
+from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.registry import get_registry
+
+_log = Logger("aixon.agent")
 
 # Subagent frame (#15): appended to the user text when as_tool(audience="agent")
 # — the callee must return dense facts for ANOTHER AGENT, not prose for a human.
@@ -23,6 +26,30 @@ _AGENT_AUDIENCE_SUFFIX = (
     "humano. Devolva apenas os fatos relevantes à pergunta, densos e "
     "estruturados, sem saudação, cortesia ou oferta de ajuda.]"
 )
+
+
+def _client_tool_leak_text(name: str, tool_calls: list[dict]) -> str:
+    """A worker wrapped by ``as_tool`` that surfaced CLIENT tool_calls (#18c)
+    with no text content has nothing an ``as_tool`` caller can use — the
+    proxy sentinel never had a real result, and ``as_tool`` has no channel to
+    relay ``tool_calls`` back to whatever called the tool (a parent agent's
+    tool loop only understands a string result). Silently returning "" would
+    read as the subagent producing nothing; log a warning (so the gap is
+    visible in telemetry) and hand back an explanatory string instead, so the
+    caller's own model sees why the subagent came back empty-handed."""
+    names = ", ".join(sorted({
+        (c.get("name") if isinstance(c, dict) else getattr(c, "name", None)) or "?"
+        for c in tool_calls
+    }))
+    _log.warning(
+        f"as_tool('{name}'): worker surfaced client tool call(s) ({names}) "
+        f"with empty content — client tool calls do not cross as_tool"
+    )
+    return (
+        f"[subagente '{name}' solicitou ferramenta do cliente ({names}) — "
+        f"chamadas de client tools não atravessam as_tool; trate diretamente "
+        f"com o agente]"
+    )
 
 
 @dataclass
@@ -225,10 +252,14 @@ class Agent(ABC):
 
         def _run(text: str) -> str:
             result = self.invoke([Message(role="user", content=text + suffix)])
+            if result.tool_calls and not result.content:
+                return _client_tool_leak_text(self.name, result.tool_calls)
             return result.content
 
         async def _arun(text: str) -> str:
             result = await self.ainvoke([Message(role="user", content=text + suffix)])
+            if result.tool_calls and not result.content:
+                return _client_tool_leak_text(self.name, result.tool_calls)
             return result.content
 
         return AgentTool(

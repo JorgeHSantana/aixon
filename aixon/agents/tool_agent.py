@@ -94,8 +94,13 @@ class ToolAgent(Agent, abstract=True):
     shield_tool_errors: bool = True
     tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
     # Context pruning (#16): with an int N, tool results OLDER than the last N
-    # assistant turns are replaced by a short stub when building the payload —
-    # already-consumed query dumps stop re-billing every turn. None = off.
+    # COMPLETE rounds (a round ends on an assistant message WITHOUT
+    # tool_calls — its final answer) are replaced by a short stub when
+    # building the payload — already-consumed query dumps stop re-billing
+    # every turn. Counting an in-progress round's tool-calling assistant
+    # message as one of the N would stub the CURRENT round's own tool result
+    # (the historical bug); N=1 always preserves the most recent round.
+    # None = off.
     prune_tool_results_after: int | None = None
 
     # Client tools (#18c): "ignore" (default) | "merge" (client defs join the
@@ -178,11 +183,21 @@ class ToolAgent(Agent, abstract=True):
     @staticmethod
     def _prune_history(messages: list[Message], keep_turns: int) -> list[Message]:
         """Copy of *messages* with tool results before the last *keep_turns*
-        assistant messages stubbed out (#16). Never mutates the caller's list."""
+        COMPLETE rounds stubbed out (#16). A round is "complete" when it ends
+        on an assistant message WITHOUT tool_calls (its final answer) — the
+        assistant message that EMITTED the tool_calls belongs to the round it
+        opened, not to a round boundary. Anchoring on every assistant message
+        (the historical bug) would count that tool-calling message as one of
+        the `keep_turns` most-recent turns, stubbing the tool result the
+        CURRENT (most recent) round still needs — e.g. keep_turns=1 stubbing
+        the very round in progress. Never mutates the caller's list."""
         import dataclasses
 
-        assistant_idx = [i for i, m in enumerate(messages) if m.role == "assistant"]
-        cutoff = assistant_idx[-keep_turns] if len(assistant_idx) >= keep_turns else 0
+        finals = [i for i, m in enumerate(messages)
+                  if m.role == "assistant" and not m.tool_calls]
+        if len(finals) <= keep_turns:
+            return list(messages)
+        cutoff = finals[-(keep_turns + 1)] + 1
         out: list[Message] = []
         for i, m in enumerate(messages):
             if m.role == "tool" and i < cutoff and m.content:
@@ -219,15 +234,17 @@ class ToolAgent(Agent, abstract=True):
             system_prompt = messages[0].content or system_prompt
             messages = messages[1:]
 
-        # Pass the hooks to coerce_tools only when a subclass overrides them
-        # (#17) — avoids a dict-copy per tool call in the (default) no-hook
-        # case, and keeps the guard's on_start/on_end branches unused/cheap.
-        overridden = (type(self).on_tool_start is not ToolAgent.on_tool_start
-                      or type(self).on_tool_end is not ToolAgent.on_tool_end)
+        # Pass each hook to coerce_tools only when THAT hook is individually
+        # overridden (#17) — avoids a dict-copy per tool call in the
+        # (default) no-hook case, and a subclass overriding only one of
+        # on_tool_start/on_tool_end must not drag the other (still the
+        # inherited no-op) along as if it too had been customized.
+        start_overridden = type(self).on_tool_start is not ToolAgent.on_tool_start
+        end_overridden = type(self).on_tool_end is not ToolAgent.on_tool_end
         lc_tools = coerce_tools(
             list(self.tools), shield_errors=self.shield_tool_errors,
-            on_tool_start=self.on_tool_start if overridden else None,
-            on_tool_end=self.on_tool_end if overridden else None,
+            on_tool_start=self.on_tool_start if start_overridden else None,
+            on_tool_end=self.on_tool_end if end_overridden else None,
         )
 
         # Client tools (#18c): request-scoped by construction — computed on
@@ -250,10 +267,10 @@ class ToolAgent(Agent, abstract=True):
                         f"tools of '{self.name}'. Set client_tools_conflict to "
                         f"'internal' or 'client', or filter the defs."
                     )
-                if clash and self.client_tools_conflict == "internal":
+                elif clash and self.client_tools_conflict == "internal":
                     defs = [d for d in defs
                             if (d.get("function") or {}).get("name") not in clash]
-                if clash and self.client_tools_conflict == "client":
+                elif clash and self.client_tools_conflict == "client":
                     lc_tools = [t for t in lc_tools if t.name not in clash]
                 proxies = _client_proxy_tools(defs)
                 client_tool_names = {t.name for t in proxies}
@@ -446,6 +463,12 @@ class ToolAgent(Agent, abstract=True):
             result["messages"][len(lc_messages):], client_tool_names)
         if surfaced is not None:
             surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
+            # Same as the normal-answer path below: reasoning collected this
+            # run (tool-step labels, nested-agent emit_reasoning) must not be
+            # dropped just because the run ended on a client tool_calls
+            # surface instead of a text answer.
+            if reasoning_lines:
+                surfaced.reasoning = "\n".join(reasoning_lines)
             return surfaced
         final = from_langchain(result["messages"][-1])
         # Usage must cover the WHOLE run (every model turn), not just the
@@ -478,7 +501,14 @@ class ToolAgent(Agent, abstract=True):
                     # Each update is {node_name: {"messages": [...]}}.
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
-                            seen_messages.append(m)
+                            # Only accumulated when client tools are actually
+                            # in play — _surface_client_calls short-circuits
+                            # to None on an empty client_tool_names anyway, so
+                            # retaining every message here for a plain request
+                            # (no client tools) is pure unbounded memory with
+                            # no payoff.
+                            if client_tool_names:
+                                seen_messages.append(m)
                             if getattr(m, "type", "") == "ai":
                                 self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
@@ -562,6 +592,10 @@ class ToolAgent(Agent, abstract=True):
             result["messages"][len(lc_messages):], client_tool_names)
         if surfaced is not None:
             surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
+            # See the sync invoke() comment: reasoning must not be dropped on
+            # the client-tool-calls-surfaced path either.
+            if reasoning_lines:
+                surfaced.reasoning = "\n".join(reasoning_lines)
             return surfaced
         final = from_langchain(result["messages"][-1])
         # See the sync invoke() comment: usage covers the WHOLE run.
@@ -615,7 +649,10 @@ class ToolAgent(Agent, abstract=True):
                         raise self._iteration_limit_error(exc) from exc
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
-                            seen_messages.append(m)
+                            # See stream(): only kept when client tools are
+                            # actually in play.
+                            if client_tool_names:
+                                seen_messages.append(m)
                             if getattr(m, "type", "") == "ai":
                                 self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)

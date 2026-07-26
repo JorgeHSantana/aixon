@@ -209,11 +209,13 @@ def main() -> None:
         print(f"  {line}")
 
     # prune_tool_results_after (#16): tool results older than the last
-    # `keep_turns` assistant turns get stubbed out of the payload sent to the
-    # model. Shown directly on a synthetic history (deterministic, no LLM
-    # call needed for this part) — see ToolAgent._prune_history.
+    # `keep_turns` COMPLETE rounds (a round ends on an assistant message
+    # WITHOUT tool_calls) get stubbed out of the payload sent to the model.
+    # Two full rounds here so keep_turns=1 has an OLDER round to prune while
+    # preserving the most recent one — see ToolAgent._prune_history.
     print("\nprune_tool_results_after (#16):")
     old_result = "linha;" * 200
+    recent_result = "linha;" * 150
     history = [
         Message(role="user", content="vendas de maio?"),
         Message(role="assistant", content="", tool_calls=[
@@ -221,10 +223,17 @@ def main() -> None:
         Message(role="tool", content=old_result, tool_call_id="c1"),
         Message(role="assistant", content="Maio: R$ 10k."),
         Message(role="user", content="e junho?"),
+        Message(role="assistant", content="", tool_calls=[
+            {"name": "sql", "args": {"q": "..."}, "id": "c2"}]),
+        Message(role="tool", content=recent_result, tool_call_id="c2"),
+        Message(role="assistant", content="Junho: R$ 12k."),
     ]
-    print(f"before: tool result has {len(history[2].content)} chars")
+    print(f"before: round de maio tem {len(history[2].content)} chars, "
+          f"round de junho tem {len(history[6].content)} chars")
     pruned = ToolAgent._prune_history(history, keep_turns=1)
-    print(f"after:  tool result -> {pruned[2].content!r}")
+    print(f"after:  maio (mais antigo) -> {pruned[2].content!r}")
+    print(f"        junho (round mais recente) -> "
+          f"{len(pruned[6].content)} chars intactos")
 
 
 if __name__ == "__main__":

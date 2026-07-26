@@ -47,6 +47,22 @@ def _notify_end(on_end: Callable | None, name: str, kwargs: dict, result: Any,
         _log.warning(f"on_tool_end hook failed for '{name}': {exc}")
 
 
+def _notify_start(on_start: Callable | None, name: str, kwargs: dict) -> dict:
+    """Fire the ``on_tool_start`` hook (#17) and return the (possibly
+    rewritten) kwargs. ``on_start is None`` -> kwargs unchanged, no call.
+
+    A raising ``on_start`` PROPAGATES — it is not swallowed here, unlike
+    ``_notify_end`` — because the hook blocking/failing the call IS the tool
+    itself failing (the shield, #9, converts it to a TOOL ERROR result at the
+    call site). The caller is responsible for pairing that exception with an
+    ``on_tool_end`` notification (``error`` filled in) before applying the
+    shield — see the two ``_guard`` wrappers below."""
+    if on_start is None:
+        return kwargs
+    override = on_start(name, dict(kwargs))
+    return override if isinstance(override, dict) else kwargs
+
+
 def _guard(name: str, fn: Callable[..., Any], *, memoize: bool, shield: bool,
            is_async: bool, on_start: Callable | None = None,
            on_end: Callable | None = None) -> Callable[..., Any]:
@@ -65,7 +81,11 @@ def _guard(name: str, fn: Callable[..., Any], *, memoize: bool, shield: bool,
       (shield applies, same as any other exception). ``on_end(name, kwargs,
       result, error)`` runs after the call (including on a cache hit, and on
       an error, with ``error`` filled in) and is observation-only — see
-      ``_notify_end``.
+      ``_notify_end``. Critically, ``on_end`` ALSO fires (with ``error``
+      filled in and ``result=None``) when ``on_start`` itself is the one that
+      raised/blocked the call — a hook that logs/audits every attempted call
+      must see the blocked ones too, not just the ones that reached the tool
+      body; see ``_notify_start``.
 
     ``functools.wraps`` preserves ``__wrapped__``, so ``inspect.signature``
     (used by StructuredTool.from_function to infer the args schema) still sees
@@ -85,13 +105,11 @@ def _guard(name: str, fn: Callable[..., Any], *, memoize: bool, shield: bool,
     if is_async:
         @functools.wraps(fn)
         async def awrapper(*args: Any, **kwargs: Any) -> Any:
-            if on_start is not None:
-                try:
-                    override = on_start(name, dict(kwargs))
-                    if isinstance(override, dict):
-                        kwargs = override
-                except Exception as exc:  # hook-start = falha da tool (shield #9)
-                    return _handle(exc)
+            try:
+                kwargs = _notify_start(on_start, name, kwargs)
+            except Exception as exc:  # hook-start = falha da tool (shield #9)
+                _notify_end(on_end, name, kwargs, None, exc)
+                return _handle(exc)
             cache, key = _lookup(args, kwargs)  # cache DEPOIS do rewrite (#17)
             if cache is not None and key is not None and cache.has(key):
                 result = cache.get(key)
@@ -110,13 +128,11 @@ def _guard(name: str, fn: Callable[..., Any], *, memoize: bool, shield: bool,
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if on_start is not None:
-            try:
-                override = on_start(name, dict(kwargs))
-                if isinstance(override, dict):
-                    kwargs = override
-            except Exception as exc:  # hook-start = falha da tool (shield #9)
-                return _handle(exc)
+        try:
+            kwargs = _notify_start(on_start, name, kwargs)
+        except Exception as exc:  # hook-start = falha da tool (shield #9)
+            _notify_end(on_end, name, kwargs, None, exc)
+            return _handle(exc)
         cache, key = _lookup(args, kwargs)  # cache DEPOIS do rewrite (#17)
         if cache is not None and key is not None and cache.has(key):
             result = cache.get(key)

@@ -328,6 +328,12 @@ class ReflectiveAgent(Agent, abstract=True):
     def _invoke(self, messages: list[Message]) -> Message:
         msgs = list(messages)
         answer = self._worker.invoke(msgs)
+        # (a tool-call answer is not judgeable text — surfaced client calls
+        # pass through) — sending empty content to the judge would evaluate a
+        # blank RESPONSE, burn a round, and the retry message it produces
+        # would still drop the tool_calls the client needs to execute.
+        if answer.tool_calls and not answer.content:
+            return answer
         if not self.should_judge(messages, answer):
             return answer
         # Every worker AND judge turn attempted this run is summed here (a
@@ -408,6 +414,7 @@ class ReflectiveAgent(Agent, abstract=True):
                 answer, pending = pending, None
             else:
                 parts: list[str] = []
+                worker_tool_calls: list[dict] | None = None
                 # See _invoke(): round 1 has no previous answer (no-op); retry
                 # rounds publish it as the predicted output (#6).
                 with prediction_scope(answer.content or None):
@@ -416,7 +423,16 @@ class ReflectiveAgent(Agent, abstract=True):
                             yield Chunk(reasoning=chunk.reasoning)
                         if chunk.content:
                             parts.append(chunk.content)
-                answer = Message(role="assistant", content="".join(parts))
+                        if chunk.tool_calls:
+                            worker_tool_calls = chunk.tool_calls
+                answer = Message(role="assistant", content="".join(parts),
+                                  tool_calls=worker_tool_calls or [])
+            # (a tool-call answer is not judgeable text — surfaced client
+            # calls pass through) — before should_judge AND before the judge.
+            if answer.tool_calls and not answer.content:
+                yield Chunk(tool_calls=answer.tool_calls)
+                yield Chunk(done=True)
+                return
             if round_ == 1 and not self.should_judge(messages, answer):
                 yield Chunk(content=answer.content)
                 yield Chunk(done=True)
@@ -467,6 +483,10 @@ class ReflectiveAgent(Agent, abstract=True):
     async def _ainvoke(self, messages: list[Message]) -> Message:
         msgs = list(messages)
         answer = await self._worker.ainvoke(msgs)
+        # (a tool-call answer is not judgeable text — surfaced client calls
+        # pass through)
+        if answer.tool_calls and not answer.content:
+            return answer
         if not self.should_judge(messages, answer):
             return answer
         # See invoke(): sum every worker + judge turn attempted this run.
@@ -533,6 +553,7 @@ class ReflectiveAgent(Agent, abstract=True):
                 answer, pending = pending, None
             else:
                 parts: list[str] = []
+                worker_tool_calls: list[dict] | None = None
                 # See _invoke(): predicted output for retry rounds (#6).
                 with prediction_scope(answer.content or None):
                     async for chunk in self._worker.astream(msgs):
@@ -540,7 +561,15 @@ class ReflectiveAgent(Agent, abstract=True):
                             yield Chunk(reasoning=chunk.reasoning)
                         if chunk.content:
                             parts.append(chunk.content)
-                answer = Message(role="assistant", content="".join(parts))
+                        if chunk.tool_calls:
+                            worker_tool_calls = chunk.tool_calls
+                answer = Message(role="assistant", content="".join(parts),
+                                  tool_calls=worker_tool_calls or [])
+            # See _stream(): pass-through before should_judge/the judge.
+            if answer.tool_calls and not answer.content:
+                yield Chunk(tool_calls=answer.tool_calls)
+                yield Chunk(done=True)
+                return
             if round_ == 1 and not self.should_judge(messages, answer):
                 yield Chunk(content=answer.content)
                 yield Chunk(done=True)
