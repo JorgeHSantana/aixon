@@ -256,16 +256,22 @@ Full OpenAI-compatible wire format. Served routes:
 >   `Message`/LangChain conversion (`to_langchain`/`from_langchain`) as any
 >   other tool result — no special-casing needed on the client side.
 >
->   **Limitation (v1): mixed turns.** If the model calls an INTERNAL tool and
->   a CLIENT tool **in the same turn**, only the client call(s) surface in
->   `Message.tool_calls` for that run — the internal call already executed
->   server-side but its result is not returned to the caller in that response
->   (LangGraph's `ToolNode` runs the whole turn's calls before the client-proxy
->   `return_direct` short-circuits the graph). On the next request (once the
->   client posts its tool result), if the model re-emits the same internal
->   call it simply re-executes; if it doesn't, that internal result is lost.
->   Avoid depending on cross-turn ordering between an internal and a client
->   tool call until this is addressed.
+>   **Mixed turns (internal + client call in the SAME model turn).** The
+>   FIRST turn of the run that calls a client tool is what surfaces: its
+>   client call(s) become `Message.tool_calls`, and the internal call(s) of
+>   that same turn have already executed server-side (LangGraph's `ToolNode`
+>   runs the whole turn's calls). Because LangChain's `return_direct` only
+>   ends the graph when ALL of a turn's calls are return-direct, a mixed
+>   turn keeps the loop going — the model sees the proxy's placeholder
+>   "result" and may generate further turns; everything it produced AFTER
+>   that first client call is **discarded** (those model turns are paid for
+>   but never reach the client: a real result for the client's tool did not
+>   exist yet, so any answer built on the placeholder would be fabricated).
+>   On the next request (with the client's tool result in the history) the
+>   model re-plans from real data; an internal call it re-emits simply
+>   re-executes. To reduce the wasted post-call turns, prompt the agent to
+>   put document/client-side actions in their own turn, separate from
+>   internal lookups.
 >
 >   Runnable demos: `examples/client_tools/main.py` (raw passthrough, #18a)
 >   and `examples/client_tools/merge_demo.py` (first-class merge + resume,

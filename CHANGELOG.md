@@ -36,28 +36,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     follow-up da issue #18.
   - **#18c** — `ToolAgent(client_tools="ignore"|"merge"|"replace")`: caminho
     de primeira classe onde os defs do cliente entram no MESMO loop de
-    tool-calling das tools internas do agente. Uma call de tool INTERNA
-    executa server-side e o loop continua normalmente; uma call de tool do
-    CLIENTE encerra o turno na hora via um proxy `return_direct` por def
-    (`_client_proxy_tools`, mesmo mecanismo da ponte nativa do OnlyOffice) —
-    o run devolve `Message(role="assistant", content="", tool_calls=[...])`
-    com usage somado do run inteiro; em `stream`/`astream`,
-    `Chunk(tool_calls=...)` seguido de `Chunk(done=True)`, sem content. Novo
-    `client_tools_conflict: str = "error"` resolve colisão de nome entre uma
-    tool interna e um def do cliente: `"error"` (default — `AixonError` já na
-    montagem, citando as tools em colisão), `"internal"` (descarta o def do
-    cliente) ou `"client"` (remove a tool interna daquele request). Novo hook
+    tool-calling das tools internas do agente, via um proxy `return_direct`
+    por def (`_client_proxy_tools`, mesmo mecanismo da ponte nativa do
+    OnlyOffice; o corpo do proxy é um stub — a tool do cliente nunca executa
+    server-side). Uma call de tool INTERNA executa server-side e o loop
+    continua normalmente; quando o modelo chama uma tool do CLIENTE, o run
+    devolve `Message(role="assistant", content="", tool_calls=[...])` com
+    usage somado do run inteiro; em `stream`/`astream`,
+    `Chunk(tool_calls=...)` seguido de `Chunk(done=True)`, sem content. A
+    detecção pós-run (`_surface_client_calls`, staticmethod pura —
+    mensagens novas do run + set de nomes como PARÂMETROS, nenhum estado de
+    request na instância singleton do registry, então requests concorrentes
+    não se corrompem) surfaceia o PRIMEIRO turno do run que chamou tool do
+    cliente. Turno misto (interna + cliente na MESMA resposta do modelo):
+    as internas do turno já executaram server-side; como o `return_direct`
+    do LangChain só corta o grafo quando TODAS as calls do turno são
+    return-direct, o modelo pode gerar turnos após o sentinel do proxy —
+    esses turnos pós-sentinel são DESCARTADOS (custo gasto, mas nenhuma
+    resposta fabricada sobre um resultado que ainda não existia chega ao
+    cliente); prompts que separem ações do documento em turno próprio
+    reduzem o desperdício. Novo `client_tools_conflict: str = "error"`
+    resolve colisão de nome entre uma tool interna e um def do cliente:
+    `"error"` (default — `AixonError` já na montagem, citando as tools em
+    colisão), `"internal"` (descarta o def do cliente) ou `"client"` (remove
+    a tool interna daquele request). Novo hook
     `client_tools_filter(self, defs) -> defs` (default identidade) para
     curadoria antes da política de conflito. Retomada: a request seguinte
     traz `assistant(tool_calls=...)` + `role="tool"` no histórico — já
     coberto pelo `to_langchain`/`from_langchain` existentes, sem mudança no
-    `_interop`. Limitação v1 documentada: turno misto (interna + cliente na
-    MESMA resposta do modelo) só surfaceia as calls do cliente — a interna
-    re-executa na retomada se o modelo a re-emitir. Ambos os novos atributos
-    são validados em `_validate_subclass` (valor fora do enum → `AixonError`
-    no registro). Documentado em `docs/agents.md` ("Client tools mesclados no
-    loop (#18c)") e `docs/server.md` ("Client tools", com a tabela
-    `client_tools` × `client_tools_conflict`); demo executável
+    `_interop` (e o scan restrito às mensagens NOVAS do run garante que a
+    call já executada do histórico não re-surfaceia). Ambos os novos
+    atributos são validados em `_validate_subclass` (valor fora do enum →
+    `AixonError` no registro). Documentado em `docs/agents.md` ("Client
+    tools mesclados no loop (#18c)") e `docs/server.md` ("Client tools", com
+    a tabela `client_tools` × `client_tools_conflict`); demo executável
     `examples/client_tools/merge_demo.py`.
 
   **Nota de migração: nenhuma** — tudo opt-in (`client_tools="ignore"` e

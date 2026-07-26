@@ -433,14 +433,22 @@ class RedatorAgent(ToolAgent):
   `assistant(tool_calls=[...])` + `role="tool"` (o resultado) no histórico —
   o mesmo round-trip neutro que qualquer resultado de tool usa
   (`to_langchain`/`from_langchain`); nada de especial do lado do cliente.
-- **Limitação v1 — turno misto**: se o modelo chamar uma tool interna E uma
-  do cliente NO MESMO turno, só as calls do cliente aparecem em
-  `Message.tool_calls` daquele run (a interna já executou server-side, mas o
-  resultado dela não volta nessa resposta — o `ToolNode` do LangGraph roda
-  todas as calls do turno antes do proxy `return_direct` cortar o grafo). Se
-  o modelo re-emitir a mesma call interna no próximo turno (já com o
-  resultado do cliente no histórico), ela roda de novo; se não re-emitir, o
-  resultado daquele turno se perde. Detalhe completo do request/response e
+- **Turno misto (interna + cliente na MESMA resposta do modelo)**: o que
+  surfaceia é o PRIMEIRO turno do run que chamou uma tool do cliente — as
+  calls do cliente desse turno viram `Message.tool_calls`, e as internas do
+  mesmo turno já executaram server-side (o `ToolNode` do LangGraph roda
+  todas as calls do turno). Como o `return_direct` do LangChain só encerra o
+  grafo quando TODAS as calls do turno são return-direct, um turno misto NÃO
+  corta o loop: o modelo vê o "resultado" placeholder do proxy e pode gerar
+  turnos adicionais — tudo que ele produziu DEPOIS daquela primeira call do
+  cliente é descartado (esses turnos custam tokens mas nunca chegam ao
+  cliente: o resultado real da tool do cliente ainda não existia, então
+  qualquer texto construído sobre o placeholder seria fabricado). No request
+  seguinte (com o resultado do cliente no histórico) o modelo replaneja com
+  dados reais; uma call interna re-emitida simplesmente roda de novo.
+  Recomendação: prompts que induzam o modelo a separar ações do documento
+  (tools do cliente) em turno próprio, depois das consultas internas,
+  reduzem o desperdício pós-call. Detalhe completo do request/response e
   tabela `client_tools` × `client_tools_conflict`:
   [server.md](server.md#openaiadapter) ("Client tools"). Demo executável:
   `examples/client_tools/merge_demo.py`.

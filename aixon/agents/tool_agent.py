@@ -35,12 +35,15 @@ _CLIENT_TOOL_STOP = "__aixon_client_tool_call__"
 def _client_proxy_tools(defs: list[dict]) -> list:
     """One ``return_direct`` ``StructuredTool`` per client tool def (#18c).
 
-    Calling a proxy ENDS the graph immediately (the same ``return_direct``
-    precedent used by the OnlyOffice native-bridge tools) instead of running
-    real work — the proxy body is a stub. The post-run detection
-    (``_surface_client_calls``) recognizes the resulting ``ToolMessage`` by
-    name and rebuilds the neutral ``Message.tool_calls`` the CLIENT must
-    execute, so the LangGraph loop never actually "does" the client's tool."""
+    The proxy body is a stub returning a sentinel — the LangGraph loop never
+    actually "does" the client's tool. ``return_direct`` (the OnlyOffice
+    native-bridge precedent) ends the graph right after the call when ALL of
+    the turn's calls are proxies; on a MIXED turn (internal + client call in
+    the same AI message) LangChain keeps looping, so the post-run detection
+    (``_surface_client_calls``) does not rely on the graph ending — it scans
+    the run's AI messages for the first turn that called a client tool and
+    surfaces those calls as the neutral ``Message.tool_calls`` the CLIENT
+    must execute."""
     from langchain_core.tools import StructuredTool
 
     proxies = []
@@ -192,9 +195,19 @@ class ToolAgent(Agent, abstract=True):
         return out
 
     def _build_agent(self, messages: list[Message]):
-        """Return (compiled_agent, lc_messages, config). A leading neutral
-        system (or developer — OpenAI's system-role alias) message overrides
-        self.prompt."""
+        """Return (compiled_agent, lc_messages, config, client_tool_names).
+        A leading neutral system (or developer — OpenAI's system-role alias)
+        message overrides self.prompt.
+
+        ``client_tool_names`` (#18c) is the set of CLIENT tool names proxied
+        into this build (empty when ``client_tools="ignore"`` or the request
+        declared none). It is RETURNED — never stored on ``self`` — because
+        the agent instance is a registry singleton shared by concurrent
+        requests: request-scoped state on the instance would let request B
+        (running ``_build_agent`` during one of A's awaits) overwrite request
+        A's set — including resetting it to empty for a request without
+        client tools — making A leak the proxy sentinel as content and lose
+        its tool_calls."""
         from langchain.agents import create_agent
         from aixon._interop.messages import to_langchain
 
@@ -217,10 +230,11 @@ class ToolAgent(Agent, abstract=True):
             on_tool_end=self.on_tool_end if overridden else None,
         )
 
-        # Client tools (#18c): request-scoped, so recomputed on every
-        # _build_agent call (the first step of all 4 entry points) rather
-        # than cached on the instance across requests.
-        self._client_tool_names: set[str] = set()
+        # Client tools (#18c): request-scoped by construction — computed on
+        # every _build_agent call (the first step of all 4 entry points) and
+        # handed back to the caller as a LOCAL value, never cached on the
+        # (singleton) instance.
+        client_tool_names: set[str] = set()
         if self.client_tools != "ignore":
             from aixon.runtime import current_client_tools
 
@@ -242,7 +256,7 @@ class ToolAgent(Agent, abstract=True):
                 if clash and self.client_tools_conflict == "client":
                     lc_tools = [t for t in lc_tools if t.name not in clash]
                 proxies = _client_proxy_tools(defs)
-                self._client_tool_names = {t.name for t in proxies}
+                client_tool_names = {t.name for t in proxies}
                 lc_tools = proxies if self.client_tools == "replace" else \
                     lc_tools + proxies
 
@@ -252,7 +266,7 @@ class ToolAgent(Agent, abstract=True):
         agent = create_agent(self.llm.request_chat_model(), lc_tools, system_prompt=system_prompt)
         lc_messages = to_langchain(messages)
         config = {"recursion_limit": 2 * self.max_iterations + 1}
-        return agent, lc_messages, config
+        return agent, lc_messages, config, client_tool_names
 
     def _emit_message_reasoning(self, message) -> None:
         """If a NEW AI message carries reasoning extracted by R2's
@@ -322,31 +336,47 @@ class ToolAgent(Agent, abstract=True):
                 totals[key] += usage[key]
         return totals
 
-    def _surface_client_calls(self, result_messages) -> Message | None:
-        """If the run ended on a client-proxy ``ToolMessage`` (#18c), rebuild
-        the neutral assistant message carrying THAT turn's client tool_calls
-        (with their original ``id``/``args``) so the wire adapter emits
-        ``finish_reason="tool_calls"``. Returns ``None`` on any other ending
-        (no client tools configured, or the run finished normally)."""
-        if not self._client_tool_names:
+    @staticmethod
+    def _surface_client_calls(new_messages,
+                              client_tool_names: set[str]) -> Message | None:
+        """If THIS run's model called a CLIENT tool (#18c), rebuild the
+        neutral assistant message carrying that turn's client tool_calls
+        (original ``id``/``args``) so the wire adapter emits
+        ``finish_reason="tool_calls"``. Returns ``None`` when no client tool
+        was called (or none is configured).
+
+        Pure static helper: ``new_messages`` must be the messages PRODUCED BY
+        this run (invoke/ainvoke: ``result["messages"][len(lc_messages):]``;
+        streams: the accumulated update messages) and ``client_tool_names``
+        the set ``_build_agent`` returned — no request state ever lives on
+        the (singleton, concurrently shared) agent instance. Scoping the scan
+        to the run's NEW messages also keeps a resumed request correct: the
+        history's own ``assistant(tool_calls)`` turn (the one the client
+        already executed) is not in ``new_messages``, so it can't re-surface.
+
+        The scan takes the FIRST AI message whose tool_calls include a client
+        tool, not just a run that ENDED on a client-proxy ToolMessage. That
+        covers the mixed turn (internal + client call in the SAME AI message):
+        LangChain's ``return_direct`` only ends the graph when ALL of a turn's
+        calls are return_direct, so a mixed turn keeps looping — the model
+        sees the proxy's sentinel as a "result" and may answer in text. A
+        proxy call never has a real result, so the client call must surface
+        regardless; any turns the model generated after the sentinel are
+        discarded (their cost is spent, but no fabricated "result" leaks)."""
+        if not client_tool_names:
             return None
-        last = result_messages[-1]
-        if getattr(last, "type", "") != "tool":
-            return None
-        if getattr(last, "name", "") not in self._client_tool_names:
-            return None
-        # The last AI message of the run carries the original calls (id/args).
-        for m in reversed(result_messages):
-            if getattr(m, "type", "") == "ai" and getattr(m, "tool_calls", None):
-                calls = [
-                    {"name": c.get("name"), "args": c.get("args") or {},
-                     "id": c.get("id")}
-                    for c in m.tool_calls
-                    if c.get("name") in self._client_tool_names
-                ]
-                if calls:
-                    return Message(role="assistant", content="",
-                                   tool_calls=calls)
+        for m in new_messages:
+            if getattr(m, "type", "") != "ai":
+                continue
+            calls = [
+                {"name": c.get("name"), "args": c.get("args") or {},
+                 "id": c.get("id")}
+                for c in (getattr(m, "tool_calls", None) or [])
+                if c.get("name") in client_tool_names
+            ]
+            if calls:
+                return Message(role="assistant", content="",
+                               tool_calls=calls)
         return None
 
     def _iteration_limit_error(self, exc: Exception) -> AixonError:
@@ -377,7 +407,7 @@ class ToolAgent(Agent, abstract=True):
 
         from langgraph.errors import GraphRecursionError
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         outer_channel = current_channel()
         cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
@@ -407,11 +437,13 @@ class ToolAgent(Agent, abstract=True):
             # Only drain (and consume) the lines if we own this channel. When
             # nested, leave them in the outer channel for its owner to drain.
             reasoning_lines = [] if outer_channel is not None else channel.drain()
-        # Client tools (#18c): a run that ends on a client-proxy ToolMessage
-        # is NOT a final answer — it's the model asking the CLIENT to run a
-        # tool. Surface those calls on a fresh Message instead of converting
-        # the (meaningless) proxy ToolMessage as if it were the answer.
-        surfaced = self._surface_client_calls(result["messages"])
+        # Client tools (#18c): a run whose model called a CLIENT tool is NOT
+        # a final answer — the client must execute the call. Scan only THIS
+        # run's new messages (a resumed history's own tool_calls turn must
+        # not re-surface) and discard anything the model produced after the
+        # proxy sentinel.
+        surfaced = self._surface_client_calls(
+            result["messages"][len(lc_messages):], client_tool_names)
         if surfaced is not None:
             surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
             return surfaced
@@ -434,7 +466,7 @@ class ToolAgent(Agent, abstract=True):
 
         from langgraph.errors import GraphRecursionError
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
         seen_messages: list = []
@@ -475,10 +507,11 @@ class ToolAgent(Agent, abstract=True):
             # Any trailing reasoning emitted after the last update.
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
-        # Client tools (#18c): a run ending on a client-proxy ToolMessage is
-        # not a final answer — surface those calls instead of any preamble
-        # content, and skip the normal content/done tail below.
-        surfaced = self._surface_client_calls(seen_messages) if seen_messages else None
+        # Client tools (#18c): a run whose model called a CLIENT tool is not
+        # a final answer — surface those calls instead of any content the
+        # model produced after the proxy sentinel, and skip the normal
+        # content/done tail below.
+        surfaced = self._surface_client_calls(seen_messages, client_tool_names)
         if surfaced is not None:
             yield Chunk(tool_calls=surfaced.tool_calls)
             yield Chunk(done=True)
@@ -501,7 +534,7 @@ class ToolAgent(Agent, abstract=True):
 
         from aixon._interop.messages import from_langchain
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         outer_channel = current_channel()
         cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
         with cm as channel:
@@ -523,9 +556,10 @@ class ToolAgent(Agent, abstract=True):
                     self._emit_message_reasoning(m)
                     self._emit_tool_call_labels(m)
             reasoning_lines = [] if outer_channel is not None else channel.drain()
-        # See the sync invoke() comment: a client-proxy ending surfaces the
-        # client's tool_calls instead of the (meaningless) proxy ToolMessage.
-        surfaced = self._surface_client_calls(result["messages"])
+        # See the sync invoke() comment: a client tool call surfaces as
+        # Message.tool_calls; post-sentinel model output is discarded.
+        surfaced = self._surface_client_calls(
+            result["messages"][len(lc_messages):], client_tool_names)
         if surfaced is not None:
             surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
             return surfaced
@@ -553,7 +587,7 @@ class ToolAgent(Agent, abstract=True):
 
         from aixon._interop.messages import _flatten_content
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
         timed_out = False
@@ -609,10 +643,10 @@ class ToolAgent(Agent, abstract=True):
                 )
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
-        # Client tools (#18c): same short-circuit as stream() — a run ending
-        # on a client-proxy ToolMessage surfaces the client's tool_calls
-        # instead of any preamble content.
-        surfaced = self._surface_client_calls(seen_messages) if seen_messages else None
+        # Client tools (#18c): same short-circuit as stream() — a client
+        # tool call surfaces as Chunk.tool_calls; post-sentinel content is
+        # discarded.
+        surfaced = self._surface_client_calls(seen_messages, client_tool_names)
         if surfaced is not None:
             yield Chunk(tool_calls=surfaced.tool_calls)
             yield Chunk(done=True)

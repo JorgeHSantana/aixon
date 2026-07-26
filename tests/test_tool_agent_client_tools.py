@@ -133,3 +133,50 @@ def test_valor_invalido_de_client_tools_erro_no_registro():
             "name": "mg18h", "llm": llm, "tools": [],
             "client_tools": "mescla",
         })
+
+
+def test_turno_misto_surfaceia_call_do_cliente():
+    # Turno MISTO: interna + cliente na MESMA AI message. O grafo NÃO corta
+    # (return_direct só encerra quando TODAS as calls do turno são
+    # return_direct), o modelo continua e responde texto — mas a call do
+    # cliente não pode ser engolida: ela nunca teve resultado real (o proxy
+    # devolve um sentinel), então SEMPRE borbulha; o texto pós-sentinel é
+    # descartado.
+    script = [
+        AIMessage(content="", tool_calls=[
+            {"name": "soma", "args": {"a": 2, "b": 3}, "id": "c1"},
+            {"name": "inserir_no_documento", "args": {"texto": "5"},
+             "id": "c2"}]),
+        AIMessage(content="FINAL-TEXT"),
+    ]
+    agent = _merge_agent("mg18i", script)
+    with client_tools(DOC_TOOL):
+        out = agent.invoke(USER)
+    assert out.content != "FINAL-TEXT"
+    assert out.tool_calls == [
+        {"name": "inserir_no_documento", "args": {"texto": "5"}, "id": "c2"}]
+
+
+def test_surface_client_calls_e_funcao_pura():
+    # O helper recebe as mensagens e o set de nomes como PARÂMETROS — nenhum
+    # estado de request pode viver na instância (o agente é singleton no
+    # registry; requests concorrentes compartilham o mesmo self).
+    novas = [
+        AIMessage(content="", tool_calls=[
+            {"name": "inserir_no_documento", "args": {"texto": "x"},
+             "id": "z1"}]),
+    ]
+    surfaced = ToolAgent._surface_client_calls(novas, {"inserir_no_documento"})
+    assert surfaced is not None and surfaced.tool_calls[0]["id"] == "z1"
+    assert ToolAgent._surface_client_calls(novas, set()) is None
+    assert ToolAgent._surface_client_calls([], {"inserir_no_documento"}) is None
+
+    # E depois de um invoke, o agente NÃO pode ter ganho atributo de
+    # instância com os nomes das tools do cliente (estado request-scoped em
+    # self = race entre requests concorrentes).
+    agent = _merge_agent("mg18j", [AIMessage(content="", tool_calls=[
+        {"name": "inserir_no_documento", "args": {"texto": "oi"},
+         "id": "c3"}])])
+    with client_tools(DOC_TOOL):
+        agent.invoke(USER)
+    assert not hasattr(agent, "_client_tool_names")
