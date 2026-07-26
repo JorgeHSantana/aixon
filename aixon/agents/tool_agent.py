@@ -63,6 +63,26 @@ class ToolAgent(Agent, abstract=True):
     # already-consumed query dumps stop re-billing every turn. None = off.
     prune_tool_results_after: int | None = None
 
+    # Tool-call hooks (#17): override for deterministic guardrails/telemetry.
+    # on_tool_start may return a dict to REWRITE the call's kwargs; raising in
+    # it is treated as the tool failing (shield applies). on_tool_end is
+    # observation-only — its exceptions are logged and swallowed.
+    def on_tool_start(self, name: str, args: dict):  # noqa: D401
+        """Called before a tool executes. Return a dict to rewrite ``args``
+        (the memo cache lookup runs on the rewritten kwargs); return None to
+        keep them unchanged. Raising here is treated as the tool call itself
+        failing — the error shield (#9) converts it to a TOOL ERROR result
+        and the run continues. Default: no-op."""
+        return None
+
+    def on_tool_end(self, name: str, args: dict, result, error) -> None:
+        """Called after a tool call, whether it succeeded, failed, or was
+        served from the memo cache (``error`` is the exception in the failure
+        case, else None). Observation-only: any exception raised here is
+        logged as a warning and swallowed — it never affects the tool result
+        seen by the model. Default: no-op."""
+        return None
+
     @classmethod
     def _validate_subclass(cls) -> None:
         # Validate the required declarative LLM on concrete subclasses. This
@@ -125,7 +145,16 @@ class ToolAgent(Agent, abstract=True):
             system_prompt = messages[0].content or system_prompt
             messages = messages[1:]
 
-        lc_tools = coerce_tools(list(self.tools), shield_errors=self.shield_tool_errors)
+        # Pass the hooks to coerce_tools only when a subclass overrides them
+        # (#17) — avoids a dict-copy per tool call in the (default) no-hook
+        # case, and keeps the guard's on_start/on_end branches unused/cheap.
+        overridden = (type(self).on_tool_start is not ToolAgent.on_tool_start
+                      or type(self).on_tool_end is not ToolAgent.on_tool_end)
+        lc_tools = coerce_tools(
+            list(self.tools), shield_errors=self.shield_tool_errors,
+            on_tool_start=self.on_tool_start if overridden else None,
+            on_tool_end=self.on_tool_end if overridden else None,
+        )
         # _validate_subclass() (__init_subclass__ hook, above) already refuses
         # to register any concrete ToolAgent subclass with `llm=None`.
         assert self.llm is not None

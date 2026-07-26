@@ -274,6 +274,8 @@ class ResearchAgent(ToolAgent):
 | `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
 | `shield_tool_errors` | `bool` | `True` | Error shield: any exception a tool raises (`httpx.ReadTimeout`, DB down, ...) becomes a readable `TOOL ERROR (...)` result handed back to the model — the agent reports the outage and/or proceeds, instead of the whole run/stream dying with an opaque server error. `False` restores the strict pre-shield behavior (exceptions propagate). Raw `BaseTool` entries are NOT shielded (see `coerce_tools`). |
 | `prune_tool_results_after` | `int \| None` | `None` | Opt-in pruning of old tool results (#16). `None` disables it (zero behavior change). See "Poda de tool results antigos (#16)" below. |
+| `on_tool_start` | `method` | no-op | Pre-call hook (#17). See "Hooks de tool call (#17)" below. |
+| `on_tool_end` | `method` | no-op | Post-call hook (#17). See "Hooks de tool call (#17)" below. |
 
 **Tool-call memoization (request scope).** Within one served request (and
 within one `ReflectiveAgent` run), a tool called again with the SAME arguments
@@ -346,6 +348,48 @@ original. Default `None` desliga a poda inteiramente (zero mudança de
 comportamento). Valores `<= 0` (ou não-int) são configuração inválida,
 rejeitada no registro da subclasse com `AixonError` — use `None` para
 desligar ou um `int >= 1`.
+
+### Hooks de tool call (#17)
+
+Duas sobrescritas opcionais no `ToolAgent` dão um ponto de observação/controle
+determinístico em CADA execução de tool, sem depender do modelo — útil para
+guardrails de política (bloquear uma tabela proibida, redigir um argumento) e
+para telemetria/logging estruturado (captura para evals, auditoria).
+
+```python
+class GuardedAgent(ToolAgent):
+    llm = LLM("gpt-5.4", temperature=0.2)
+    tools = [cropnet_query]
+
+    def on_tool_start(self, name: str, args: dict):
+        if name == "cropnet_query" and "tabela_proibida" in args.get("sql", ""):
+            raise PermissionError("acesso a 'tabela_proibida' é bloqueado pela política")
+        if name == "cropnet_query":
+            return {**args, "sql": args["sql"].strip()}  # normaliza antes de rodar
+        return None  # mantém os args sem alteração
+
+    def on_tool_end(self, name, args, result, error):
+        _log.info(f"tool={name} args={args} error={error!r}")
+```
+
+- `on_tool_start(self, name, args)` roda ANTES da tool. Um `dict` de retorno
+  REESCREVE os kwargs da chamada (a memoização — #5 — usa a chave já
+  reescrita, então uma reescrita determinística compartilha cache entre
+  chamadas equivalentes); `None` mantém os args originais. Uma exceção aqui é
+  tratada como a PRÓPRIA tool falhando: o shield (#9) converte em um `TOOL
+  ERROR` devolvido ao modelo — o run não cai, só aquela chamada reporta erro.
+- `on_tool_end(self, name, args, result, error)` roda DEPOIS — inclusive em
+  cache hit (`error=None`) e em falha da tool (`error` preenchido com a
+  exceção, `result=None`). É só observação: qualquer exceção levantada aqui é
+  logada como warning e engolida — telemetria nunca corrompe o resultado que
+  o modelo recebe.
+- Ambos são no-op por padrão (zero mudança de comportamento se você não
+  sobrescrever nenhum). São passados para `coerce_tools`/`_guard` só quando a
+  subclasse sobrescreve pelo menos um — o caso default não paga custo extra
+  por chamada.
+- Como os hooks do #9/#5, só se aplicam a entradas `AgentTool`/callable; um
+  `BaseTool` cru passado em `tools` continua sem guard (sem shield, sem memo,
+  sem hooks).
 
 ### Nesting agents as tools
 

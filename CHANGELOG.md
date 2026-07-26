@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ToolAgent`: hooks `on_tool_start`/`on_tool_end` no loop de tool-calling (#17).**
+  Duas sobrescritas opcionais, no-op por padrão (zero mudança de
+  comportamento). `on_tool_start(self, name, args)` roda ANTES de cada tool
+  call, dentro do error shield (#9): um `dict` de retorno REESCREVE os kwargs
+  (a memoização #5 usa a chave já reescrita); uma exceção levantada aqui é
+  tratada como a própria tool falhando (`TOOL ERROR` devolvido ao modelo, run
+  não cai). `on_tool_end(self, name, args, result, error)` roda DEPOIS —
+  inclusive em cache hit e em falha (`error` preenchido) — e é
+  observação-only: exceções são logadas como warning e engolidas, nunca
+  corrompem o resultado. `coerce_tools`/`_guard` (`aixon/_interop/tools.py`)
+  ganham `on_tool_start`/`on_tool_end`/`on_start`/`on_end` como kwargs
+  opcionais (default `None`, comportamento byte-idêntico); `ToolAgent._build_agent`
+  só repassa os hooks quando a subclasse sobrescreve pelo menos um. Como o
+  shield/memo, só cobre entradas `AgentTool`/callable — `BaseTool` cru
+  continua sem guard. Casos de uso: guardrails determinísticos (bloquear
+  tabela proibida, normalizar argumento) e telemetria/logging estruturado
+  (captura para evals). Documentado em `docs/agents.md` ("Hooks de tool call
+  (#17)").
 - **`ToolAgent`: poda opt-in de tool results antigos do payload (#16).** Novo
   atributo `prune_tool_results_after: int | None = None` (default `None`,
   zero mudança de comportamento). Com um `int N`, mensagens `role="tool"`
