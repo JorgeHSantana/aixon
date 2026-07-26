@@ -34,6 +34,29 @@ class LLMAgent(Agent, abstract=True):
     _suffix: str = "Agent"
     llm: LLM         # declared; absence on a concrete subclass is an error
     prompt: str = ""
+    # Client tools (#18a): opt-in — when True, bind the request's
+    # client-declared tools (aixon.runtime.current_client_tools()) onto the
+    # LLM call and return the raw tool_calls to the caller/wire, instead of
+    # running any server-side tool loop. False (default) -> behavior
+    # unchanged from before #18a.
+    client_tools: bool = False
+
+    def _client_bind(self) -> dict:
+        """Client-declared tools/tool_choice (#18a) to forward to the LLM.
+
+        Returns ``{}`` (no-op kwargs) when ``client_tools`` is off, or when
+        it's on but the current request declared no tools — the no-tools
+        path stays byte-identical either way. Otherwise returns
+        ``{"tools": ..., "tool_choice": ...}``, ready to splat into
+        ``self.llm.complete/acomplete/stream/astream``."""
+        if not self.client_tools:
+            return {}
+        from aixon.runtime import current_client_tools, current_tool_choice
+
+        tools = current_client_tools()
+        if not tools:
+            return {}
+        return {"tools": tools, "tool_choice": current_tool_choice()}
 
     @classmethod
     def _validate_subclass(cls) -> None:
@@ -49,20 +72,32 @@ class LLMAgent(Agent, abstract=True):
             )
 
     def invoke(self, messages: list[Message]) -> Message:
-        """Prepend system prompt (if any) and delegate to self.llm.complete."""
-        return self.llm.complete(self._with_prompt(messages))
+        """Prepend system prompt (if any) and delegate to self.llm.complete.
+
+        When ``client_tools`` is on and the request declared tools, forwards
+        them (see ``_client_bind``) so the returned ``Message.tool_calls``
+        reflects whatever the model chose to call."""
+        return self.llm.complete(self._with_prompt(messages), **self._client_bind())
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
-        """Prepend system prompt (if any) and delegate to self.llm.stream."""
-        yield from self.llm.stream(self._with_prompt(messages))
+        """Prepend system prompt (if any) and delegate to self.llm.stream.
+
+        See ``invoke`` for the ``client_tools`` forwarding."""
+        yield from self.llm.stream(self._with_prompt(messages), **self._client_bind())
 
     async def ainvoke(self, messages: list[Message]) -> Message:
-        """Async invoke — native (delegates to the model's ``ainvoke``)."""
-        return await self.llm.acomplete(self._with_prompt(messages))
+        """Async invoke — native (delegates to the model's ``ainvoke``).
+
+        See ``invoke`` for the ``client_tools`` forwarding."""
+        return await self.llm.acomplete(
+            self._with_prompt(messages), **self._client_bind())
 
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
-        """Async stream — native (delegates to the model's ``astream``)."""
-        async for chunk in self.llm.astream(self._with_prompt(messages)):
+        """Async stream — native (delegates to the model's ``astream``).
+
+        See ``invoke`` for the ``client_tools`` forwarding."""
+        async for chunk in self.llm.astream(
+                self._with_prompt(messages), **self._client_bind()):
             yield chunk
 
     def _with_prompt(self, messages: list[Message]) -> list[Message]:

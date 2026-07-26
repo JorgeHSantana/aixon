@@ -209,6 +209,29 @@ class LLM:
             mark(lc_messages[-1])
         return lc_messages
 
+    def _bind_tools(self, model: "BaseChatModel", tools: list[dict] | None,
+                     tool_choice: Any = None) -> Any:
+        """Bind client-declared tools (#18a) onto ``model`` for one call.
+
+        ``tools`` is the OpenAI wire shape (``{"type": "function", "function":
+        {...}}``) already normalized by ``ParsedRequest.tools`` — passed
+        straight to LangChain's ``bind_tools``, which every chat model
+        implements (real providers translate to their own dialect; the fake
+        test model ignores it and returns itself unchanged). ``tool_choice``,
+        when given, is forwarded as an extra ``bind_tools`` kwarg — omitted
+        entirely (not even ``None``) when absent, since some providers reject
+        an explicit ``tool_choice=None``. No ``tools`` -> the model is
+        returned untouched, so the no-tools path stays byte-identical.
+
+        Return type is ``Any`` (not ``BaseChatModel``): ``bind_tools`` returns
+        a ``Runnable`` (a ``RunnableBinding`` wrapping the model), which is
+        not a ``BaseChatModel`` subtype but supports the same ``invoke``/
+        ``stream``/``ainvoke``/``astream`` surface used below."""
+        if not tools:
+            return model
+        extra = {"tool_choice": tool_choice} if tool_choice is not None else {}
+        return model.bind_tools(tools, **extra)
+
     def _invoke_kwargs(self) -> dict:
         """Per-invocation kwargs derived from runtime context (#6): when a
         predicted output is active (ReflectiveAgent retry) AND the provider
@@ -222,14 +245,30 @@ class LLM:
             return {"prediction": {"type": "content", "content": prediction}}
         return {}
 
-    def complete(self, messages: list[Message]) -> Message:
-        """Single-shot neutral completion. Used by LLMAgent.invoke."""
-        lc_result = self._bound_model().invoke(
+    def complete(
+        self, messages: list[Message], *,
+        tools: list[dict] | None = None, tool_choice: Any = None,
+    ) -> Message:
+        """Single-shot neutral completion. Used by LLMAgent.invoke.
+
+        ``tools`` (#18a), when given, is the OpenAI wire shape
+        (``{"type": "function", "function": {...}}``) — the same normalized
+        shape ``ParsedRequest.tools`` already produces. It is bound onto the
+        chat model for this one call via ``bind_tools`` (see ``_bind_tools``);
+        ``tool_choice``, if given, is forwarded alongside it. The returned
+        ``Message.tool_calls`` (populated by ``from_langchain``) carries
+        whatever the model chose to call, ready to relay to the client as-is.
+        Omitting ``tools`` leaves this call byte-identical to before #18a."""
+        model = self._bind_tools(self._bound_model(), tools, tool_choice)
+        lc_result = model.invoke(
             self._to_wire(messages), **self._invoke_kwargs()
         )
         return from_langchain(lc_result)
 
-    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+    def stream(
+        self, messages: list[Message], *,
+        tools: list[dict] | None = None, tool_choice: Any = None,
+    ) -> Iterator[Chunk]:
         """Neutral streaming. Used by LLMAgent.stream.
 
         Yields Chunk(reasoning=delta) then Chunk(content=delta) per chunk (in
@@ -239,8 +278,19 @@ class LLM:
         yields AIMessageChunk deltas (real providers) or a single AIMessage
         (the fake, which has no _stream). No reasoning present -> unchanged
         byte-for-byte from before reasoning extraction existed.
+
+        ``tools``/``tool_choice`` (#18a): same wire shape and binding as
+        ``complete``. When the model calls a tool, its tool_calls are
+        accumulated across chunks (LangChain's summable ``AIMessageChunk``,
+        when the provider streams deltas; the fake test model streams a
+        single already-complete message, so the accumulator is a no-op) and
+        surfaced as one ``Chunk(tool_calls=[...])`` right before the final
+        ``Chunk(done=True)``. No ``tools`` -> unchanged (no accumulation, no
+        extra chunk).
         """
-        for lc_chunk in self._bound_model().stream(
+        model = self._bind_tools(self._bound_model(), tools, tool_choice)
+        agg = None
+        for lc_chunk in model.stream(
                 self._to_wire(messages), **self._invoke_kwargs()):
             reasoning = reasoning_from_chunk(lc_chunk)
             if reasoning:
@@ -249,20 +299,41 @@ class LLM:
             content = _flatten_content(getattr(lc_chunk, "content", ""))
             if content:
                 yield Chunk(content=content)
+            if tools:
+                agg = lc_chunk if agg is None else agg + lc_chunk
+        tool_calls = getattr(agg, "tool_calls", None) if agg is not None else None
+        if tool_calls:
+            yield Chunk(tool_calls=[dict(tc) for tc in tool_calls])
         yield Chunk(done=True)
 
-    async def acomplete(self, messages: list[Message]) -> Message:
+    async def acomplete(
+        self, messages: list[Message], *,
+        tools: list[dict] | None = None, tool_choice: Any = None,
+    ) -> Message:
         """Async single-shot completion. Used by LLMAgent.ainvoke. Delegates to
-        the LangChain model's native ``ainvoke`` (does not block the loop)."""
-        lc_result = await self._bound_model().ainvoke(
+        the LangChain model's native ``ainvoke`` (does not block the loop).
+
+        ``tools``/``tool_choice`` (#18a): see ``complete`` — identical
+        semantics, async transport."""
+        model = self._bind_tools(self._bound_model(), tools, tool_choice)
+        lc_result = await model.ainvoke(
             self._to_wire(messages), **self._invoke_kwargs())
         return from_langchain(lc_result)
 
-    async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
+    async def astream(
+        self, messages: list[Message], *,
+        tools: list[dict] | None = None, tool_choice: Any = None,
+    ) -> AsyncIterator[Chunk]:
         """Async neutral streaming. Used by LLMAgent.astream. Mirrors stream()
         over the model's native ``astream`` (same reasoning-before-content
-        ordering per chunk; see stream())."""
-        async for lc_chunk in self._bound_model().astream(
+        ordering per chunk; see stream()).
+
+        ``tools``/``tool_choice`` (#18a): see ``stream`` — identical
+        semantics (tool-call accumulation and the pre-done Chunk), async
+        transport."""
+        model = self._bind_tools(self._bound_model(), tools, tool_choice)
+        agg = None
+        async for lc_chunk in model.astream(
                 self._to_wire(messages), **self._invoke_kwargs()):
             reasoning = reasoning_from_chunk(lc_chunk)
             if reasoning:
@@ -271,4 +342,9 @@ class LLM:
             content = _flatten_content(getattr(lc_chunk, "content", ""))
             if content:
                 yield Chunk(content=content)
+            if tools:
+                agg = lc_chunk if agg is None else agg + lc_chunk
+        tool_calls = getattr(agg, "tool_calls", None) if agg is not None else None
+        if tool_calls:
+            yield Chunk(tool_calls=[dict(tc) for tc in tool_calls])
         yield Chunk(done=True)

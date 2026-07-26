@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`LLM.complete`/`acomplete`/`stream`/`astream` aceitam `tools`/`tool_choice`;
+  `LLMAgent(client_tools=True)` repassa os do cliente (#18a).** `tools` no
+  shape wire OpenAI (`{"type": "function", "function": {...}}` — o mesmo que
+  `ParsedRequest.tools` já normaliza) é bindado no chat model via
+  `model.bind_tools(tools, **extra)` só para aquela chamada; `tool_choice`,
+  quando dado, vai junto. `stream`/`astream` acumulam os `tool_calls` do
+  modelo ao longo dos chunks (via `AIMessageChunk` somável) e emitem
+  `Chunk(tool_calls=[...])` — shape neutro `{"name", "args", "id"}` — antes do
+  `Chunk(done=True)`. Sem `tools`, o caminho é byte-idêntico ao anterior.
+  `LLMAgent.client_tools: bool = False` — quando `True`, lê
+  `current_client_tools()`/`current_tool_choice()` (`aixon/runtime.py`) e
+  repassa aos 4 métodos; sem tools declaradas no request, é um no-op. Novo
+  contextvar `aixon.runtime.tool_choice_scope`/`current_tool_choice()`,
+  espelhando o par `client_tools`/`current_client_tools()` já existente.
 - **`ToolAgent`: hooks `on_tool_start`/`on_tool_end` no loop de tool-calling (#17).**
   Duas sobrescritas opcionais, no-op por padrão (zero mudança de
   comportamento). `on_tool_start(self, name, args)` roda ANTES de cada tool
