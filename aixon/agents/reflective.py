@@ -230,6 +230,19 @@ class ReflectiveAgent(Agent, abstract=True):
             Message(role="user", content=_RETRY_TEMPLATE.format(critique=critique)),
         ]
 
+    # ----- run stats (#12) --------------------------------------------------
+
+    def _log_run(self, *, rounds: int, patch_applied: int,
+                 patch_fallback: int, outcome: str) -> None:
+        """One structured line per run (#12) — grep-friendly so the patch
+        fallback rate is a log query away: fallback_rate = sum(patch_fallback)
+        / (sum(patch_applied) + sum(patch_fallback)) grouped by agent."""
+        _log.info(
+            f"reflective_run agent={self.name} rounds={rounds} "
+            f"patch_applied={patch_applied} patch_fallback={patch_fallback} "
+            f"outcome={outcome}"
+        )
+
     # ----- patch revision mode (#7) ----------------------------------------
 
     def _patch_retry_messages(self, messages: list[Message], answer: Message,
@@ -309,12 +322,16 @@ class ReflectiveAgent(Agent, abstract=True):
         # others reported) so the final Message.usage covers the WHOLE run,
         # not just the last worker/judge turn.
         total_usage = answer.usage
+        # Run stats (#12): counted across rounds, logged once at the end.
+        patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
             verdict_msg = self.judge_llm.complete(self._judge_messages(messages, answer))
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
             if self._approved(verdict):
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback, outcome="approved")
                 # A COPY carrying the run's total — the worker owns `answer`
                 # (it may be cached/shared, or a nested agent's own Message),
                 # so the neutral boundary must not mutate it in place.
@@ -327,12 +344,14 @@ class ReflectiveAgent(Agent, abstract=True):
             # applied candidate goes straight to the next judgement. A patch
             # that doesn't apply falls through to full regeneration below.
             if self.revision_mode == "patch" and answer.content:
-                pmsgs, applied, raw_usage = self._patch_round_sync(
+                pmsgs, applied_msg, raw_usage = self._patch_round_sync(
                     msgs, answer, verdict)
                 total_usage = merge_usage(total_usage, raw_usage)
-                if applied is not None:
-                    msgs, answer = pmsgs, applied
+                if applied_msg is not None:
+                    patch_applied += 1
+                    msgs, answer = pmsgs, applied_msg
                     continue
+                patch_fallback += 1
                 emit_reasoning(self.patch_fallback_label)
             msgs = self._retry_messages(msgs, answer, verdict)
             # Predicted Outputs (#6): the retry mostly repeats the previous
@@ -346,6 +365,8 @@ class ReflectiveAgent(Agent, abstract=True):
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
+        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
+                      patch_fallback=patch_fallback, outcome="exhausted")
         return dataclasses.replace(answer, usage=total_usage)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
@@ -367,6 +388,8 @@ class ReflectiveAgent(Agent, abstract=True):
         # Patch mode (#7): a successfully applied candidate skips the worker
         # stream on its round — it goes straight to judgement.
         pending: Message | None = None
+        # Run stats (#12), counted across rounds.
+        patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             if pending is not None:
                 answer, pending = pending, None
@@ -386,6 +409,8 @@ class ReflectiveAgent(Agent, abstract=True):
                 self._judge_messages(messages, answer)
             ).content
             if self._approved(verdict):
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback, outcome="approved")
                 yield Chunk(content=answer.content)
                 yield Chunk(done=True)
                 return
@@ -397,10 +422,12 @@ class ReflectiveAgent(Agent, abstract=True):
             # produced via invoke (short output; its raw text must NEVER leak
             # as stream content) and the applied candidate is judged next round.
             if self.revision_mode == "patch" and answer.content:
-                pmsgs, applied, _ = self._patch_round_sync(msgs, answer, verdict)
-                if applied is not None:
-                    msgs, pending = pmsgs, applied
+                pmsgs, applied_msg, _ = self._patch_round_sync(msgs, answer, verdict)
+                if applied_msg is not None:
+                    patch_applied += 1
+                    msgs, pending = pmsgs, applied_msg
                     continue
+                patch_fallback += 1
                 yield Chunk(reasoning=self.patch_fallback_label + "\n")
             msgs = self._retry_messages(msgs, answer, verdict)
         yield Chunk(reasoning=self.exhausted_label + "\n")
@@ -408,6 +435,8 @@ class ReflectiveAgent(Agent, abstract=True):
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
+        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
+                      patch_fallback=patch_fallback, outcome="exhausted")
         yield Chunk(content=answer.content)
         yield Chunk(done=True)
 
@@ -423,6 +452,8 @@ class ReflectiveAgent(Agent, abstract=True):
         answer = await self._worker.ainvoke(msgs)
         # See invoke(): sum every worker + judge turn attempted this run.
         total_usage = answer.usage
+        # See _invoke(): run stats (#12), counted across rounds.
+        patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
             verdict_msg = await self.judge_llm.acomplete(
@@ -431,6 +462,8 @@ class ReflectiveAgent(Agent, abstract=True):
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
             if self._approved(verdict):
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback, outcome="approved")
                 # See invoke(): a COPY — never mutate the worker's Message.
                 return dataclasses.replace(answer, usage=total_usage)
             if round_ == self.max_rounds:
@@ -439,12 +472,14 @@ class ReflectiveAgent(Agent, abstract=True):
                                                    max=self.max_rounds))
             # See _invoke(): patch mode first (#7), full regeneration fallback.
             if self.revision_mode == "patch" and answer.content:
-                pmsgs, applied, raw_usage = await self._patch_round_async(
+                pmsgs, applied_msg, raw_usage = await self._patch_round_async(
                     msgs, answer, verdict)
                 total_usage = merge_usage(total_usage, raw_usage)
-                if applied is not None:
-                    msgs, answer = pmsgs, applied
+                if applied_msg is not None:
+                    patch_applied += 1
+                    msgs, answer = pmsgs, applied_msg
                     continue
+                patch_fallback += 1
                 emit_reasoning(self.patch_fallback_label)
             msgs = self._retry_messages(msgs, answer, verdict)
             # See _invoke(): predicted output for the retry (#6).
@@ -456,6 +491,8 @@ class ReflectiveAgent(Agent, abstract=True):
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
+        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
+                      patch_fallback=patch_fallback, outcome="exhausted")
         return dataclasses.replace(answer, usage=total_usage)
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
@@ -470,6 +507,8 @@ class ReflectiveAgent(Agent, abstract=True):
         answer = Message(role="assistant", content="")
         # See _stream(): applied patch candidates skip the worker stream (#7).
         pending: Message | None = None
+        # See _stream(): run stats (#12), counted across rounds.
+        patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             if pending is not None:
                 answer, pending = pending, None
@@ -488,6 +527,8 @@ class ReflectiveAgent(Agent, abstract=True):
                 await self.judge_llm.acomplete(self._judge_messages(messages, answer))
             ).content
             if self._approved(verdict):
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback, outcome="approved")
                 yield Chunk(content=answer.content)
                 yield Chunk(done=True)
                 return
@@ -497,11 +538,13 @@ class ReflectiveAgent(Agent, abstract=True):
                                                           max=self.max_rounds) + "\n")
             # See _stream(): patch mode first (#7), full regeneration fallback.
             if self.revision_mode == "patch" and answer.content:
-                pmsgs, applied, _ = await self._patch_round_async(
+                pmsgs, applied_msg, _ = await self._patch_round_async(
                     msgs, answer, verdict)
-                if applied is not None:
-                    msgs, pending = pmsgs, applied
+                if applied_msg is not None:
+                    patch_applied += 1
+                    msgs, pending = pmsgs, applied_msg
                     continue
+                patch_fallback += 1
                 yield Chunk(reasoning=self.patch_fallback_label + "\n")
             msgs = self._retry_messages(msgs, answer, verdict)
         yield Chunk(reasoning=self.exhausted_label + "\n")
@@ -509,5 +552,7 @@ class ReflectiveAgent(Agent, abstract=True):
             f"reflective '{self.name}': rounds exhausted "
             f"(max_rounds={self.max_rounds}); returning last attempt"
         )
+        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
+                      patch_fallback=patch_fallback, outcome="exhausted")
         yield Chunk(content=answer.content)
         yield Chunk(done=True)

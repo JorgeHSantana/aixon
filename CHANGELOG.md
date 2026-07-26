@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`ReflectiveAgent`: log estruturado por run (#12).** Cada run (`invoke`,
+  `stream`, `ainvoke`, `astream`) emite uma linha `reflective_run agent=<name>
+  rounds=<n> patch_applied=<n> patch_fallback=<n> outcome=<approved|exhausted>`
+  no logger `aixon.reflective` — grep-friendly para medir a taxa de fallback
+  do `revision_mode="patch"` antes de promovê-lo a default. Zero mudança de
+  comportamento.
+
 ## [0.1.20] - 2026-07-23
 
 ### Added

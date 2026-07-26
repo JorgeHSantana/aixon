@@ -66,6 +66,12 @@ falls back to full regeneration automatically.
 `judge_label`/`retry_label`/`exhausted_label`/`patch_fallback_label` on your
 own subclass to customize or translate them.)
 
+Since #12, every run also emits one structured line on the `aixon.reflective`
+logger — `reflective_run agent=<name> rounds=<n> patch_applied=<n>
+patch_fallback=<n> outcome=<approved|exhausted>` — grep-friendly for measuring
+the `patch` mode's fallback rate; see
+[docs/agents.md](../../docs/agents.md#medindo-a-taxa-de-fallback-do-modo-patch-12).
+
 ## Retries got cheaper in 0.1.19 (automatic)
 
 Beyond `revision_mode`, three optimizations apply to every `ReflectiveAgent`

@@ -424,6 +424,17 @@ regardless of quality, defeating the point of the loop.
 A complete runnable example (scripted judge + worker, no API key needed) is
 at [examples/reflective_review](../examples/reflective_review).
 
+### Medindo a taxa de fallback do modo patch (#12)
+
+Cada run emite uma linha estruturada no logger `aixon.reflective`:
+
+    reflective_run agent=Uniplus-DB rounds=2 patch_applied=1 patch_fallback=0 outcome=approved
+
+Taxa de fallback = `patch_fallback / (patch_applied + patch_fallback)` agregada
+por agente. Em Cloud Run/Logging: filtre por `reflective_run` e agrupe por
+`agent=`. `revision_mode="full"` loga a mesma linha com `patch_*=0`. Essa
+métrica decide a promoção de `patch` a default numa futura 0.2.0.
+
 ---
 
 ## Agent.as_tool — the neutral tool descriptor
