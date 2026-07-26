@@ -1,8 +1,8 @@
 # aixon Framework - RAG Knowledge Base
 
 > **What this file is.** A self-contained, retrieval-ready knowledge base about the **aixon** framework. It is meant to be ingested into a vector store and consumed by an AI agent operating with RAG (Retrieval-Augmented Generation) contexts: when the agent is asked about aixon, it retrieves the relevant sections below and grounds its answer in them. Every section is written to be self-contained, so it survives chunking and retrieves well on its own.
-> **How an agent should use it.** Treat every section as authoritative reference for aixon version 0.1.15. Quote APIs, class names, attributes, and code exactly as written here; do not invent behavior that is not described. Map the question to a topic (agents, LLM, reasoning, tools, orchestrator, retrieval, server, usage, CLI, async, errors), retrieve that section, and answer from it. For "how do I..." questions, the FAQ (section 27) and the complete worked example (section 28) are the best starting points.
-> **Framework version documented:** 0.1.15
+> **How an agent should use it.** Treat every section as authoritative reference for aixon version 0.1.21. Quote APIs, class names, attributes, and code exactly as written here; do not invent behavior that is not described. Map the question to a topic (agents, LLM, reasoning, tools, orchestrator, retrieval, server, usage, CLI, async, errors), retrieve that section, and answer from it. For "how do I..." questions, the FAQ (section 27) and the complete worked example (section 28) are the best starting points.
+> **Framework version documented:** 0.1.21
 > **Code and API identifiers are always in English.** Python required: 3.11 or newer. PyPI package: `aixon` (`pip install aixon`). License: MIT.
 
 ---
@@ -91,7 +91,7 @@ pip install "aixon[tiktoken]"          # token counting for the server `usage` f
 pip install "aixon[all]"               # everything above
 ```
 
-### 3.1 Dependency summary (aixon 0.1.15)
+### 3.1 Dependency summary (aixon 0.1.21)
 
 | Dependency | Version | Layer |
 |---|---|---|
@@ -308,12 +308,15 @@ llm = LLM("claude-3-5-haiku-20241022", provider="anthropic", temperature=0.3)
 | `claude-*` | `"anthropic"` |
 | `gemini-*` | `"google"` |
 | `glm*` | `"zai"` (added in 0.1.9) |
+| `grok*` | `"xai"` (added in 0.1.20) |
 
 Provider names are lowercase strings, not an enum. To override inference, pass `provider=` explicitly, for example `LLM("some-model", provider="openai")`.
 
 **z.AI (GLM models), added in 0.1.9.** `LLM("glm-4.6", provider="zai")` (or a bare `glm-*` model name, inferred) reuses `langchain_openai.ChatOpenAI` pointed at the z.AI OpenAI-compatible endpoint. `ZAI_API_KEY` is **required** (since 0.1.12) — unlike the other providers, it does NOT fall back to `OPENAI_API_KEY` if unset; building the model raises `AixonError` instead of silently sending your OpenAI credential to the z.AI endpoint. `ZAI_BASE_URL` overrides the default (`https://api.z.ai/api/paas/v4`). Install with `pip install "aixon[zai]"` (pulls in `langchain-openai`).
 
-### 8.2 Reasoning / extended thinking (added in 0.1.15)
+**xAI (Grok models), added in 0.1.20.** `LLM("grok-4.5", provider="xai")` (or a bare `grok-*` model name, inferred) reuses `langchain_openai.ChatOpenAI` pointed at the xAI OpenAI-compatible endpoint (`https://api.x.ai/v1`, override via `XAI_BASE_URL`). `XAI_API_KEY` is **required** — same non-fallback rule as z.AI: it does NOT fall back to `OPENAI_API_KEY` if unset, so building the model raises a clear `AixonError` instead of silently sending an OpenAI credential to the xAI endpoint. `XAIProvider.supports_reasoning = True`, so the reasoning knob (section 8.2) works: `reasoning=` is translated to a `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`, forwarded verbatim — the exact same translation as `openai`. Install with `pip install "aixon[xai]"` (pulls in `langchain-openai`).
+
+### 8.2 Reasoning / extended thinking
 
 `LLM(model, reasoning=...)` turns on the provider's native reasoning/thinking mode:
 
@@ -342,6 +345,7 @@ A bare `budget_tokens` is bucketed into the nearest effort tier the other way (`
 |---|---|
 | `anthropic` | `thinking={"type": "enabled", "budget_tokens": ...}`. Anthropic's extended-thinking API requires `temperature == 1` and does not accept `top_p`; the knob **forces** `temperature=1` (warning if the caller/request asked for a different value) and **drops** any `top_p`. `max_tokens` is raised to fit the budget when absent or not already comfortably above it. |
 | `openai` | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`. No budget dial — only the effort string reaches the API. An unknown/custom effort string is passed through verbatim (no validation against the low/medium/high table). |
+| `xai` (Grok, added in 0.1.20) | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`, forwarded verbatim — identical translation to `openai` (xAI's dial is effort-based, same shape). |
 | `zai` (GLM) | `extra_body={"thinking": {"type": "enabled", ...}}` (merged with any caller-supplied `extra_body`). GLM has no budget/effort dial of its own — any non-off spec just turns thinking on. |
 | `google` (Gemini) | `thinking_budget=<budget_tokens>` and `include_thoughts=True` on `ChatGoogleGenerativeAI` — applied only if the installed `langchain-google-genai` declares those fields; an older install degrades gracefully (knob ignored, warning logged) instead of raising on an unknown kwarg. |
 | custom (no `supports_reasoning = True`) | the knob is **ignored** (with a warning) rather than forwarded — a pydantic-strict vendor constructor never sees the stray `reasoning` kwarg, so the build never breaks. |
@@ -357,11 +361,29 @@ A bare `budget_tokens` is bucketed into the nearest effort tier the other way (`
 
 **Limitation — Anthropic extended thinking + client-executed tools across requests.** A CLIENT-executed tool loop (section 18.3 — an agentic client like an editor/IDE that calls tools itself and sends results back on a *later* HTTP request) does not round-trip Anthropic's `thinking` blocks: the neutral boundary drops reasoning content on the way back into LangChain messages, and Anthropic's API rejects a request that mixes extended thinking with tool results whose matching thinking block isn't present in that same request. Concretely: a reasoning-enabled Claude model that returns a tool call to a client-executed tool, then receives that tool's result back on the NEXT request, gets a 400 from Anthropic. A normal in-process `ToolAgent` loop (aixon runs the tool loop within one request) is unaffected.
 
-### 8.3 Per-request generation params (request_chat_model)
+### 8.3 `tools` / `tool_choice` on LLM.complete/acomplete/stream/astream (#18a)
 
-When an agent runs behind the `Server`, per-request generation params (`temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, `reasoning_effort`) are published on a `ContextVar` for the duration of the call and apply on top of the `LLM(...)` class-level defaults, without mutating them. Both `LLMAgent` and `ToolAgent` build the request-time model through the exact same `LLM.request_chat_model()` path (unified in 0.1.15 — `LLMAgent` used to bind params at invoke time on top of an already-built model instead, which bypassed provider translation, so a client `reasoning_effort` used to reach the vendor SDK raw and a client `temperature` could override the constructor-forced `temperature=1` Anthropic's extended thinking requires; that gap is closed now). `request_chat_model()` builds a provider model with the params merged in as constructor kwargs *before* `Provider.build()` runs, so they go through the same reasoning translation and validation every other constructor kwarg gets. No active params -> the cached `chat_model` (no rebuild). Models built for repeated identical param combinations are cached (bounded to 8 entries, oldest-evicted-first, added in 0.1.12) so a hot request path reuses one provider client (and its HTTP connection pool) instead of rebuilding an SDK client per call.
+All four `LLM` call methods accept `tools: list[dict] | None = None` and `tool_choice: Any = None`:
 
-### 8.4 Custom provider
+```python
+class LLM:
+    def complete(self, messages, *, tools=None, tool_choice=None) -> Message: ...
+    def stream(self, messages, *, tools=None, tool_choice=None) -> Iterator[Chunk]: ...
+    async def acomplete(self, messages, *, tools=None, tool_choice=None) -> Message: ...
+    async def astream(self, messages, *, tools=None, tool_choice=None) -> AsyncIterator[Chunk]: ...
+```
+
+`tools` is the OpenAI wire shape (`{"type": "function", "function": {"name", "description", "parameters"}}`) — the same normalized shape `ParsedRequest.tools` already produces (section 18.7), so it can be forwarded verbatim from a request. When `tools` is given, `LLM._bind_tools` calls `model.bind_tools(tools, **extra)` (LangChain's `bind_tools`, which every chat model implements) to bind them onto the chat model **for that one call only** — the class-level `LLM(...)` instance is never mutated. `tool_choice`, when given, is forwarded as an extra `bind_tools` kwarg; it is omitted entirely (not even passed as `None`) when absent, since some providers reject an explicit `tool_choice=None`. **Omitting `tools` (the default) keeps every call byte-identical to before #18a** — no binding, no behavior change.
+
+On `stream`/`astream`, the model's `tool_calls` are accumulated across chunks (LangChain's summable `AIMessageChunk`, when the provider streams deltas — the offline test/demo model streams one already-complete message, so the accumulation is a no-op) and surfaced as one neutral `Chunk(tool_calls=[{"name", "args", "id"}, ...])` emitted **right before** the final `Chunk(done=True)`. No `tools` given -> no accumulation, no extra chunk.
+
+`LLMAgent.client_tools: bool = False` is the opt-in that wires an agent to this: when `True`, `LLMAgent.invoke`/`stream`/`ainvoke`/`astream` read `aixon.runtime.current_client_tools()`/`current_tool_choice()` (populated by the `Server`, section 18.3) and splat them into the matching `self.llm.*` call — raw passthrough: the agent itself decides nothing about when to call a tool, it just hands the model the client's declared tools and returns whatever `Message.tool_calls`/`Chunk.tool_calls` came back. No tools declared on the request -> the forwarding helper returns `{}` and the call is a no-op, identical to `client_tools=False`. See section 9 for `ToolAgent`'s first-class alternative (`client_tools="merge"|"replace"`), which runs client tool defs through the SAME tool-calling loop as the agent's own tools instead of raw passthrough.
+
+### 8.4 Per-request generation params (request_chat_model)
+
+When an agent runs behind the `Server`, per-request generation params (`temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, `reasoning_effort`) are published on a `ContextVar` for the duration of the call and apply on top of the `LLM(...)` class-level defaults, without mutating them. Both `LLMAgent` and `ToolAgent` build the request-time model through the exact same `LLM.request_chat_model()` path (unified — `LLMAgent` used to bind params at invoke time on top of an already-built model instead, which bypassed provider translation, so a client `reasoning_effort` used to reach the vendor SDK raw and a client `temperature` could override the constructor-forced `temperature=1` Anthropic's extended thinking requires; that gap is closed now). `request_chat_model()` builds a provider model with the params merged in as constructor kwargs *before* `Provider.build()` runs, so they go through the same reasoning translation and validation every other constructor kwarg gets. No active params -> the cached `chat_model` (no rebuild). Models built for repeated identical param combinations are cached (bounded to 8 entries, oldest-evicted-first, added in 0.1.12) so a hot request path reuses one provider client (and its HTTP connection pool) instead of rebuilding an SDK client per call.
+
+### 8.5 Custom provider
 
 For a custom backend, subclass the `Provider` ABC and register a single instance before first use.
 
@@ -443,6 +465,13 @@ ToolAgent attributes (in addition to the common ones in section 6.1):
 | `max_iterations` | `int` | `15` | Maximum tool-call rounds (maps to LangGraph's `recursion_limit` as `2 * max_iterations + 1`). |
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds (deadline semantics below). |
 | `tool_call_label` | `str` | `"Calling {name}..."` | A `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or for localization, for example `"Chamando {name}..."`. Added in aixon 0.1.1; consecutive duplicate labels are emitted once since 0.1.5 (a run calling the same tool N times in a row shows a single line). |
+| `shield_tool_errors` | `bool` | `True` | Error shield (#9). Any exception a tool (`AgentTool`/callable) raises becomes a readable `TOOL ERROR (...)` result handed back to the model instead of killing the run/stream. `False` restores the strict pre-shield behavior. See section 9.5. |
+| `prune_tool_results_after` | `int \| None` | `None` | Opt-in pruning of tool results from old, COMPLETE rounds (#16). `None` disables it (zero behavior change); an `int <= 0` is rejected at registration with `AixonError`. See section 9.7. |
+| `on_tool_start` | method | no-op | Pre-call hook (#17): `on_tool_start(self, name, args) -> dict \| None`. See section 9.8. |
+| `on_tool_end` | method | no-op | Post-call hook (#17): `on_tool_end(self, name, args, result, error) -> None`. See section 9.8. |
+| `client_tools` | `str` | `"ignore"` | First-class client tools (#18c): `"ignore"` \| `"merge"` \| `"replace"`. See section 9.10. |
+| `client_tools_conflict` | `str` | `"error"` | Name-collision policy between an internal tool and a client tool def: `"error"` \| `"internal"` \| `"client"`. See section 9.10. |
+| `client_tools_filter` | method | identity | Curation hook (#18c): `client_tools_filter(self, defs) -> defs`, run BEFORE the conflict policy. See section 9.10. |
 
 ### 9.1 Tool coercion: what counts as a tool
 
@@ -489,9 +518,126 @@ class DiagnosisAgent(ToolAgent):
 
 `max_execution_time` is a wall-clock deadline, not an interrupt. On the sync path, `invoke` checks it after the run completes and raises `AixonError` if exceeded; `stream` checks it between updates. Neither can abort a single in-flight tool call. On the async path, the deadline is enforced with `asyncio.wait_for`, so an overrun is cancelled at the next await point, provided the chain is genuinely async (an async model, async tools). See section 23.
 
-### 9.4 Model reasoning ordering in the live channel (added in 0.1.15)
+### 9.4 Model reasoning ordering in the live channel
 
 When `self.llm` has the reasoning knob (section 8.2) turned on, a turn's own model thinking/reasoning text is emitted into the same `ReasoningChannel` used by `tool_call_label` *before* that turn's tool-call label(s) — the model reasoned before deciding to call the tool, and the channel preserves that order. `Message.reasoning` (`invoke`) / `Chunk.reasoning` (`stream`) therefore interleave the model's own thinking with the `"Calling {name}..."` step labels, in the order they actually occurred. Consecutive duplicate reasoning lines are deduplicated the same way as tool-call labels. A per-request `reasoning_effort` param (section 18.3) overrides the class-level `reasoning=` knob for that one build.
+
+### 9.5 Tool error shield (shield_tool_errors, #9)
+
+`shield_tool_errors = True` (default) wraps every `AgentTool`/callable tool call: any exception the tool raises (`httpx.ReadTimeout`, a DB down, ...) becomes a readable result handed back to the model instead of killing the run/stream —
+
+```
+TOOL ERROR (ReadTimeout): ...
+```
+
+— using `str(e) or repr(e)` (covers `httpx.ReadTimeout`, whose `str()` is often empty). The model sees the failure and can report the outage and/or proceed with other tools. Set `shield_tool_errors = False` on the subclass for the strict pre-shield policy (exceptions propagate and the run/stream fails). A raw `BaseTool` entry in `tools` (not an `AgentTool`/plain callable) is **never** shielded — same carve-out `coerce_tools` documents for memoization and hooks below.
+
+### 9.6 Tool-call memoization (request scope, #5)
+
+Within one served request (and within one `ReflectiveAgent` run around this agent, section 10), calling the same tool again with the SAME arguments returns the first result instead of re-executing — a retry loop stops re-running identical DB queries or web searches, and the corrected answer stays consistent with the data the judge critiqued. Backed by `aixon.toolcache` (a `ContextVar`-scoped cache); the cache dies with the request, and **errors are never cached** (a shielded `TOOL ERROR` is not memoized, so a retry gets a fresh attempt).
+
+Opt a tool out per call site — for intentionally non-deterministic or write/side-effecting tools:
+
+```python
+retriever.as_tool(memoize=False)          # Retriever.as_tool()
+agent.as_tool(memoize=False)              # Agent.as_tool()
+my_function.aixon_memoize = False         # plain callable
+```
+
+`Agent.as_tool`/`Retriever.as_tool` default `memoize=True`; a plain callable defaults to memoized unless it carries an `aixon_memoize = False` attribute. A raw `BaseTool` entry is never memoized (same carve-out as the error shield).
+
+### 9.7 Poda de tool results antigos (prune_tool_results_after, #16)
+
+Agentes que ficam muito tempo em conversas com múltiplos turnos de consulta a banco (ex.: a família Analista/Gerente sobre `CropnetDB`) acumulam, no histórico, os resultados brutos de tool calls de turnos já respondidos — cada turno novo reenvia esses dumps ao provider mesmo que o modelo já os tenha consumido e resumido na resposta anterior. `prune_tool_results_after: int | None = None` é opt-in para esse caso:
+
+```python
+class GerenteAgent(ToolAgent):
+    llm = LLM("gpt-5.4", temperature=0.2)
+    tools = [...]
+    prune_tool_results_after = 1  # mantém as tool results do round mais recente
+```
+
+Com um `int N`, a âncora é por **rounds completos** — um round termina numa mensagem `role="assistant"` SEM `tool_calls` (sua resposta final); a mensagem `assistant` que EMITIU a tool call pertence ao round que ela abriu, não é um limite de round. Toda mensagem `role="tool"` que apareça ANTES do início dos últimos `N` rounds completos é substituída, só no payload enviado ao provider, por um stub curto:
+
+```
+[resultado de ferramenta omitido (3000 caracteres) — já utilizado em resposta anterior]
+```
+
+`N=1` preserva sempre o round MAIS RECENTE (inclusive um round ainda em andamento — histórico terminando em `assistant(tool_calls=...)` sem resposta final ainda). **Nota de semântica (pós-fix):** uma versão anterior desta poda ancorava em toda mensagem `assistant` (contando também a que emitiu a tool call), o que fazia `keep_turns=1` estubar o tool result do PRÓPRIO round mais recente — o oposto do pretendido. Se seu código trazia `prune_tool_results_after = 2` como contorno para esse bug, `N=1` agora é o valor correto.
+
+Uma janela maior ou igual ao número de rounds completos no histórico não poda nada (comportamento idempotente para conversas curtas). O corte é feito por `ToolAgent._prune_history` (staticmethod pura, chamada no início de `_build_agent`) e NUNCA muta a lista ou as mensagens recebidas — o histórico do cliente (o que o Server/OnlyOffice/CLI guardam e reenviam) continua completo; a poda é efêmera, recomputada a cada request a partir do histórico original. Default `None` desliga a poda inteiramente (zero mudança de comportamento). Valores `<= 0` (ou não-int) são configuração inválida, rejeitada no registro da subclasse com `AixonError` — use `None` para desligar ou um `int >= 1`.
+
+### 9.8 Hooks de tool call (on_tool_start / on_tool_end, #17)
+
+Duas sobrescritas opcionais, no-op por padrão (zero mudança de comportamento), dão um ponto de observação/controle determinístico em CADA execução de tool, sem depender do modelo:
+
+```python
+class GuardedAgent(ToolAgent):
+    llm = LLM("gpt-5.4", temperature=0.2)
+    tools = [cropnet_query]
+
+    def on_tool_start(self, name: str, args: dict):
+        if name == "cropnet_query" and "tabela_proibida" in args.get("sql", ""):
+            raise PermissionError("acesso a 'tabela_proibida' é bloqueado pela política")
+        if name == "cropnet_query":
+            return {**args, "sql": args["sql"].strip()}  # normaliza antes de rodar
+        return None  # mantém os args sem alteração
+
+    def on_tool_end(self, name, args, result, error):
+        _log.info(f"tool={name} args={args} error={error!r}")
+```
+
+- `on_tool_start(self, name, args)` roda ANTES de cada tool call, dentro do error shield (9.5). Um `dict` de retorno REESCREVE os kwargs da chamada (a memoização de 9.6 usa a chave já reescrita, então uma reescrita determinística compartilha cache entre chamadas equivalentes); `None` mantém os args originais. Uma exceção levantada aqui é tratada como a PRÓPRIA tool falhando: o shield converte em um `TOOL ERROR` devolvido ao modelo — o run não cai, só aquela chamada reporta erro.
+- `on_tool_end(self, name, args, result, error)` roda DEPOIS — inclusive em cache hit (`error=None`) e em falha da tool (`error` preenchido com a exceção, `result=None`). É só observação: qualquer exceção levantada aqui é logada como warning e engolida — telemetria nunca corrompe o resultado que o modelo recebe.
+- Ambos são no-op por padrão. `coerce_tools`/`_guard` (`aixon/_interop/tools.py`) ganham `on_tool_start`/`on_tool_end` como kwargs opcionais (default `None`); `ToolAgent._build_agent` só repassa os hooks quando a subclasse sobrescreve pelo menos um — o caso default não paga custo extra por chamada.
+- Como o shield (9.5) e a memoização (9.6), só se aplicam a entradas `AgentTool`/callable; um `BaseTool` cru passado em `tools` continua sem guard (sem shield, sem memo, sem hooks).
+- Pela mesma razão, os proxies de client tools do `client_tools="merge"|"replace"` (9.10, abaixo) TAMBÉM ficam fora do alcance de `on_tool_start`/`on_tool_end`: a call de uma tool do cliente nunca executa server-side, então não há chamada de tool ali para o hook observar.
+
+Casos de uso: guardrails determinísticos (bloquear tabela proibida, normalizar argumento) e telemetria/logging estruturado (captura para evals, auditoria).
+
+### 9.9 Paralelismo de tool calls do mesmo turno (#13)
+
+Quando o modelo emite várias tool calls no mesmo turno, os dois entry points já rodam elas concorrentemente — `langchain.agents.create_agent`'s internal `ToolNode` (langgraph 1.2) faz o fan-out sozinho, sem nenhuma mudança em `aixon/agents/tool_agent.py`:
+
+- **Async** (`ainvoke`/`astream` — o caminho que o `Server` usa): `asyncio.gather` sobre a coroutine de cada call.
+- **Sync** (`invoke`/`stream`): um thread pool via `get_executor_for_config().map` (LangChain), então chamadas bloqueantes (`time.sleep`, HTTP síncrono) também se sobrepõem.
+
+Garantido por um teste de regressão (`tests/test_tool_parallel.py`, caminho async): duas tools que fazem `await asyncio.sleep(0.4)` cada completam um turno em ~0.4s, não ~0.8s. Prefira tools `async def` com `ainvoke`/`astream` de qualquer forma — o thread pool que sustenta o caminho sync é um detalhe de implementação da versão de langgraph instalada, não um contrato que o aixon fixa com teste próprio.
+
+### 9.10 Client tools mesclados no loop (client_tools, #18c)
+
+Seção 8.3 documentou o caminho de passthrough cru (`LLMAgent(client_tools=True)`): o agente decide sozinho quando responder com `tool_calls`. `ToolAgent` tem um caminho de PRIMEIRA CLASSE: `client_tools = "merge"` (ou `"replace"`) injeta os defs do cliente como tools de VERDADE no MESMO loop de tool-calling das tools internas do agente — via um proxy `return_direct` por def (`_client_proxy_tools`, o mesmo mecanismo da ponte nativa do OnlyOffice; o corpo do proxy é um stub que nunca executa a tool do cliente server-side).
+
+```python
+class RedatorAgent(ToolAgent):
+    llm = LLM("gpt-5.4", temperature=0.2)
+    tools = [buscar_no_banco]          # tool interna — executa aqui
+    client_tools = "merge"             # + os tools que o editor/IDE declarar
+    client_tools_conflict = "error"    # default: nome colidindo é erro explícito
+
+    def client_tools_filter(self, defs):
+        # curadoria opcional: só expõe tools do cliente com um prefixo esperado
+        return [d for d in defs if d["function"]["name"].startswith("doc_")]
+```
+
+**Como funciona:**
+
+- Uma call de tool INTERNA executa server-side normalmente e o loop continua.
+- Uma call de tool do CLIENTE encerra o turno na hora: o run devolve `Message(role="assistant", content="", tool_calls=[...])` (com usage somado do run inteiro); em `stream`/`astream`, `Chunk(tool_calls=...)` seguido de `Chunk(done=True)`, sem content.
+- `client_tools`: `"ignore"` (default, zero mudança) \| `"merge"` (soma aos tools internos) \| `"replace"` (só os do cliente, para aquele request; as tools internas do agente NÃO são bindadas).
+- `client_tools_conflict` resolve um nome que aparece tanto numa tool interna quanto num def do cliente: `"error"` (default — `AixonError` já na montagem do grafo, citando as tools em colisão), `"internal"` (descarta o def do cliente, a interna vence), `"client"` (remove a tool interna daquele request, só o proxy do cliente fica exposto sob aquele nome).
+- `client_tools_filter(self, defs) -> defs` roda ANTES da política de conflito — curadoria de quais defs do cliente sequer entram na disputa. Default: identidade (todos).
+- Ambos os atributos (`client_tools`, `client_tools_conflict`) são validados em `_validate_subclass` — um valor fora do enum levanta `AixonError` no registro da subclasse, antes de qualquer request chegar.
+
+**Detecção pós-run.** `_surface_client_calls` (staticmethod pura) escaneia as mensagens NOVAS produzidas pelo run (nunca o histórico já existente, e nunca estado guardado na instância singleton do agente — requests concorrentes não se corrompem) e surfaceia o PRIMEIRO turno que chamou uma tool do cliente.
+
+**Retomada.** O cliente executa a call localmente e faz um novo request com `assistant(tool_calls=[...])` + `role="tool"` (o resultado) no histórico — o mesmo round-trip neutro que qualquer resultado de tool usa (`to_langchain`/`from_langchain`); nada de especial do lado do cliente. Como o scan fica restrito às mensagens NOVAS do run, a call já executada e presente no histórico não re-surfaceia.
+
+**Turno misto (interna + cliente na MESMA resposta do modelo).** O que surfaceia é o PRIMEIRO turno do run que chamou uma tool do cliente — as calls do cliente desse turno viram `Message.tool_calls`, e as internas do MESMO turno já executaram server-side (o `ToolNode` do LangGraph roda todas as calls do turno antes de decidir se encerra o grafo). Como o `return_direct` do LangChain só encerra o grafo quando TODAS as calls de um turno são return-direct, um turno misto NÃO corta o loop: o modelo vê o "resultado" placeholder do proxy e pode gerar turnos adicionais — tudo que ele produziu DEPOIS daquela primeira call do cliente é DESCARTADO (esses turnos custam tokens mas nunca chegam ao cliente: o resultado real da tool do cliente ainda não existia, então qualquer texto construído sobre o placeholder seria fabricado). No request seguinte (com o resultado do cliente no histórico) o modelo replaneja com dados reais; uma call interna re-emitida simplesmente roda de novo. Recomendação: prompts que induzam o modelo a separar ações do documento (tools do cliente) em turno próprio, depois das consultas internas, reduzem o desperdício pós-call.
+
+**AVISO — efeitos colaterais além de custo/texto fabricado.** Os turnos gerados DEPOIS daquela primeira call do cliente são descartados como *resposta*, mas qualquer tool INTERNA que o modelo chame nesses turnos EXECUTA de verdade — o `ToolNode` do LangGraph roda a call antes de o texto do turno ser jogado fora. Uma tool interna com efeito colateral (gravar, exportar, notificar) baseada no "resultado" placeholder do proxy dispara mesmo assim, e não há como desfazer depois. Mitigação: em agentes com `client_tools` ativo, evite combinar tools internas com efeito colateral no mesmo `tools`, ou instrua no prompt que ações do cliente (documento) fiquem em turno próprio, ANTES de qualquer tool interna que grave/exporte/notifique.
+
+Detalhe completo do request/response e a tabela `client_tools` × `client_tools_conflict` do lado do Server: seção 18.3a. Demo executável: `examples/client_tools/merge_demo.py`.
 
 ---
 
@@ -523,29 +669,82 @@ class GerenteRevisadoAgent(ReflectiveAgent):
 | `judge_llm` | `LLM` | Yes | The model that grades each answer. Often a cheaper/faster model than the worker's — judging is a classification task, not generation. |
 | `judge_rubric` | `str` | Yes | Objective approval criteria, non-empty. |
 | `max_rounds` | `int` | No (default `3`) | Worker attempts before giving up, `>= 1`. |
+| `revision_mode` | `str` | No (default `"full"`) | `"full"` regenerates the whole answer on a rejected round (historical, byte-identical). `"patch"` (opt-in, #7) asks the retry for SEARCH/REPLACE edit blocks applied programmatically over the previous answer; a non-applying patch falls back to full regeneration for that round. See section 10.1. |
 | `judge_label` | `str` | No | Reasoning-channel label emitted before each judge call. Default: `"Avaliando a resposta..."`. |
 | `retry_label` | `str` | No | Reasoning-channel label emitted before a retry. `{round}`/`{max}` are interpolated. Default: `"Refinando a resposta (rodada {round}/{max})..."`. |
 | `exhausted_label` | `str` | No | Reasoning-channel label emitted when `max_rounds` is reached without approval. Default: `"Rodadas esgotadas — entregando a melhor tentativa."`. |
+| `patch_fallback_label` | `str` | No | Reasoning-channel label emitted when a `"patch"` retry didn't apply and the round fell back to full regeneration. |
 
-Missing `agent`/`judge_llm`, an empty `judge_rubric`, or `max_rounds < 1` on a concrete subclass raises `AixonError` at import time — before registration, so a misconfigured `ReflectiveAgent` never leaves a ghost entry in the registry. The class name must end with `Agent` (same suffix rule as `LLMAgent`/`ToolAgent`, section 22).
+Missing `agent`/`judge_llm`, an empty `judge_rubric`, `max_rounds < 1`, or a `revision_mode` outside `{"full", "patch"}` on a concrete subclass raises `AixonError` at import time — before registration, so a misconfigured `ReflectiveAgent` never leaves a ghost entry in the registry. The class name must end with `Agent` (same suffix rule as `LLMAgent`/`ToolAgent`, section 22).
 
 **How it works — the loop:**
 
-1. `invoke` runs the worker (`agent.invoke`) to get a first answer.
-2. `emit_reasoning(judge_label)`, then the judge grades it: `judge_llm.complete` is called with the rubric and the question/answer pair.
-3. The verdict is a text sentinel: if its first line (after `strip()`) is exactly `APROVADO`, the answer is returned as-is.
-4. Otherwise the verdict IS the critique. If rounds remain, `emit_reasoning(retry_label)` and the worker is re-invoked with the critique appended to the conversation (a new message list — the caller's is never mutated).
-5. If `max_rounds` is reached without an `APROVADO`, `exhausted_label` is emitted and the **last attempt is returned** — exhausting the rounds is *not* an exception. A quality shortfall must not crash a run that produced an answer; the caller decides what to do with a possibly-imperfect result.
+1. `invoke` runs the worker (`agent.invoke`) to get a first answer. If that answer carries `tool_calls` with empty `content` (a client-tool surface from a nested `ToolAgent`, section 9.10, or a raw passthrough from a `LLMAgent(client_tools=True)`, section 8.3), it is returned immediately, untouched — a tool-calls-only answer is not judgeable text, and building a retry message from it would silently drop the `tool_calls` the client still needs to execute.
+2. `should_judge(messages, answer)` (section 10.2) decides whether the loop runs at all for THIS answer. `False` returns the worker's answer as-is — no judge call, no retry, no `reflective_run` log line (step 6 never happens).
+3. `emit_reasoning(judge_label)`, then the judge grades it: `judge_llm.complete` is called with the rubric and the question/answer pair.
+4. The verdict is a text sentinel: if its first line (after `strip()`) is exactly `APROVADO`, the answer is returned as-is.
+5. Otherwise the verdict IS the critique. If rounds remain, `emit_reasoning(retry_label)` and the worker is re-invoked with the critique appended to the conversation (a new message list — the caller's is never mutated) — see section 10.1 for what exactly gets sent on a `"patch"`-mode round.
+6. If `max_rounds` is reached without an `APROVADO`, `exhausted_label` is emitted and the **last attempt is returned** — exhausting the rounds is *not* an exception. A quality shortfall must not crash a run that produced an answer; the caller decides what to do with a possibly-imperfect result. Either way (approved or exhausted), one structured `reflective_run` line (section 10.3) is logged.
 
-`stream`/`astream` mirror `Orchestrator`: they run the loop under a fresh reasoning channel, drain it as `Chunk(reasoning=...)` deltas, then yield the final `Chunk(content=...)` and `Chunk(done=True)`. `ainvoke`/`astream` are native (`agent.ainvoke` + `judge_llm.acomplete`), not thread-bridged.
+`stream`/`astream` mirror `Orchestrator`: they run the loop under a fresh reasoning channel, drain it as `Chunk(reasoning=...)` deltas, then yield the final `Chunk(content=...)` and `Chunk(done=True)`. `ainvoke`/`astream` are native (`agent.ainvoke` + `judge_llm.acomplete`), not thread-bridged. On `stream`/`astream`, the `should_judge` gate is consulted only on the **first** round — a retry's candidate answer is always judged, since it only exists because a previous round was rejected.
 
 **Usage aggregation (added in 0.1.14).** `invoke`/`ainvoke` sum token usage across every worker attempt AND every judge call in the run (via `aixon.usage.merge_usage`, section 19) onto the returned `Message.usage` — a `max_rounds=3` run that rejected twice bills for 3 worker turns plus up to 3 judge turns, all reflected in the one usage total the caller sees.
 
-**Cost and latency.** Each round re-runs the full worker call (and, on rejection, a fresh judge call too) — a `max_rounds=3` run can cost up to 3x the worker's tokens/latency plus the judge overhead. Keep `max_rounds` as low as the rubric allows, and prefer a cheap `judge_llm`.
+**Cost and latency.** Each round re-runs the worker (and, on rejection, a fresh judge call) — but the retries are far cheaper than naive reruns, automatically (section 10.1). Keep `max_rounds` as low as the rubric allows, and prefer a cheap `judge_llm`.
 
 **Write an objective rubric.** `judge_rubric` should state checkable facts, not vibes — "does it cite a source?", "do the numbers match the tool results?", "is every requested field present?". A vague rubric ("sounds right", "is helpful") degenerates into the judge approving on the first pass regardless of quality, defeating the point of the loop.
 
 A complete runnable example (scripted judge + worker, no API key needed) lives in `examples/reflective_review`.
+
+### 10.1 Cost optimizations per round, and revision_mode="patch" (#4/#5/#6/#7)
+
+Every retry round benefits from three automatic optimizations, plus one opt-in mode:
+
+- **Prompt caching (#4).** A retry only APPENDS messages — the prefix across rounds is byte-identical (guaranteed by test), so OpenAI's automatic prompt caching bills the repeated prefix as cache hits with no code change. For Anthropic workers/judges, opt in with `LLM(..., cache=True)`, which marks explicit `cache_control` breakpoints (system + last message) so each round's breakpoint becomes the next round's cached prefix.
+- **Tool-call memoization (#5).** A retry that re-issues a tool call with the same arguments (same DB query, same web search) reuses the first result instead of re-executing (section 9.6) — cost, latency, AND answer/critique consistency (the corrected answer is judged against the SAME underlying data). Opt out per tool for non-deterministic or write tools with `as_tool(memoize=False)`.
+- **Predicted Outputs (#6).** The ReflectiveAgent publishes the previous attempt's full text via `aixon.runtime.prediction_scope` on every RETRY call (not the first attempt). A worker LLM whose provider declares `supports_prediction = True` (OpenAI) attaches it as the `prediction` invocation kwarg, so unchanged spans of the answer regenerate via speculative decoding — a latency win. Rejected predicted tokens still bill as output tokens. Other providers silently ignore the published prediction (same no-op precedent as an unsupported `reasoning=` knob).
+- **`revision_mode = "patch"` (#7, opt-in).** Instead of asking the worker to regenerate the whole answer, the retry prompt asks for one or more SEARCH/REPLACE edit blocks:
+
+  ```
+  <<<<<<< SEARCH
+  (exact excerpt from the previous answer, copied character-for-character)
+  =======
+  (the corrected excerpt)
+  >>>>>>> REPLACE
+  ```
+
+  The blocks are applied programmatically over the previous answer's `content` (`ReflectiveAgent._apply_patches`) — first literal occurrence of each `SEARCH` block is replaced. If there are no blocks, or ANY `SEARCH` text doesn't match literally, the round **falls back automatically** to full regeneration (the normal `"full"`-mode retry prompt, on the SAME round — the round is not skipped or double-counted), and `patch_fallback_label` is emitted. Raw patch-block text is applied via `invoke`/`ainvoke` internally and **never** leaks into `stream`/`astream` content. Default `"full"` is byte-identical to pre-0.1.19 behavior.
+
+### 10.2 should_judge — skipping the judge for cheap answers (#14)
+
+```python
+def should_judge(self, messages: list[Message], answer: Message) -> bool: ...
+```
+
+Override on a subclass to gate the review loop per answer. Default `True` — every answer goes through the judge (the historical behavior). Returning `False` returns the worker's answer as-is: no `judge_llm` call, no retry, and — because no loop ran — no `reflective_run` log line (section 10.3). Typical use: not every worker answer deserves a paid (and possibly slow) judge call.
+
+```python
+def should_judge(self, messages, answer):
+    return len(answer.content) > 200   # saudações não pagam juiz
+```
+
+A reasoning `judge_llm` (a "thinking" model) can cost more wall-clock time than the worker call itself — a plain greeting doesn't need to wait on that. On `stream`/`astream` the gate is consulted only on round 1 (see above).
+
+### 10.3 Structured per-run logging and the patch fallback rate (#12)
+
+Every run (`invoke`, `stream`, `ainvoke`, `astream`) that actually goes through the judge loop (i.e. `should_judge` didn't skip it) emits one line on the `aixon.reflective` logger:
+
+```
+reflective_run agent=Uniplus-DB rounds=2 patch_applied=1 patch_fallback=0 outcome=approved
+```
+
+Fields: `rounds` (attempts made, 1-indexed), `patch_applied`/`patch_fallback` (counts of successful vs. fallback `"patch"`-mode rounds — both `0` under `revision_mode="full"`), `outcome` (`approved` or `exhausted`). Grep-friendly by design: filter Cloud Run/Logging by `reflective_run` and group by `agent=`. The patch fallback rate for one agent (or aggregated across agents) is:
+
+```
+fallback_rate = patch_fallback / (patch_applied + patch_fallback)
+```
+
+This metric is the intended gate for promoting `revision_mode="patch"` to the default in a future `0.2.0` — measure it in production before flipping the default. Runs skipped by the `should_judge` gate (section 10.2) never emit this line, since no loop ran to measure.
 
 ---
 
@@ -564,9 +763,19 @@ class AgentTool:
     func: Callable[..., str]
     coroutine: Callable[..., Awaitable[str]] | None = None  # optional async path
     args_schema: dict | None = None  # optional JSON Schema for the arguments
+    memoize: bool = True                                    # request-scoped tool-call cache opt-out
+```
+
+```python
+def as_tool(
+    self, name: str | None = None, description: str | None = None,
+    memoize: bool = True, audience: str = "human",
+) -> "AgentTool": ...
 ```
 
 > Explanation (`args_schema`): without it, the tool takes a single free-text argument (`str -> str`). With it, the JSON Schema defines the LLM-facing argument surface and `func`/`coroutine` receive the schema's fields as `**kwargs` — `coerce_tools` forwards the dict to `StructuredTool` as-is. Schema-carrying sources (e.g. `MCPConnector.as_tools()`, section 17.4) use this so the LLM sees the published contract instead of a text wrapper.
+
+> Explanation (`memoize`): default `True` — identical (name, args) calls within one active request-scoped cache (`aixon.toolcache`, section 9.6) return the first result instead of re-executing. Set `agent.as_tool(memoize=False)` for a subagent whose answer is intentionally non-deterministic across calls in the same run.
 
 Example: composing agents.
 
@@ -584,6 +793,41 @@ class OrchestratorAgent(ToolAgent):
 > Explanation: `as_tool()` wraps `agent.invoke`. Each tool call creates a fresh `[Message(role="user", content=text)]`, so the wrapped agent's state never leaks between calls. `as_tool()` also sets `coroutine` (wrapping `ainvoke`), which makes the tool dual: `coerce_tools` registers both, so the tool runs on the sync path (`invoke` to `func`) and the async path (`ainvoke` to `coroutine`). The same `AgentTool` shape is returned by `Retriever.as_tool()`, so `ToolAgent.tools` handles agents and retrievers uniformly.
 
 > Explanation (reasoning propagation): when a nested agent emits reasoning (via the ReasoningChannel, sections 11/12), that reasoning bubbles up through the outer `stream()` as `Chunk(reasoning=...)` deltas. Callers therefore see the full chain of thought across nesting levels.
+
+### 11.1 Framing the callee as a subagent: audience="agent" (#15)
+
+By default (`audience="human"`, zero behavior change), the wrapped agent gets the caller's text verbatim — as if a person had typed it — and tends to answer accordingly: greetings, hedging, "let me know if you need anything else." That reads fine when a human is the ultimate reader, but when the CALLER is itself an agent, that human-facing prose is just noise burning the parent's context window.
+
+```python
+CobradorAgent().as_tool(name="clientes", audience="agent")
+```
+
+`as_tool(audience="agent")` appends a fixed suffix (`aixon.agent._AGENT_AUDIENCE_SUFFIX`) to each call's **user message text**, asking the callee to answer with dense, structured facts instead of human-facing prose:
+
+```python
+_AGENT_AUDIENCE_SUFFIX = (
+    "\n\n[Contexto: sua resposta será consumida por OUTRO AGENTE, não por um "
+    "humano. Devolva apenas os fatos relevantes à pergunta, densos e "
+    "estruturados, sem saudação, cortesia ou oferta de ajuda.]"
+)
+```
+
+**Why a user-text suffix, never a system message.** The frame is concatenated onto the text of the `Message(role="user", ...)` `as_tool` builds — it is NEVER sent as a leading `system` message. A leading system message would **override** the callee's own `prompt` (the documented `ToolAgent`/`LLMAgent` contract: a leading system/developer message in `messages` wins over the class-level `prompt`, sections 7 and 9) — defeating the callee's own instructions instead of just adding context on top of them. Appending to the user text sidesteps that entirely.
+
+An `audience` value other than `"human"`/`"agent"` raises `AixonError` immediately (validated inside `as_tool`, not deferred to call time).
+
+### 11.2 Defensive behavior: a wrapped answer with tool_calls and no content
+
+A worker `Agent` wrapped by `as_tool()` may itself be a `ToolAgent` with `client_tools` enabled (section 9.10) or an `LLMAgent(client_tools=True)` (section 8.3). If that worker's `invoke`/`ainvoke` returns a `Message` with `tool_calls` set and `content` empty — i.e. it surfaced a CLIENT tool call instead of a text answer — `as_tool`'s `_run`/`_arun` wrapper has no channel to relay `tool_calls` back to the calling agent's tool loop (a `ToolAgent`'s internal tool result contract is a plain string). Rather than silently return `""` (which would read as the subagent producing nothing), it:
+
+1. Logs a warning naming the wrapped agent and the client tool name(s).
+2. Returns an explanatory string instead of the tool result, e.g.:
+
+   ```
+   [subagente '<name>' solicitou ferramenta do cliente (<tool names>) — chamadas de client tools não atravessam as_tool; trate diretamente com o agente]
+   ```
+
+so the caller's own model sees WHY the subagent came back empty-handed instead of silently stalling. Practical implication: don't nest a `client_tools`-enabled agent inside another `ToolAgent` via `as_tool()` if you expect the client-tool path to actually reach the end client — call it directly (as a top-level agent) instead.
 
 ---
 
@@ -1220,13 +1464,60 @@ Server behaviors (OpenAI adapter):
 |---|---|
 | `usage` (updated in 0.1.13) | On a non-streaming response, **the provider's real usage wins**: when the LLM call reports usage (surfaced on the neutral `Message.usage`, summed over every model turn for a `ToolAgent` run — a multi-step tool loop bills every turn, not just the final answer), the server reports it as-is. Only when the provider reported none does the server fall back to a `tiktoken` estimate (`pip install aixon[tiktoken]`), counted in the Server layer. Without `tiktoken` AND no provider usage, the response carries an empty usage object (`"usage": {}`) — never an error. Streaming keeps the estimate-only path (provider usage isn't accumulated mid-stream); add `"stream_options": {"include_usage": true}` for a final usage chunk before `[DONE]`. See section 19. |
 | `thought_stream_mode` | Request-body field: `custom` (default, since 0.1.9), `content`, or `hidden` (see section 12.1). The adapter's own default is configurable via `OpenAIAdapter(default_thought_mode=...)`; a per-request field always wins. |
-| Per-request generation params | `temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, and `reasoning_effort` (added in 0.1.15) are allow-listed and forwarded to the model, overriding the agent's class-level `LLM(...)` defaults for that request. `reasoning_effort` specifically overrides the class-level `reasoning=` knob (section 8.2) for that one build, translated as `{"effort": reasoning_effort}`. |
-| Client tools (added in 0.1.9, full round-trip in 0.1.14) | Agentic clients (editors, IDEs) may send OpenAI `tools` on the request; the adapter extracts them into `ParsedRequest.tools` and the Server publishes them per request via `aixon.runtime.client_tools` — agents that support client-executed tools read them with `aixon.runtime.current_client_tools()` and answer with `Message.tool_calls` (or `Chunk.tool_calls` on a stream). The adapter emits OpenAI-shaped `tool_calls` with `finish_reason: "tool_calls"`, and parses the follow-up history (`assistant.tool_calls` + `role: "tool"` results) back into neutral form. Agents that ignore client tools keep working unchanged. Runnable demo: `examples/client_tools/`. |
+| Per-request generation params | `temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, and `reasoning_effort` are allow-listed and forwarded to the model, overriding the agent's class-level `LLM(...)` defaults for that request. `reasoning_effort` specifically overrides the class-level `reasoning=` knob (section 8.2) for that one build, translated as `{"effort": reasoning_effort}`. |
+| Client tools (added in 0.1.9, full round-trip in 0.1.14, `tool_choice` transport + first-class merge in #18a/#18b/#18c) | Agentic clients (editors, IDEs) may send OpenAI `tools` (and optionally `tool_choice`) on the request; the adapter extracts them into `ParsedRequest.tools`/`ParsedRequest.tool_choice` and the Server publishes them per request via `aixon.runtime.client_tools(pr.tools)` and `aixon.runtime.tool_choice_scope(pr.tool_choice)` — a new contextvar pair mirroring each other, published on BOTH the sync and streaming request paths. See section 18.3a for the two ways an agent participates, and the `tool_choice`-without-`tools` `400` below. |
 | Non-blocking | The server awaits `agent.ainvoke` / `agent.astream`, so concurrent requests overlap instead of serializing. |
 
-**Client tools over the Anthropic dialect too (0.1.14).** The client-tool round-trip also works over `/v1/messages`, using the SAME `Message.tool_calls` / `Chunk.tool_calls` neutral shapes. Outbound, `Message.tool_calls` becomes `tool_use` content blocks (`stop_reason: "tool_use"`); on a stream, each call opens a `content_block_start` (`type: "tool_use"`), one `input_json_delta` carrying the full arguments, and a `content_block_stop` — the final `message_delta` uses `stop_reason: "tool_use"` when the stream emitted one. Inbound, an `assistant` history message with `tool_use` blocks parses back into `Message.tool_calls`, and a `user` message with `tool_result` blocks parses into one `role: "tool"` neutral message per block (`tool_call_id` from `tool_use_id`).
+**`tool_choice` requires `tools` on the same request.** `tool_choice` moved from silently-discarded params-passthrough into a first-class transport field (`ParsedRequest.tool_choice`, alongside `ParsedRequest.tools`) in #18b. Sending `tool_choice` alone (no `tools` in the same request body) is rejected with **`400`** — asking the model to pick a tool that doesn't exist is a client request error, not a silent no-op. This is the one observable behavior change from the #18a/#18b/#18c work: before it, a lone `tool_choice` was silently discarded.
+
+### 18.3a Two ways an agent participates in client tools
+
+- **Raw passthrough (#18a)** — `LLMAgent(client_tools=True)` (section 8.3), or any custom agent that reads `aixon.runtime.current_client_tools()`/`current_tool_choice()` directly and decides for itself when to answer with `Message.tool_calls` (or `Chunk.tool_calls` on a stream).
+- **First-class merge (#18c)** — `ToolAgent(client_tools="merge" | "replace")` (section 9.10): the client's tool defs are proxied into the SAME tool-calling loop as the agent's own internal tools. The model can call either kind in the same run — an internal-tool call executes server-side and the loop continues; a client-tool call ends the turn immediately with `Message(role="assistant", content="", tool_calls=[...])` (the adapter emits `finish_reason: "tool_calls"` from that alone).
+
+| `client_tools` (`ToolAgent`) | Effect |
+|---|---|
+| `"ignore"` (default) | Client tool defs are never read. Zero behavior change. |
+| `"merge"` | Client defs are ADDED to the agent's own tools for this request. |
+| `"replace"` | ONLY the client's defs are exposed for this request (the agent's own `tools` are not bound). |
+
+| `client_tools_conflict` (`ToolAgent`) | Effect |
+|---|---|
+| `"error"` (default) | `AixonError` at graph-build time, naming the colliding tool(s). |
+| `"internal"` | The CLIENT's def is dropped; the agent's own tool wins and executes server-side. |
+| `"client"` | The agent's INTERNAL tool is dropped for this request; only the client's def (as a proxy) is exposed under that name. |
+
+**Resuming after the client executes its tool** (either path):
+
+```
+request 1  → user message
+         ←  finish_reason: "tool_calls" (client tool)
+[client executes the tool itself]
+request 2  → ...history..., assistant(tool_calls=[...]), role="tool" (the result)
+         ←  finish_reason: "stop" (or another tool_calls turn)
+```
+
+The follow-up request's history round-trips through the same neutral `Message`/LangChain conversion (`to_langchain`/`from_langchain`) as any other tool result — nothing client-side needs to special-case this.
+
+**Mixed turns (internal + client call in the SAME model turn, `client_tools="merge"|"replace"` only).** The FIRST turn of the run that calls a client tool is what surfaces: its client call(s) become `Message.tool_calls`, and the internal call(s) of that same turn have already executed server-side (LangGraph's `ToolNode` runs the whole turn's calls before deciding whether to end the graph). Because LangChain's `return_direct` only ends the graph when ALL of a turn's calls are return-direct, a mixed turn keeps the loop going — the model sees the proxy's placeholder "result" and may generate further turns; everything produced AFTER that first client call is **discarded** as a response (paid for, but never reaches the client — a real client-tool result did not exist yet, so text built on the placeholder would be fabricated).
+
+**Side effects beyond wasted cost.** The discarded post-sentinel turns are discarded only as a *response* — any INTERNAL tool the model calls in one of those turns still **executes** (LangGraph's `ToolNode` runs the call before the turn's text is thrown away). An internal tool with a side effect (write, export, notify) based on the proxy's placeholder fires anyway and cannot be undone. Mitigation: on agents with `client_tools` enabled, avoid mixing side-effecting internal tools into the same `tools` list, or prompt the model to keep document/client-side actions in their own turn, BEFORE any internal tool that writes/exports/notifies.
+
+Runnable demos: `examples/client_tools/main.py` (raw passthrough, #18a) and `examples/client_tools/merge_demo.py` (first-class merge + resume, #18c).
+
+**Client tools over the Anthropic dialect too (0.1.14).** The client-tool round-trip also works over `/v1/messages`, using the SAME `Message.tool_calls` / `Chunk.tool_calls` neutral shapes. Outbound, `Message.tool_calls` becomes `tool_use` content blocks (`stop_reason: "tool_use"`); on a stream, each call opens a `content_block_start` (`type: "tool_use"`), one `input_json_delta` carrying the full arguments, and a `content_block_stop` — the final `message_delta` uses `stop_reason: "tool_use"` when the stream emitted one. Inbound, an `assistant` history message with `tool_use` blocks parses back into `Message.tool_calls`, and a `user` message with `tool_result` blocks parses into one `role: "tool"` neutral message per block (`tool_call_id` from `tool_use_id`). **Adapter scope note:** the Anthropic adapter's own `tool_choice` dialect (`{"type": "auto"|"any"|"tool", "name": ...}`) is NOT normalized into the transport field yet — that mapping is tracked as a follow-up to #18.
 
 **Limitation.** Anthropic extended thinking (`reasoning=` on a `claude-*` `LLM`, section 8.2) does not round-trip through a CLIENT-executed tool loop: the neutral boundary drops `thinking` content on the way back into LangChain messages, so a follow-up request carrying the client's tool result — but not the matching signed thinking block — gets rejected by Anthropic's API. This only affects tool calls the CLIENT executes across separate HTTP requests; a normal `ToolAgent` (aixon runs the tool loop in-process, within one request) is unaffected.
+
+### 18.3b Debug tap (AIXON_DEBUG_REQUESTS)
+
+Opt-in diagnostic recorder for client integrations. When `AIXON_DEBUG_REQUESTS` is set, each chat `POST` is appended as one JSONL record — verbatim request body, the resolved agent name, and the response (the non-stream payload, or the raw SSE lines of a stream) — under `AIXON_DEBUG_REQUESTS_DIR` (default `./aixon-debug/`).
+
+- **Values `1`/`true`/`yes`** record every agent.
+- **Any other value** is parsed as a comma-separated **allowlist of agent names**, e.g. `AIXON_DEBUG_REQUESTS="OnlyOffice,Redator"` — only those agents are recorded, so a server with agents that carry sensitive conversations can diagnose one integration without those agents ever touching disk.
+- **Headers are NEVER recorded** — `Authorization` (and any bearer token) cannot leak into the JSONL files by construction.
+- The env is read per request (no rebuild needed to toggle it on/off), and a tap failure never breaks the request it was trying to record.
+- It is a **temporary diagnostic tool**: run it locally or in short windows, then unset the env and delete the directory — never leave it enabled in production.
 
 ### 18.4 AnthropicAdapter
 
@@ -1320,14 +1611,15 @@ server.serve()
 ```python
 @dataclass
 class ParsedRequest:
-    model:    str                  # requested agent name / alias
-    messages: list[Message]
-    params:   dict                 # temperature, max_tokens, etc. (transport fields already stripped)
-    stream:   bool
-    tools:    list[dict] | None = None
+    model:       str                  # requested agent name / alias
+    messages:    list[Message]
+    params:      dict                 # temperature, max_tokens, etc. (transport fields already stripped)
+    stream:      bool
+    tools:       list[dict] | None = None
+    tool_choice: Any = None           # #18b — transport field alongside `tools`, not passthrough params
 ```
 
-`tools` (added in 0.1.9, dialect-neutral shape guaranteed since 0.1.13) carries the tool definitions the CLIENT declared on the request, always normalized to the OpenAI wire shape (`{"type": "function", "function": {"name", "description", "parameters"}}`) regardless of which adapter parsed the request, or `None` if the client sent none.
+`tools` (added in 0.1.9, dialect-neutral shape guaranteed since 0.1.13) carries the tool definitions the CLIENT declared on the request, always normalized to the OpenAI wire shape (`{"type": "function", "function": {"name", "description", "parameters"}}`) regardless of which adapter parsed the request, or `None` if the client sent none. `tool_choice` (#18b) is the client's wire-shaped preference (`"auto"`/`"none"`/`"required"` or `{"type": "function", "function": {"name": ...}}`), or `None`; it moved out of the generic passthrough `params` dict into this dedicated field specifically so the Server can enforce the `tools`-required rule (section 18.3a) and publish it via its own contextvar (`aixon.runtime.tool_choice_scope`) rather than leaving it to silently reach (or not reach) the provider through generic params.
 
 ### 18.8 Errors
 
@@ -1335,7 +1627,7 @@ Every chat route returns a dialect-appropriate JSON error body (never a raw trac
 
 | Status | When | Body shape |
 |---|---|---|
-| `400` | Request body isn't a JSON object, or `adapter.parse_request` raises (e.g. a malformed `messages` entry or unknown role). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
+| `400` | Request body isn't a JSON object, `adapter.parse_request` raises (e.g. a malformed `messages` entry or unknown role), or the request declares `tool_choice` without `tools` (section 18.3a, #18b). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
 | `404` | `model` doesn't resolve to a registered agent (`AgentNotFoundError`). | `{"error": {"message": ..., "type": "model_not_found"}}` |
 | `500` | The agent raised while running (non-streaming). The real exception is logged server-side only; the client gets a generic message — `str(exc)` never leaks. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
 
@@ -1549,8 +1841,12 @@ Key facts:
 | `GOOGLE_API_KEY` | required for Google | API key for the Google (Gemini) provider. |
 | `ZAI_API_KEY` | required for z.AI | API key for the z.AI (GLM) provider, added in 0.1.9. Does NOT fall back to `OPENAI_API_KEY` (0.1.12) — building the model raises `AixonError` instead if unset. |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4` | Overrides the z.AI endpoint. |
+| `XAI_API_KEY` | required for xAI | API key for the xAI (Grok) provider, added in 0.1.20. Does NOT fall back to `OPENAI_API_KEY` — building the model raises `AixonError` instead if unset. |
+| `XAI_BASE_URL` | `https://api.x.ai/v1` | Overrides the xAI endpoint. |
 | `AUTH_API_KEY` | disabled | Bearer token for the server. Unset means no auth. Multiple keys comma-separated. |
 | `LOG_LEVEL` | `INFO` | Framework log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+| `AIXON_DEBUG_REQUESTS` | disabled | Opt-in debug tap (section 18.3b): `1`/`true`/`yes` records every agent's chat requests as JSONL; a comma-separated list (`"Agent1,Agent2"`) records only those agents. Headers are never recorded. Temporary diagnostic tool only — never leave enabled in production. |
+| `AIXON_DEBUG_REQUESTS_DIR` | `./aixon-debug/` | Directory the debug tap writes JSONL records into, when `AIXON_DEBUG_REQUESTS` is set. |
 
 Vendor-retriever variables: `TAVILY_API_KEY`, `RAGIE_API_KEY`, `WEAVIATE_HOST`, `WEAVIATE_PORT`. Connector variables are whatever you name in `base_url_env` and `auth_token_env`.
 
@@ -1582,7 +1878,7 @@ Every error subclasses `AixonError` and carries a human-readable `.message`.
 | Orchestrator | Agent that coordinates multiple agents via a graph (three tiers). |
 | ReflectiveAgent | Agent that wraps a worker in a generate -> judge -> retry evaluator-optimizer loop (added in 0.1.7). |
 | Neutral boundary | The rule that agents speak only `Message` / `Chunk`; no provider or wire type crosses in. |
-| LLM | A lazy, declarative handle to a chat model; hides the provider SDK. `LLM(model, reasoning=...)` (0.1.15) turns on native extended thinking. |
+| LLM | A lazy, declarative handle to a chat model; hides the provider SDK. `LLM(model, reasoning=...)` turns on native extended thinking. |
 | Provider | Pluggable backend that builds a LangChain chat model for a given model name. |
 | Reasoning knob | `LLM(model, reasoning=...)`: `None`/`False` off, `True`/`dict` on, translated per provider into that provider's native thinking mode (section 8.2). |
 | Retriever | Context-search tool (`search` / `asearch` / `write` / `awrite` / `as_tool`). |
@@ -1590,13 +1886,24 @@ Every error subclasses `AixonError` and carries a human-readable `.message`.
 | Connector | HTTP client base for external microservices (`get` / `post` / `aget` / `apost` / `aclose`). |
 | MCPConnector | `Connector` subclass that turns an MCP server's published tool catalog into `AgentTool`s via `toolset()` (deferred, class-body-safe) or `as_tools()`/`aas_tools()` (eager, runtime/script code). |
 | AgentTool | Neutral tool descriptor returned by `Agent.as_tool()` and `Retriever.as_tool()`. |
-| ReasoningChannel | Contextvars channel through which `emit_reasoning` lines, tool labels, and (since 0.1.15) model reasoning flow. |
+| ReasoningChannel | Contextvars channel through which `emit_reasoning` lines, tool labels, and the model's own extended-thinking text (section 9.4) flow. |
 | UsageAccumulator | Thread-safe accumulator (`aixon.usage`) summing token usage across every model turn of one run (section 19). |
 | ProtocolAdapter | Translates a wire format to and from neutral types; mounted on the `Server`. |
 | Registry | Process-global map of registered agents (`get_registry()`). |
 | autodiscover | Imports every module in a package, triggering self-registration. |
 | TypeAccess | Retriever access mode: `READ`, `WRITE`, or `ALL`. |
 | thought_stream_mode | Server option for how reasoning reaches the wire (`custom` default / `content` / `hidden`). |
+| Client tools (raw passthrough) | `LLMAgent(client_tools=True)` (#18a): the agent forwards the request's client-declared tools straight to the LLM call and returns whatever `tool_calls` came back, deciding nothing itself (section 8.3). |
+| Client tools (first-class merge) | `ToolAgent(client_tools="merge"\|"replace")` (#18c): client tool defs run as proxies inside the SAME tool-calling loop as the agent's own tools; a client-tool call ends the turn, an internal-tool call executes server-side and the loop continues (section 9.10). |
+| `client_tools_conflict` | `ToolAgent` policy for a name collision between an internal tool and a client def: `"error"` (default) \| `"internal"` \| `"client"` (section 9.10). |
+| `shield_tool_errors` | `ToolAgent` error shield (#9, default `True`): a tool's exception becomes a `TOOL ERROR (...)` result handed to the model instead of failing the run (section 9.5). |
+| Tool-call memoization | Request-scoped cache (`aixon.toolcache`, #5) so an identical (name, args) tool call within one run/request returns the first result; opt out with `as_tool(memoize=False)` or `aixon_memoize = False` (section 9.6). |
+| `prune_tool_results_after` | `ToolAgent` opt-in pruning (#16) of tool results from COMPLETE rounds older than the last N, stubbed only in the payload sent to the provider (section 9.7). |
+| `on_tool_start` / `on_tool_end` | `ToolAgent` pre/post tool-call hooks (#17): the former may rewrite a call's kwargs or raise (treated as the tool failing); the latter is observation-only (section 9.8). |
+| `audience` | `Agent.as_tool(audience="agent")` (#15): appends a fixed subagent frame to the callee's user text, asking for dense facts instead of human-facing prose (section 11.1). |
+| `revision_mode` | `ReflectiveAgent` retry strategy: `"full"` (default, regenerate) or `"patch"` (#7, SEARCH/REPLACE edits with automatic fallback to full) (section 10.1). |
+| `should_judge` | `ReflectiveAgent` gate method (#14, default returns `True`): return `False` to skip the judge/retry loop entirely for one answer (section 10.2). |
+| `reflective_run` log line | Structured per-run log (#12) on the `aixon.reflective` logger: `agent=... rounds=... patch_applied=... patch_fallback=... outcome=...` — the basis for measuring the patch-mode fallback rate (section 10.3). |
 | END | Sentinel from `aixon.state` marking a terminal node in a Tier-2 graph. |
 
 ---
@@ -1613,7 +1920,10 @@ No. An agent registers itself when Python evaluates its class body. Call `autodi
 A concrete subclass name must end with its base's suffix: `Agent` for `LLMAgent`, `ToolAgent`, and `ReflectiveAgent`, `Orchestrator` for `Orchestrator`, `Retriever` for `Retriever`, `Connector` (and `MCPConnector`) for `Connector`. Rename the class, or pass `abstract=True` for an intermediate base.
 
 **How do I switch LLM providers?**
-Change the `LLM(...)` model name (the provider is inferred from the prefix: `gpt-*` to openai, `claude-*` to anthropic, `gemini-*` to google, `glm*` to z.AI), or pass `provider=` explicitly. No agent or orchestrator code changes, because of the neutral boundary.
+Change the `LLM(...)` model name (the provider is inferred from the prefix: `gpt-*` to openai, `claude-*` to anthropic, `gemini-*` to google, `glm*` to z.AI, `grok*` to xAI), or pass `provider=` explicitly. No agent or orchestrator code changes, because of the neutral boundary.
+
+**How do I use xAI's Grok models?**
+`LLM("grok-4.5")` (provider inferred) or `LLM("grok-4.5", provider="xai")`. Set `XAI_API_KEY` — it does NOT fall back to `OPENAI_API_KEY` if unset, so a missing key raises a clear `AixonError` instead of silently billing your OpenAI credential. Override the endpoint with `XAI_BASE_URL` (default `https://api.x.ai/v1`). The reasoning knob (section 8.2) works the same as for OpenAI models: `LLM("grok-4.5", reasoning={"effort": "high"})` translates to `reasoning_effort` verbatim. Install with `pip install "aixon[xai]"`.
 
 **How do I turn on extended thinking / reasoning?**
 `LLM(model, reasoning=True)` (medium effort) or `LLM(model, reasoning={"effort": "high"})` / `{"budget_tokens": ...}` (section 8.2). Anthropic and Gemini return real reasoning text on `Message.reasoning`/`Chunk.reasoning`; OpenAI's API never returns raw chain-of-thought (the knob only improves the answer); GLM enables thinking server-side but the installed `langchain-openai` doesn't yet surface the reasoning text. A per-request `reasoning_effort` field overrides the class-level knob for one call.
@@ -1622,7 +1932,19 @@ Change the `LLM(...)` model name (the provider is inferred from the prefix: `gpt
 No. `Message.usage` (section 19) carries the provider's real usage automatically when the provider reports it, summed correctly across `ToolAgent` tool-call turns, `Orchestrator` supervisor + worker turns, and `ReflectiveAgent` worker + judge turns. Install `aixon[tiktoken]` only as a fallback estimate for providers/paths that don't report usage.
 
 **Can a client (an editor/IDE) execute its own tools instead of aixon running them?**
-Yes — declare OpenAI-shaped `tools` on the request; the Server reads them via `aixon.runtime.current_client_tools()` and an agent that supports this answers with `Message.tool_calls` / `Chunk.tool_calls` (section 18.3). This works over both the OpenAI and the Anthropic (`/v1/messages`) dialects. One limitation: Anthropic extended thinking does not round-trip through a client-executed tool loop spanning multiple HTTP requests (section 8.2).
+Yes — declare OpenAI-shaped `tools` (and optionally `tool_choice`) on the request; the Server reads them via `aixon.runtime.current_client_tools()`/`current_tool_choice()` and an agent that supports this answers with `Message.tool_calls` / `Chunk.tool_calls` (section 18.3). `tool_choice` without `tools` on the same request is rejected with `400`. This works over both the OpenAI and the Anthropic (`/v1/messages`) dialects. One limitation: Anthropic extended thinking does not round-trip through a client-executed tool loop spanning multiple HTTP requests (section 8.2).
+
+**How do I let an editor/IDE client execute its own tools alongside my agent's own (server-side) tools, in the SAME run?**
+Raw passthrough (`LLMAgent(client_tools=True)`, section 8.3) only hands the model the client's tools — it has no internal tools of its own to mix in. For a `ToolAgent` that also has internal tools, use the first-class merge instead: `ToolAgent(client_tools="merge")` (section 9.10) proxies the client's tool defs into the SAME tool-calling loop as the agent's own tools. The model can call either kind in one run: an internal call executes server-side and the loop continues; a client call ends the turn with `Message(role="assistant", content="", tool_calls=[...])` for the client to execute and resume with a follow-up request. Set `client_tools_conflict` if an internal tool and a client def share a name, and watch the "mixed turn" caveat (section 9.10) — internal tool calls in turns generated AFTER the first client call still execute even though that generated text is discarded.
+
+**How do I skip the judge for trivial answers in a ReflectiveAgent?**
+Override `should_judge(self, messages, answer) -> bool` (section 10.2, default `True`) and return `False` for the answers that don't need review — e.g. `return len(answer.content) > 200`. No judge call, no retry, and no `reflective_run` log line for that run. On `stream`/`astream` the gate is only consulted on the first round.
+
+**How do I measure the `revision_mode="patch"` fallback rate before making it the default?**
+Every `ReflectiveAgent` run that goes through the judge loop logs one line on the `aixon.reflective` logger: `reflective_run agent=<name> rounds=<n> patch_applied=<n> patch_fallback=<n> outcome=<approved|exhausted>` (section 10.3). Aggregate by `agent=` and compute `patch_fallback / (patch_applied + patch_fallback)`. `revision_mode="full"` logs the same line with both patch counters at `0`.
+
+**My `ToolAgent` conversation keeps growing because every turn resends old tool-call results the model already used. How do I stop that?**
+Set `prune_tool_results_after = N` (section 9.7) — tool results before the last `N` COMPLETE rounds (a round ends on an assistant message with no `tool_calls`) are replaced by a short stub in the payload sent to the provider only; the client-visible history is untouched. `N=1` always keeps the most recent round intact. Default `None` leaves the behavior unchanged; values `<= 0` are rejected at registration.
 
 **Can an agent call another agent?**
 Yes. `other_agent.as_tool()` returns an `AgentTool` you put in `ToolAgent.tools`, or you use an agent class as a node or worker in an `Orchestrator`.
@@ -1952,7 +2274,7 @@ reply = await get_registry().resolve("support").ainvoke(
 
 ---
 
-## 29. Quick reference card (aixon 0.1.15)
+## 29. Quick reference card (aixon 0.1.21)
 
 ```python
 # Imports
@@ -1984,11 +2306,11 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 
 | Need | Use |
 |---|---|
-| One LLM call | `LLMAgent` (`llm`, `prompt`) |
-| LLM plus tools loop | `ToolAgent` (`llm`, `prompt`, `tools`, `max_iterations`, `tool_call_label`) |
-| Evaluator-optimizer review loop | `ReflectiveAgent` (`agent`, `judge_llm`, `judge_rubric`, `max_rounds`) |
+| One LLM call | `LLMAgent` (`llm`, `prompt`, `client_tools`) |
+| LLM plus tools loop | `ToolAgent` (`llm`, `prompt`, `tools`, `max_iterations`, `tool_call_label`, `shield_tool_errors`, `prune_tool_results_after`, `on_tool_start`/`on_tool_end`, `client_tools`) |
+| Evaluator-optimizer review loop | `ReflectiveAgent` (`agent`, `judge_llm`, `judge_rubric`, `max_rounds`, `revision_mode`, `should_judge`) |
 | Coordinate agents | `Orchestrator` (Tier 1: `supervisor` + `agents`; Tier 2: `nodes` + `entry` + `route_*`; Tier 3: `build_graph`) |
-| Extended thinking / reasoning | `LLM(model, reasoning=True \| {"effort": ...} \| {"budget_tokens": ...})` |
+| Extended thinking / reasoning | `LLM(model, reasoning=True \| {"effort": ...} \| {"budget_tokens": ...})` — openai, anthropic, google, zai, xai |
 | Context search | `Retriever` (`search` / `asearch` / `write` / `awrite` / `as_tool`, `TypeAccess`) |
 | Vector embeddings | `Embedding` / `OpenAIEmbedding` |
 | HTTP microservice | `Connector` (`get` / `post` / `aget` / `apost` / `aclose`) |
@@ -1996,10 +2318,13 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 | Vendor RAG | `TavilyRetriever` / `RagieRetriever` / `WeaviateRetriever` |
 | Serve over HTTP | `Server` plus `OpenAIAdapter` / `AnthropicAdapter` / custom `ProtocolAdapter` |
 | Reasoning to client | `emit_reasoning` plus `thought_stream_mode` (`custom` default / `content` / `hidden`) |
-| Client-executed tools | request `tools` -> `aixon.runtime.current_client_tools()` -> `Message.tool_calls` / `Chunk.tool_calls` |
+| Client-executed tools (raw passthrough) | `LLMAgent(client_tools=True)` -> `aixon.runtime.current_client_tools()`/`current_tool_choice()` -> `Message.tool_calls` / `Chunk.tool_calls` |
+| Client-executed tools (first-class merge) | `ToolAgent(client_tools="merge" \| "replace", client_tools_conflict=..., client_tools_filter=...)` |
+| Subagent framing for another agent (not a human) | `agent.as_tool(audience="agent")` |
+| Debug tap | `AIXON_DEBUG_REQUESTS=1` (or an agent allowlist) + `AIXON_DEBUG_REQUESTS_DIR` |
 | Token usage (real, provider-reported) | `Message.usage`, summed automatically per agent type (section 19) |
 | Token usage (estimate fallback) | install `aixon[tiktoken]` |
 
 ---
 
-End of the aixon technical reference, framework version 0.1.15.
+End of the aixon technical reference, framework version 0.1.21.
