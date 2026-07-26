@@ -294,6 +294,22 @@ sent to the provider.
 
 This means you can mix library tools, custom functions, and other agents freely.
 
+**Paralelismo de tool calls (#13).** When the model emits several tool calls
+in the same turn, both entry points run them concurrently already —
+`langchain.agents.create_agent`'s internal `ToolNode` (langgraph 1.2) fans
+out a turn's calls itself, no aixon-side change needed:
+- **Async** (`ainvoke`/`astream` — what `Server` uses): `asyncio.gather` over
+  each call's coroutine.
+- **Sync** (`invoke`/`stream`): a thread-pool `executor.map` (LangChain's
+  `get_executor_for_config`), so blocking calls (e.g. `time.sleep`,
+  synchronous HTTP) also overlap.
+
+Guaranteed by a regression test (`tests/test_tool_parallel.py`, async path):
+two tools that each `await asyncio.sleep(0.4)` complete a turn in ~0.4s, not
+~0.8s. Prefer `async def` tools with `ainvoke`/`astream` regardless — the
+thread pool backing the sync path is an implementation detail of the
+installed langgraph version, not a contract aixon pins with its own test.
+
 ### Nesting agents as tools
 
 Any `Agent` exposes itself as a tool via `as_tool()`. The result is a neutral

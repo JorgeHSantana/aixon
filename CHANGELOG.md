@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Tool calls do mesmo turno em paralelo, garantido por teste (#13).** Spike
+  confirmou que o `ToolNode` interno do `create_agent` (langchain 1.x /
+  langgraph 1.2) já paraleliza tool calls emitidas num mesmo turno do modelo
+  nos DOIS caminhos — async (`ainvoke`/`astream`, o usado pelo `Server`) via
+  `asyncio.gather`, e sync (`invoke`/`stream`) via thread pool
+  (`get_executor_for_config().map`) — sem nenhuma mudança em
+  `aixon/agents/tool_agent.py`. Novo teste de regressão
+  `tests/test_tool_parallel.py` fixa o caminho async por timing (2 tools de
+  0.4s completam em ~0.4s, não ~0.8s). Documentado em `docs/agents.md`
+  ("Paralelismo de tool calls").
 - **`ReflectiveAgent`: log estruturado por run (#12).** Cada run (`invoke`,
   `stream`, `ainvoke`, `astream`) emite uma linha `reflective_run agent=<name>
   rounds=<n> patch_applied=<n> patch_fallback=<n> outcome=<approved|exhausted>`
