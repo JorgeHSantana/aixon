@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ReflectiveAgent`: gate `should_judge` — juiz opcional por resposta (#14).**
+  Novo método sobrescrevível `should_judge(self, messages, answer) -> bool`
+  (default `True`, zero mudança de comportamento). Retornar `False` devolve a
+  resposta do worker direto, SEM nenhuma chamada ao `judge_llm` e sem retry —
+  cobre os 4 caminhos (`invoke`/`stream`/`ainvoke`/`astream`; nos streams, o
+  gate só é consultado na primeira rodada). Um run pulado pelo gate NÃO emite
+  a linha `reflective_run` do #12 (não houve loop a medir). Uso típico: nem
+  toda resposta do worker merece pagar um juiz — ex. saudações curtas.
+  Exemplo em `examples/reflective_review` (`GatedReviewedWriterAgent`);
+  documentado em `docs/agents.md`.
 - **Tool calls do mesmo turno em paralelo, garantido por teste (#13).** Spike
   confirmou que o `ToolNode` interno do `create_agent` (langchain 1.x /
   langgraph 1.2) já paraleliza tool calls emitidas num mesmo turno do modelo

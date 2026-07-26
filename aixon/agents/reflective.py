@@ -111,6 +111,17 @@ class ReflectiveAgent(Agent, abstract=True):
     # doesn't apply falls back to full regeneration for that round.
     revision_mode: str = "full"
 
+    def should_judge(self, messages: list[Message], answer: Message) -> bool:
+        """Judge gate (#14): return False to skip the review loop for THIS
+        answer (the worker's answer is returned as-is; the judge_llm is never
+        called). Default True — historical behavior. Override for cheap
+        heuristics, e.g.::
+
+            def should_judge(self, messages, answer):
+                return len(answer.content) > 200   # saudações não pagam juiz
+        """
+        return True
+
     # Reasoning-channel labels ({round}/{max} interpolated on retry).
     judge_label: str = "Avaliando a resposta…"
     retry_label: str = "Refinando a resposta (rodada {round}/{max})…"
@@ -317,6 +328,8 @@ class ReflectiveAgent(Agent, abstract=True):
     def _invoke(self, messages: list[Message]) -> Message:
         msgs = list(messages)
         answer = self._worker.invoke(msgs)
+        if not self.should_judge(messages, answer):
+            return answer
         # Every worker AND judge turn attempted this run is summed here (a
         # turn that reports no usage contributes zero, never erasing what the
         # others reported) so the final Message.usage covers the WHOLE run,
@@ -404,6 +417,10 @@ class ReflectiveAgent(Agent, abstract=True):
                         if chunk.content:
                             parts.append(chunk.content)
                 answer = Message(role="assistant", content="".join(parts))
+            if round_ == 1 and not self.should_judge(messages, answer):
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
             yield Chunk(reasoning=self.judge_label + "\n")
             verdict = self.judge_llm.complete(
                 self._judge_messages(messages, answer)
@@ -450,6 +467,8 @@ class ReflectiveAgent(Agent, abstract=True):
     async def _ainvoke(self, messages: list[Message]) -> Message:
         msgs = list(messages)
         answer = await self._worker.ainvoke(msgs)
+        if not self.should_judge(messages, answer):
+            return answer
         # See invoke(): sum every worker + judge turn attempted this run.
         total_usage = answer.usage
         # See _invoke(): run stats (#12), counted across rounds.
@@ -522,6 +541,10 @@ class ReflectiveAgent(Agent, abstract=True):
                         if chunk.content:
                             parts.append(chunk.content)
                 answer = Message(role="assistant", content="".join(parts))
+            if round_ == 1 and not self.should_judge(messages, answer):
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
             yield Chunk(reasoning=self.judge_label + "\n")
             verdict = (
                 await self.judge_llm.acomplete(self._judge_messages(messages, answer))

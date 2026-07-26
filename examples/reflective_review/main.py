@@ -12,7 +12,9 @@ whole example runs with **no API key and no network call**:
 Expected: the judge REJECTS the writer's first answer ("missing the
 source"), the writer retries citing one, and the judge APPROVES — you will
 see both rounds on the reasoning channel, then the final, approved answer.
-See README.md for the full expected output.
+A third section shows the `should_judge` gate (#14): a greeting is short
+enough to skip the judge entirely, judge_llm is never called. See README.md
+for the full expected output.
 """
 
 from __future__ import annotations
@@ -132,6 +134,43 @@ class ReviewedWriterAgent(ReflectiveAgent):
     max_rounds = 3
 
 
+# ── variant: should_judge gate (#14) ────────────────────────────────────────
+# Not every worker answer needs a judge call — a plain greeting doesn't need
+# review. `should_judge` gates the whole loop per answer: return False and
+# the worker's answer comes back untouched, with judge_llm never invoked.
+
+
+class GreetingWriterAgent(Agent):
+    """Answers a greeting directly — short enough to skip the judge (#14)."""
+
+    name = "greeting-writer"
+    hidden = True
+    description = "Toy generator: answers greetings in one short line."
+
+    def invoke(self, messages: list[Message]) -> Message:
+        return Message(role="assistant", content="Bom dia! Como posso ajudar?")
+
+    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+        yield Chunk(content=self.invoke(messages).content)
+        yield Chunk(done=True)
+
+
+class GatedReviewedWriterAgent(ReflectiveAgent):
+    """Same review loop as `ReviewedWriterAgent`, but `should_judge` skips the
+    judge for short answers — a greeting isn't worth a judge_llm call."""
+
+    name = "gated-reviewed-writer"
+    description = "Reviews longer answers only; short ones skip the judge."
+    agent = GreetingWriterAgent
+    judge_llm = scripted_llm(["APROVADO"])
+    judge_rubric = "The answer must cite the source of the fact it states."
+
+    def should_judge(self, messages: list[Message], answer: Message) -> bool:
+        # Only pay for review once the answer is long enough to matter —
+        # a one-line greeting goes straight back to the caller.
+        return len(answer.content) > 160
+
+
 # ── variant: revision_mode="patch" (0.1.19) ─────────────────────────────────
 # Instead of rewriting the whole answer on a rejected round, the retry emits
 # SEARCH/REPLACE edit blocks that the agent applies programmatically over the
@@ -214,7 +253,19 @@ def main() -> None:
         f"PatchWriterAgent was called {len(PatchWriterAgent.calls)} time(s) — "
         "the retry produced a SEARCH/REPLACE block; the agent applied it over "
         "the previous answer and the judge approved the PATCHED text. Note the "
-        "raw patch never appears in the streamed content."
+        "raw patch never appears in the streamed content.\n"
+    )
+
+    print("── should_judge gate (#14) " + "─" * 34)
+    greeting = [Message(role="user", content="Bom dia!")]
+    print(f"> {greeting[0].content}\n")
+    content = run(GatedReviewedWriterAgent, greeting)
+    print(f"\nFinal answer: {content}")
+    judged = GatedReviewedWriterAgent.judge_llm.chat_model._idx
+    print(
+        f"judge_llm was called {judged} time(s) — should_judge() gated the "
+        "greeting out before any review round; no reflective_run log line "
+        "was emitted either (see docs/agents.md)."
     )
 
 

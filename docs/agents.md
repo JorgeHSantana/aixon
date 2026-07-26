@@ -402,6 +402,10 @@ misconfigured `ReflectiveAgent` never leaves a ghost entry in the registry.
    *not* an exception. A quality shortfall must not crash a run that produced
    an answer; the caller decides what to do with a possibly-imperfect result.
 
+Between steps 1 and 2, `should_judge` decides whether the loop runs at all
+(see below) — when it returns `False` the worker's first answer is returned
+immediately, before any judge call.
+
 `stream`/`astream` mirror `Orchestrator`: they run the loop under a fresh
 reasoning channel, drain it as `Chunk(reasoning=...)` deltas, then yield the
 final `Chunk(content=...)` and `Chunk(done=True)`. `ainvoke`/`astream` are
@@ -440,6 +444,29 @@ regardless of quality, defeating the point of the loop.
 A complete runnable example (scripted judge + worker, no API key needed) is
 at [examples/reflective_review](../examples/reflective_review).
 
+### should_judge — skipping the judge for cheap answers (#14)
+
+```python
+def should_judge(self, messages: list[Message], answer: Message) -> bool: ...
+```
+
+Override this method on your subclass to gate the review loop per answer.
+Default is `True` — every answer goes through the judge, the historical
+behavior. Return `False` and the worker's answer is returned as-is: **no**
+`judge_llm` call, no retry, nothing logged (see the `reflective_run` note
+below). Typical use: not every worker answer deserves a paid judge call —
+
+```python
+def should_judge(self, messages, answer):
+    return len(answer.content) > 200   # saudações não pagam juiz
+```
+
+Latency note: a reasoning `judge_llm` (e.g. a "thinking" model) can cost more
+wall-clock time than the worker call itself — a plain greeting doesn't need
+to wait on that. On `stream`/`astream`, the gate is only consulted on the
+**first** round (a retry's candidate answer is always judged, since it only
+exists because a previous round was rejected).
+
 ### Medindo a taxa de fallback do modo patch (#12)
 
 Cada run emite uma linha estruturada no logger `aixon.reflective`:
@@ -450,6 +477,9 @@ Taxa de fallback = `patch_fallback / (patch_applied + patch_fallback)` agregada
 por agente. Em Cloud Run/Logging: filtre por `reflective_run` e agrupe por
 `agent=`. `revision_mode="full"` loga a mesma linha com `patch_*=0`. Essa
 métrica decide a promoção de `patch` a default numa futura 0.2.0.
+
+Runs pulados pelo gate `should_judge` (#14) não geram linha `reflective_run` —
+não houve loop de julgamento a medir.
 
 ---
 
