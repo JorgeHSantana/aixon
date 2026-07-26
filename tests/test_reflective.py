@@ -2,6 +2,8 @@
 """ReflectiveAgent: evaluator-optimizer loop (generator -> judge -> retry)."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -280,6 +282,95 @@ def test_as_tool_interface_uniforme():
     tool = r.as_tool(name="revisado")
     assert tool.name == "revisado"
     assert tool.func("pergunta") == "resposta via tool"
+
+
+# ── client tool_calls pass-through (sweep fix #4) ────────────────────────────
+
+def make_tool_call_agent(name: str):
+    """Concrete Agent whose invoke/ainvoke/stream/astream all surface a
+    CLIENT tool_calls answer (#18c style): content="" with tool_calls set —
+    the exact shape a ToolAgent(client_tools=...) worker returns when the
+    model calls a client tool. Records how many times it was called."""
+    from typing import Iterator
+
+    from aixon.agent import Agent
+
+    calls: list[list[Message]] = []
+    tool_calls = [{"name": "inserir_no_documento", "args": {"texto": "x"},
+                   "id": "c1"}]
+
+    def invoke(self, messages: list[Message]) -> Message:
+        calls.append(list(messages))
+        return Message(role="assistant", content="", tool_calls=tool_calls)
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        calls.append(list(messages))
+        return Message(role="assistant", content="", tool_calls=tool_calls)
+
+    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+        calls.append(list(messages))
+        yield Chunk(tool_calls=tool_calls)
+        yield Chunk(done=True)
+
+    async def astream(self, messages: list[Message]):
+        calls.append(list(messages))
+        yield Chunk(tool_calls=tool_calls)
+        yield Chunk(done=True)
+
+    cls = type(f"{name.capitalize()}Agent", (Agent,), {
+        "invoke": invoke, "ainvoke": ainvoke, "stream": stream,
+        "astream": astream, "name": name,
+    })
+    from aixon.registry import get_registry
+    return get_registry().resolve(name), calls, tool_calls
+
+
+def test_invoke_tool_call_answer_passa_direto_sem_julgar():
+    gen, calls, expected_tool_calls = make_tool_call_agent("tcgen1")
+    r = make_reflective("tcref1", gen, ["APROVADO"])
+    out = r.invoke(USER)
+    assert out.tool_calls == expected_tool_calls
+    assert out.content == ""
+    assert len(calls) == 1                              # worker ran once
+    assert r.judge_llm.chat_model._idx == 0              # juiz NUNCA chamado
+
+
+def test_ainvoke_tool_call_answer_passa_direto_sem_julgar():
+    gen, calls, expected_tool_calls = make_tool_call_agent("tcgen2")
+    r = make_reflective("tcref2", gen, ["APROVADO"])
+    out = asyncio.run(r.ainvoke(USER))
+    assert out.tool_calls == expected_tool_calls
+    assert out.content == ""
+    assert len(calls) == 1
+    assert r.judge_llm.chat_model._idx == 0
+
+
+def test_stream_tool_call_answer_passa_direto_sem_julgar():
+    gen, calls, expected_tool_calls = make_tool_call_agent("tcgen3")
+    r = make_reflective("tcref3", gen, ["APROVADO"])
+    chunks = list(r.stream(USER))
+    tool_call_chunks = [c for c in chunks if c.tool_calls]
+    assert tool_call_chunks and tool_call_chunks[0].tool_calls == expected_tool_calls
+    assert not any(c.content for c in chunks)
+    assert chunks[-1].done is True
+    assert len(calls) == 1
+    assert r.judge_llm.chat_model._idx == 0
+
+
+def test_astream_tool_call_answer_passa_direto_sem_julgar():
+    gen, calls, expected_tool_calls = make_tool_call_agent("tcgen4")
+    r = make_reflective("tcref4", gen, ["APROVADO"])
+
+    async def run():
+        return [c async for c in r.astream(USER)]
+
+    chunks = asyncio.run(run())
+    tool_call_chunks = [c for c in chunks if c.tool_calls]
+    assert tool_call_chunks and tool_call_chunks[0].tool_calls == expected_tool_calls
+    assert not any(c.content for c in chunks)
+    assert chunks[-1].done is True
+    assert len(calls) == 1
+    assert r.judge_llm.chat_model._idx == 0
 
 
 def test_retries_acumulam_historico():

@@ -11,7 +11,13 @@ Two behaviors every `ToolAgent` now gets for free:
    again with the SAME arguments returns the first result without
    re-executing — watch the call counter.
 
-Both the driving model and the tools are scripted/deterministic: **no API key,
+Also shown, in the same offline style: **`on_tool_start`/`on_tool_end`
+hooks** (#17) — a tool call logged before and after it runs — and
+**`prune_tool_results_after`** (#16) — old tool results stubbed out of the
+payload, demonstrated directly on a synthetic history so it stays
+deterministic (no extra LLM round-trip needed for that part).
+
+The driving model(s) and the tools are scripted/deterministic: **no API key,
 no network call**:
 
     cd examples/tool_shield_memo
@@ -26,8 +32,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from aixon import LLM, ToolAgent
-from aixon.message import Message
+from aixon import LLM, Agent, ToolAgent
+from aixon.message import Chunk, Message
 from aixon.providers.base import Provider, register_provider
 from aixon.toolcache import tool_call_cache
 
@@ -113,6 +119,63 @@ class FieldAssistantAgent(ToolAgent):
     shield_tool_errors = True
 
 
+# ── on_tool_start / on_tool_end hooks (#17) ──────────────────────────────────
+# A separate scripted LLM (its own script/cursor) driving one tool call, so
+# the hook log below is not entangled with FieldAssistantAgent's script.
+
+HOOK_LOG: list[str] = []
+
+
+def get_time(city: str) -> str:
+    """Fake clock lookup — the tool the hooks demo calls."""
+    return f"14:32 in {city}"
+
+
+llm_hooks = LLM("scripted-tools-1", provider="scripted-tools")
+llm_hooks.chat_model.script = [
+    AIMessage(content="", tool_calls=[
+        {"name": "get_time", "args": {"city": "Recife"}, "id": "h1"}]),
+    AIMessage(content="It's 14:32 in Recife."),
+]
+
+
+class AuditedAssistantAgent(ToolAgent):
+    """Toy agent demonstrating on_tool_start/on_tool_end (#17): both hooks
+    just append a line to HOOK_LOG, proving they fire around the tool call
+    without changing the run's outcome (on_tool_start returns None -> args
+    unchanged)."""
+
+    name = "audited-assistant"
+    hidden = True
+    description = "Toy agent demonstrating tool-call hooks (#17)."
+    llm = llm_hooks
+    tools = [get_time]
+
+    def on_tool_start(self, name: str, args: dict):
+        HOOK_LOG.append(f"on_tool_start: {name}({args})")
+        return None  # keep args unchanged
+
+    def on_tool_end(self, name: str, args: dict, result, error) -> None:
+        HOOK_LOG.append(f"on_tool_end:   {name} -> result={result!r} error={error!r}")
+
+
+class TicketEchoAgent(Agent):
+    """Offline callee for the audience="agent" demo (#15): echoes the exact
+    text it received, so the printed output PROVES the subagent frame was
+    appended to the call — no LLM, no network."""
+
+    name = "ticket-echo"
+    hidden = True
+    description = "Echoes the received text (shows the subagent frame)."
+
+    def invoke(self, messages: list[Message]) -> Message:
+        return Message(role="assistant", content=messages[-1].content)
+
+    def stream(self, messages: list[Message]):
+        yield Chunk(content=messages[-1].content)
+        yield Chunk(done=True)
+
+
 def main() -> None:
     question = [Message(role="user", content="DB status and Recife weather?")]
     print(f"> {question[0].content}\n")
@@ -127,6 +190,50 @@ def main() -> None:
     print(f"query_database raised TimeoutError — and the run SURVIVED (shield).")
     print(f"get_weather was asked twice with the same args but executed "
           f"{CALLS['weather']} time(s) — the second call was memoized.")
+
+    # audience="agent" (#15): a subagent is just another tool — the shield and
+    # the memoization above apply to it too. With audience="agent" the caller's
+    # text gains the subagent frame; this echo callee prints back EXACTLY what
+    # it received, proving the frame arrives (offline, no network call).
+    peer_tool = TicketEchoAgent().as_tool(audience="agent")
+    print("\nas_tool(audience='agent') — text the subagent actually received:")
+    print(repr(peer_tool.func("Resuma o chamado 4711")))
+
+    # on_tool_start/on_tool_end hooks (#17): fire around the get_time call —
+    # the log proves both ran without changing what the model saw.
+    print("\non_tool_start/on_tool_end (#17):")
+    hooked = AuditedAssistantAgent().invoke(
+        [Message(role="user", content="What time is it in Recife?")])
+    print(f"Final answer: {hooked.content}")
+    for line in HOOK_LOG:
+        print(f"  {line}")
+
+    # prune_tool_results_after (#16): tool results older than the last
+    # `keep_turns` COMPLETE rounds (a round ends on an assistant message
+    # WITHOUT tool_calls) get stubbed out of the payload sent to the model.
+    # Two full rounds here so keep_turns=1 has an OLDER round to prune while
+    # preserving the most recent one — see ToolAgent._prune_history.
+    print("\nprune_tool_results_after (#16):")
+    old_result = "linha;" * 200
+    recent_result = "linha;" * 150
+    history = [
+        Message(role="user", content="vendas de maio?"),
+        Message(role="assistant", content="", tool_calls=[
+            {"name": "sql", "args": {"q": "..."}, "id": "c1"}]),
+        Message(role="tool", content=old_result, tool_call_id="c1"),
+        Message(role="assistant", content="Maio: R$ 10k."),
+        Message(role="user", content="e junho?"),
+        Message(role="assistant", content="", tool_calls=[
+            {"name": "sql", "args": {"q": "..."}, "id": "c2"}]),
+        Message(role="tool", content=recent_result, tool_call_id="c2"),
+        Message(role="assistant", content="Junho: R$ 12k."),
+    ]
+    print(f"before: round de maio tem {len(history[2].content)} chars, "
+          f"round de junho tem {len(history[6].content)} chars")
+    pruned = ToolAgent._prune_history(history, keep_turns=1)
+    print(f"after:  maio (mais antigo) -> {pruned[2].content!r}")
+    print(f"        junho (round mais recente) -> "
+          f"{len(pruned[6].content)} chars intactos")
 
 
 if __name__ == "__main__":

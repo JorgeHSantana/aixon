@@ -20,6 +20,7 @@ works.
 | `stream()` surfacing the loop's reasoning labels (`judge_label` / `retry_label`) | [main.py](main.py) — `main()` |
 | A real reject-then-approve round trip (not just the happy path) | the printed output below |
 | `revision_mode = "patch"` (0.1.19): the retry emits a SEARCH/REPLACE block, applied programmatically — raw patch text never reaches the stream | [main.py](main.py) — `PatchWriterAgent` / `PatchReviewedWriterAgent` |
+| `should_judge` gate (#14): skip the judge entirely for cheap answers | [main.py](main.py) — `GreetingWriterAgent` / `GatedReviewedWriterAgent` |
 
 ## Run it
 
@@ -62,9 +63,45 @@ answer, and the judge approves the PATCHED text — same final answer, but the
 worker only paid for the edit, not a full rewrite. A patch that doesn't apply
 falls back to full regeneration automatically.
 
+A third section (`GatedReviewedWriterAgent`) sends a plain greeting instead —
+see "Quando NÃO pagar o juiz" below.
+
+## Quando NÃO pagar o juiz (`should_judge`, #14)
+
+`GatedReviewedWriterAgent` wraps `GreetingWriterAgent` (always answers "Bom
+dia! Como posso ajudar?") with the SAME kind of review loop, but overrides
+`should_judge` to only review answers longer than 160 characters:
+
+```python
+def should_judge(self, messages, answer):
+    return len(answer.content) > 160
+```
+
+Running it on "Bom dia!" prints:
+
+```
+── should_judge gate (#14) ──────────────────────────────────
+> Bom dia!
+
+Final answer: Bom dia! Como posso ajudar?
+judge_llm was called 0 time(s) — should_judge() gated the greeting out before any review round; no reflective_run log line was emitted either (see docs/agents.md).
+```
+
+`judge_llm.chat_model._idx` staying at `0` proves the judge was never called
+— not rejected, not approved, just never invoked. No retry either: the
+worker's first answer is what comes back. This also means no `reflective_run`
+line is logged for this run (there was no review loop to measure) — see
+[docs/agents.md](../../docs/agents.md#medindo-a-taxa-de-fallback-do-modo-patch-12).
+
 (The reasoning labels are Portuguese — `ReflectiveAgent`'s defaults; override
 `judge_label`/`retry_label`/`exhausted_label`/`patch_fallback_label` on your
 own subclass to customize or translate them.)
+
+Since #12, every run also emits one structured line on the `aixon.reflective`
+logger — `reflective_run agent=<name> rounds=<n> patch_applied=<n>
+patch_fallback=<n> outcome=<approved|exhausted>` — grep-friendly for measuring
+the `patch` mode's fallback rate; see
+[docs/agents.md](../../docs/agents.md#medindo-a-taxa-de-fallback-do-modo-patch-12).
 
 ## Retries got cheaper in 0.1.19 (automatic)
 

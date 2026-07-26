@@ -98,6 +98,34 @@ def client_tools(tools: list[dict] | None) -> Iterator[list[dict]]:
         _client_tools.reset(token)
 
 
+# tool_choice of the client (#18a): published per request alongside
+# client_tools when the request declares one (OpenAI wire shape, e.g.
+# {"type": "function", "function": {"name": ...}}, or the literal "auto"/
+# "none"/"required"). Agents/LLM calls that bind client tools read this to
+# forward the client's preference to the provider; everyone else ignores it.
+_tool_choice: contextvars.ContextVar = contextvars.ContextVar(
+    "aixon_tool_choice", default=None
+)
+
+
+def current_tool_choice():
+    """Return the client's ``tool_choice`` for the current request, or
+    ``None`` when absent. Always a deep copy: mirrors ``current_client_tools``
+    so a caller mutating the result never pollutes the ContextVar state."""
+    return copy.deepcopy(_tool_choice.get())
+
+
+@contextmanager
+def tool_choice_scope(value) -> Iterator:
+    """Publish (or clear, with ``None``) the client's ``tool_choice`` for the
+    duration of the block. Mirrors ``client_tools``'s scope pattern."""
+    token = _tool_choice.set(copy.deepcopy(value) if value is not None else None)
+    try:
+        yield value
+    finally:
+        _tool_choice.reset(token)
+
+
 # Predicted output (#6): the previous attempt's full text, published by the
 # ReflectiveAgent around a RETRY call only. Providers that support OpenAI's
 # Predicted Outputs read it via current_prediction() and attach it to the

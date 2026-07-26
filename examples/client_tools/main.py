@@ -3,13 +3,21 @@
 Editors and IDEs (e.g. ONLYOFFICE's AI agent) POST ``tools`` on the request
 and execute the ``tool_calls`` the model returns — the OpenAI function-calling
 handshake, with execution on the CLIENT side. This example runs that whole
-loop in-process, with **no API key and no network call**:
+loop in-process, with **no API key and no network call**, using the
+first-class opt-in for this pattern: ``LLMAgent(client_tools=True)`` (#18a,
+see ``aixon/agents/llm_agent.py``). The agent does NOT read
+``current_client_tools()`` itself anymore — it just sets the class attribute
+and the base class binds whatever the client declared onto the (here,
+scripted) LLM call for that turn, returning the model's raw ``tool_calls`` to
+the wire:
 
   1. the "editor" sends ``tools=[open_file]`` plus a user request;
-  2. the agent reads them via ``current_client_tools()`` and answers with a
-     ``tool_calls`` turn (``finish_reason="tool_calls"``);
+  2. ``LLMAgent.invoke`` (via ``_client_bind``) forwards those tools to the
+     LLM call; the (scripted) model answers with a ``tool_calls`` turn
+     (``finish_reason="tool_calls"``);
   3. the editor "executes" the call, appends the ``role="tool"`` result to the
-     history and POSTs again; the agent, seeing the result, answers in text.
+     history and POSTs again; the model, scripted to see the result, answers
+     in text.
 
     cd examples/client_tools
     python main.py
@@ -21,70 +29,69 @@ tool_calls turn, then the final text answer. See README.md.
 from __future__ import annotations
 
 import json
-import re
-from typing import AsyncIterator, Iterator
+from typing import Any, Optional
 
 from fastapi.testclient import TestClient
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
-from aixon.agent import Agent
-from aixon.message import Chunk, Message
-from aixon.runtime import current_client_tools
+from aixon import LLM, LLMAgent
+from aixon.providers.base import Provider, register_provider
 from aixon.server.server import Server
 
-# ── the agent: scripted, offline ─────────────────────────────────────────────
-# A real deployment would put an LLM here (ToolAgent/LLMAgent); the routing
-# logic below is what matters — read the CLIENT's tools, answer with
-# tool_calls, and finish in text once the tool result comes back.
+# ── scripted driver model (offline) ──────────────────────────────────────────
+# A real deployment would put a real provider (OpenAI, Anthropic, ...) behind
+# this LLM; what this example is actually about is LLMAgent(client_tools=True)
+# itself — the routing logic in aixon/agents/llm_agent.py is what matters.
 
 
-class FileButlerAgent(Agent):
+class ScriptedChatModel(BaseChatModel):
+    """Replays `script` (AIMessages) one per call; tool_calls drive the turn."""
+
+    script: list = []
+    _idx: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "ScriptedChatModel":
+        return self  # tools ignored; script drives the answer
+
+    def _generate(self, messages: list[BaseMessage],
+                  stop: Optional[list[str]] = None,
+                  run_manager: Any = None, **kwargs: Any) -> ChatResult:
+        i = self._idx
+        msg = self.script[i] if i < len(self.script) else AIMessage(content="(done)")
+        object.__setattr__(self, "_idx", i + 1)
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
+class ScriptedProvider(Provider):
+    name = "scripted-client-tools"
+    env_key = ""
+
+    def build(self, model: str, **params: Any) -> ScriptedChatModel:
+        return ScriptedChatModel()
+
+
+register_provider(ScriptedProvider())
+
+llm = LLM("scripted-client-tools-1", provider="scripted-client-tools")
+llm.chat_model.script = [
+    AIMessage(content="", tool_calls=[
+        {"name": "open_file", "args": {"path": "/home/user/report.docx"},
+         "id": "call_1"}]),
+    AIMessage(content="Done — the client reported the file was opened."),
+]
+
+
+class FileButlerAgent(LLMAgent):
     name = "FileButler"
     description = "Opens the file the user asks for using the client's own tools."
-
-    def _decide(self, messages: list[Message]) -> Message:
-        # Turn 2: the client already executed our call and posted the result.
-        tool_results = [m for m in messages if m.role == "tool"]
-        if tool_results:
-            return Message(
-                role="assistant",
-                content=f"Done — the client reported: {tool_results[-1].content}",
-            )
-
-        # Turn 1: pick the client-declared tool and call it.
-        tools = current_client_tools()
-        names = [t.get("function", {}).get("name") for t in tools]
-        if "open_file" not in names:
-            return Message(
-                role="assistant",
-                content="This client declared no open_file tool; nothing to call.",
-            )
-        user_text = next((m.content for m in reversed(messages) if m.role == "user"), "")
-        match = re.search(r"(/\S+)", user_text)
-        path = match.group(1) if match else "/tmp/notes.txt"
-        return Message(
-            role="assistant",
-            content="",
-            tool_calls=[{"name": "open_file", "args": {"path": path}, "id": "call_1"}],
-        )
-
-    # Neutral boundary: sync + async, invoke + stream.
-    def invoke(self, messages: list[Message]) -> Message:
-        return self._decide(messages)
-
-    async def ainvoke(self, messages: list[Message]) -> Message:
-        return self._decide(messages)
-
-    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
-        final = self._decide(messages)
-        if final.content:
-            yield Chunk(content=final.content)
-        if final.tool_calls:
-            yield Chunk(tool_calls=final.tool_calls)
-        yield Chunk(done=True)
-
-    async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
-        for chunk in self.stream(messages):
-            yield chunk
+    llm = llm
+    client_tools = True  # #18a: bind current_client_tools()/current_tool_choice() raw
 
 
 # ── the "editor" (client) side ───────────────────────────────────────────────

@@ -21,3 +21,12 @@ no `langchain-core` — **nenhuma mudança no framework ou no agente**. A mesma
 | **Langfuse self-hosted** — OTel (`opentelemetry-instrumentation-langchain` → endpoint OTLP) | sua infra | produção (LGPD: dados não saem de casa) |
 
 Guia completo das três rotas: [docs/tracing.md](../../docs/tracing.md).
+
+## Depuração sem stack de tracing: o debug tap
+
+Para inspecionar o tráfego bruto de um agente sem LangSmith/Langfuse, o
+servidor tem um gravador opt-in (0.1.18+): `AIXON_DEBUG_REQUESTS=1` grava um
+JSONL por request em `./aixon-debug/` (headers nunca são gravados). Aceita
+allowlist por agente: `AIXON_DEBUG_REQUESTS="OnlyOffice,Redator"`. A
+apresentação do reasoning no wire é controlada por `thought_stream_mode`
+(`custom`/`content`/`hidden`) — detalhes em `docs/server.md`.

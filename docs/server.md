@@ -197,16 +197,97 @@ Full OpenAI-compatible wire format. Served routes:
 > [agents.md](agents.md#reasoning-extended-thinking--reasoning-effort)) for
 > that one build, translated as `{"effort": reasoning_effort}`.
 
-> **Client tools.** Agentic clients (editors, IDEs) may send OpenAI `tools` on
-> the request; the adapter extracts them into `ParsedRequest.tools` and the
-> Server publishes them per request via `aixon.runtime.client_tools` — agents
-> that support client-executed tools read them with
-> `aixon.runtime.current_client_tools()` and answer with `Message.tool_calls`
-> (or `Chunk.tool_calls` on a stream). The adapter emits OpenAI-shaped
-> `tool_calls` with `finish_reason: "tool_calls"`, and parses the follow-up
-> history (`assistant.tool_calls` + `role: "tool"` results) back into neutral
-> form. Agents that ignore client tools keep working unchanged. Runnable demo:
-> `examples/client_tools/`.
+> **Client tools.** Agentic clients (editors, IDEs) may send OpenAI `tools`
+> (and optionally `tool_choice`) on the request; the adapter extracts them
+> into `ParsedRequest.tools`/`ParsedRequest.tool_choice` and the Server
+> publishes them per request via `aixon.runtime.client_tools` /
+> `aixon.runtime.tool_choice_scope`. `tool_choice` **requires** `tools` on the
+> same request — sending it alone is rejected with `400` (a client asking the
+> model to pick a tool that doesn't exist is a request error, not a silent
+> no-op). Two opt-in ways for an agent to participate:
+>
+> - **Raw passthrough** — `LLMAgent(client_tools=True)` (#18a) or any agent
+>   that reads `aixon.runtime.current_client_tools()` /
+>   `current_tool_choice()` directly and decides for itself when to answer
+>   with `Message.tool_calls` (or `Chunk.tool_calls` on a stream).
+> - **First-class merge** — `ToolAgent(client_tools="merge" | "replace")`
+>   (#18c): the client's tool defs are proxied into the SAME tool-calling loop
+>   as the agent's own (internal) tools. The model can call either kind in the
+>   same run:
+>   - a call to an **internal** tool executes server-side, same as always —
+>     the loop continues normally;
+>   - a call to a **client** tool immediately ends the turn: the run returns
+>     `Message(role="assistant", content="", tool_calls=[...])` (the wire
+>     adapter emits `finish_reason: "tool_calls"` from that alone) instead of
+>     looping further, because the client — not aixon — must execute it.
+>
+>   | `client_tools` | Effect |
+>   |---|---|
+>   | `"ignore"` (default) | Client tool defs are never read. Zero behavior change. |
+>   | `"merge"` | Client defs are ADDED to the agent's own tools for this request. |
+>   | `"replace"` | ONLY the client's defs are exposed for this request (the agent's own `tools` are not bound). |
+>
+>   A client def can collide by name with one of the agent's own tools;
+>   `client_tools_conflict` picks the resolution at request time:
+>
+>   | `client_tools_conflict` | Effect |
+>   |---|---|
+>   | `"error"` (default) | `AixonError` at graph build time, naming the colliding tool(s) — an explicit failure instead of guessing which one the model meant. |
+>   | `"internal"` | The CLIENT's def is dropped; the agent's own tool wins and executes server-side as usual. |
+>   | `"client"` | The agent's INTERNAL tool is dropped for this request; only the client's def (as a proxy) is exposed under that name. |
+>
+>   Override `client_tools_filter(self, defs) -> defs` to curate which client
+>   defs are even considered (e.g. drop anything without an expected prefix)
+>   before the merge/replace/conflict logic runs; the default keeps all of them.
+>
+>   **Resuming after the client executes its tool.** The client runs the call
+>   locally and POSTs again with the result appended to history — same shape
+>   as the raw-passthrough path:
+>
+>   ```
+>   request 1  → user message
+>            ←  finish_reason: "tool_calls" (client tool)
+>   [client executes the tool itself]
+>   request 2  → ...history..., assistant(tool_calls=[...]), role="tool" (the result)
+>            ←  finish_reason: "stop" (or another tool_calls turn)
+>   ```
+>
+>   The follow-up request's history round-trips through the SAME neutral
+>   `Message`/LangChain conversion (`to_langchain`/`from_langchain`) as any
+>   other tool result — no special-casing needed on the client side.
+>
+>   **Mixed turns (internal + client call in the SAME model turn).** The
+>   FIRST turn of the run that calls a client tool is what surfaces: its
+>   client call(s) become `Message.tool_calls`, and the internal call(s) of
+>   that same turn have already executed server-side (LangGraph's `ToolNode`
+>   runs the whole turn's calls). Because LangChain's `return_direct` only
+>   ends the graph when ALL of a turn's calls are return-direct, a mixed
+>   turn keeps the loop going — the model sees the proxy's placeholder
+>   "result" and may generate further turns; everything it produced AFTER
+>   that first client call is **discarded** (those model turns are paid for
+>   but never reach the client: a real result for the client's tool did not
+>   exist yet, so any answer built on the placeholder would be fabricated).
+>   On the next request (with the client's tool result in the history) the
+>   model re-plans from real data; an internal call it re-emits simply
+>   re-executes. To reduce the wasted post-call turns, prompt the agent to
+>   put document/client-side actions in their own turn, separate from
+>   internal lookups.
+>
+>   **SIDE EFFECTS (beyond wasted cost/fabricated text).** The turns
+>   generated AFTER that first client call are discarded as a *response*,
+>   but any INTERNAL tool the model calls in those discarded turns actually
+>   EXECUTES — LangGraph's `ToolNode` runs the call before the turn's text
+>   is thrown away. An internal tool with a side effect (write to a file,
+>   trigger an export, send a notification) based on the proxy's placeholder
+>   "result" fires anyway, and it cannot be undone afterward. Mitigation: on
+>   agents with `client_tools` enabled, avoid mixing internal tools that
+>   have side effects into the same `tools` list, or prompt the model to
+>   keep client-side (document) actions in their own turn, BEFORE any
+>   internal tool that writes/exports/notifies.
+>
+>   Runnable demos: `examples/client_tools/main.py` (raw passthrough, #18a)
+>   and `examples/client_tools/merge_demo.py` (first-class merge + resume,
+>   #18c).
 >
 > The client-tool **round-trip** also works over the Anthropic dialect
 > (`/v1/messages`), using the SAME `Message.tool_calls` / `Chunk.tool_calls`

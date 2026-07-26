@@ -29,6 +29,41 @@ if TYPE_CHECKING:
 
 _log = Logger("aixon.tool_agent")
 
+_CLIENT_TOOL_STOP = "__aixon_client_tool_call__"
+
+
+def _client_proxy_tools(defs: list[dict]) -> list:
+    """One ``return_direct`` ``StructuredTool`` per client tool def (#18c).
+
+    The proxy body is a stub returning a sentinel — the LangGraph loop never
+    actually "does" the client's tool. ``return_direct`` (the OnlyOffice
+    native-bridge precedent) ends the graph right after the call when ALL of
+    the turn's calls are proxies; on a MIXED turn (internal + client call in
+    the same AI message) LangChain keeps looping, so the post-run detection
+    (``_surface_client_calls``) does not rely on the graph ending — it scans
+    the run's AI messages for the first turn that called a client tool and
+    surfaces those calls as the neutral ``Message.tool_calls`` the CLIENT
+    must execute."""
+    from langchain_core.tools import StructuredTool
+
+    proxies = []
+    for d in defs:
+        fn = (d.get("function") or {})
+        name = fn.get("name")
+        if not name:
+            continue
+
+        def _stop(**kwargs):  # noqa: ANN003 — schema comes from the client def
+            return _CLIENT_TOOL_STOP
+
+        proxies.append(StructuredTool.from_function(
+            func=_stop, name=name,
+            description=fn.get("description") or name,
+            args_schema=fn.get("parameters") or None,
+            return_direct=True,
+        ))
+    return proxies
+
 
 class ToolAgent(Agent, abstract=True):
     """Tool-calling agent. Declarative attributes:
@@ -58,6 +93,49 @@ class ToolAgent(Agent, abstract=True):
     # for a strict policy where tool exceptions propagate (pre-#9 behavior).
     shield_tool_errors: bool = True
     tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
+    # Context pruning (#16): with an int N, tool results OLDER than the last N
+    # COMPLETE rounds (a round ends on an assistant message WITHOUT
+    # tool_calls — its final answer) are replaced by a short stub when
+    # building the payload — already-consumed query dumps stop re-billing
+    # every turn. Counting an in-progress round's tool-calling assistant
+    # message as one of the N would stub the CURRENT round's own tool result
+    # (the historical bug); N=1 always preserves the most recent round.
+    # None = off.
+    prune_tool_results_after: int | None = None
+
+    # Client tools (#18c): "ignore" (default) | "merge" (client defs join the
+    # internal tools; a CLIENT call ends the turn with Message.tool_calls) |
+    # "replace" (client defs only for this request).
+    client_tools: str = "ignore"
+    # Name collision between an internal tool and a client def:
+    # "error" (explicit, default) | "internal" (client def dropped) |
+    # "client" (internal tool dropped).
+    client_tools_conflict: str = "error"
+
+    def client_tools_filter(self, defs: list[dict]) -> list[dict]:
+        """Curation hook (#18c): which client tool defs are exposed. Default:
+        all of them. Override e.g. to allow only a prefix."""
+        return defs
+
+    # Tool-call hooks (#17): override for deterministic guardrails/telemetry.
+    # on_tool_start may return a dict to REWRITE the call's kwargs; raising in
+    # it is treated as the tool failing (shield applies). on_tool_end is
+    # observation-only — its exceptions are logged and swallowed.
+    def on_tool_start(self, name: str, args: dict):  # noqa: D401
+        """Called before a tool executes. Return a dict to rewrite ``args``
+        (the memo cache lookup runs on the rewritten kwargs); return None to
+        keep them unchanged. Raising here is treated as the tool call itself
+        failing — the error shield (#9) converts it to a TOOL ERROR result
+        and the run continues. Default: no-op."""
+        return None
+
+    def on_tool_end(self, name: str, args: dict, result, error) -> None:
+        """Called after a tool call, whether it succeeded, failed, or was
+        served from the memo cache (``error`` is the exception in the failure
+        case, else None). Observation-only: any exception raised here is
+        logged as a warning and swallowed — it never affects the tool result
+        seen by the model. Default: no-op."""
+        return None
 
     @classmethod
     def _validate_subclass(cls) -> None:
@@ -73,29 +151,139 @@ class ToolAgent(Agent, abstract=True):
                 f"ToolAgent subclass '{cls.__name__}' must declare an `llm` "
                 f"attribute (e.g. `llm = LLM(\"gpt-4o-mini\")`). It was missing or None."
             )
+        # #16: values <= 0 are INVALID configuration, rejected at registration
+        # (same precedent as ReflectiveAgent's max_rounds). keep_turns=0 would
+        # hit `assistant_idx[-0]` == `assistant_idx[0]` (Python: -0 == 0) — an
+        # IndexError on a history with no assistant message yet, and a
+        # near-no-op otherwise; both the opposite of the attribute's name.
+        prune = getattr(cls, "prune_tool_results_after", None)
+        if prune is not None and (not isinstance(prune, int) or prune < 1):
+            raise AixonError(
+                f"'{cls.__name__}' has prune_tool_results_after={prune!r}; "
+                f"use None (off) or an int >= 1 (keep the last N assistant turns)."
+            )
+        # #18c: client_tools/client_tools_conflict are declarative enums,
+        # validated at registration so a typo fails loudly instead of
+        # silently behaving as "ignore"/"error" at request time.
+        mode = getattr(cls, "client_tools", "ignore")
+        if mode not in ("ignore", "merge", "replace"):
+            raise AixonError(
+                f"'{cls.__name__}' has client_tools={mode!r}; use 'ignore', "
+                f"'merge' or 'replace'."
+            )
+        conflict = getattr(cls, "client_tools_conflict", "error")
+        if conflict not in ("error", "internal", "client"):
+            raise AixonError(
+                f"'{cls.__name__}' has client_tools_conflict={conflict!r}; "
+                f"use 'error', 'internal' or 'client'."
+            )
 
     # ---- internal: build the langgraph agent + neutral message prep -------
 
+    @staticmethod
+    def _prune_history(messages: list[Message], keep_turns: int) -> list[Message]:
+        """Copy of *messages* with tool results before the last *keep_turns*
+        COMPLETE rounds stubbed out (#16). A round is "complete" when it ends
+        on an assistant message WITHOUT tool_calls (its final answer) — the
+        assistant message that EMITTED the tool_calls belongs to the round it
+        opened, not to a round boundary. Anchoring on every assistant message
+        (the historical bug) would count that tool-calling message as one of
+        the `keep_turns` most-recent turns, stubbing the tool result the
+        CURRENT (most recent) round still needs — e.g. keep_turns=1 stubbing
+        the very round in progress. Never mutates the caller's list."""
+        import dataclasses
+
+        finals = [i for i, m in enumerate(messages)
+                  if m.role == "assistant" and not m.tool_calls]
+        if len(finals) <= keep_turns:
+            return list(messages)
+        cutoff = finals[-(keep_turns + 1)] + 1
+        out: list[Message] = []
+        for i, m in enumerate(messages):
+            if m.role == "tool" and i < cutoff and m.content:
+                stub = (f"[resultado de ferramenta omitido "
+                        f"({len(m.content)} caracteres) — já utilizado em "
+                        f"resposta anterior]")
+                out.append(dataclasses.replace(m, content=stub))
+            else:
+                out.append(m)
+        return out
+
     def _build_agent(self, messages: list[Message]):
-        """Return (compiled_agent, lc_messages, config). A leading neutral
-        system (or developer — OpenAI's system-role alias) message overrides
-        self.prompt."""
+        """Return (compiled_agent, lc_messages, config, client_tool_names).
+        A leading neutral system (or developer — OpenAI's system-role alias)
+        message overrides self.prompt.
+
+        ``client_tool_names`` (#18c) is the set of CLIENT tool names proxied
+        into this build (empty when ``client_tools="ignore"`` or the request
+        declared none). It is RETURNED — never stored on ``self`` — because
+        the agent instance is a registry singleton shared by concurrent
+        requests: request-scoped state on the instance would let request B
+        (running ``_build_agent`` during one of A's awaits) overwrite request
+        A's set — including resetting it to empty for a request without
+        client tools — making A leak the proxy sentinel as content and lose
+        its tool_calls."""
         from langchain.agents import create_agent
         from aixon._interop.messages import to_langchain
+
+        if self.prune_tool_results_after is not None:
+            messages = self._prune_history(messages, self.prune_tool_results_after)
 
         system_prompt = self.prompt or None
         if messages and messages[0].role in ("system", "developer"):
             system_prompt = messages[0].content or system_prompt
             messages = messages[1:]
 
-        lc_tools = coerce_tools(list(self.tools), shield_errors=self.shield_tool_errors)
+        # Pass each hook to coerce_tools only when THAT hook is individually
+        # overridden (#17) — avoids a dict-copy per tool call in the
+        # (default) no-hook case, and a subclass overriding only one of
+        # on_tool_start/on_tool_end must not drag the other (still the
+        # inherited no-op) along as if it too had been customized.
+        start_overridden = type(self).on_tool_start is not ToolAgent.on_tool_start
+        end_overridden = type(self).on_tool_end is not ToolAgent.on_tool_end
+        lc_tools = coerce_tools(
+            list(self.tools), shield_errors=self.shield_tool_errors,
+            on_tool_start=self.on_tool_start if start_overridden else None,
+            on_tool_end=self.on_tool_end if end_overridden else None,
+        )
+
+        # Client tools (#18c): request-scoped by construction — computed on
+        # every _build_agent call (the first step of all 4 entry points) and
+        # handed back to the caller as a LOCAL value, never cached on the
+        # (singleton) instance.
+        client_tool_names: set[str] = set()
+        if self.client_tools != "ignore":
+            from aixon.runtime import current_client_tools
+
+            defs = self.client_tools_filter(current_client_tools())
+            if defs:
+                internal_names = {t.name for t in lc_tools}
+                client_names = {(d.get("function") or {}).get("name")
+                                 for d in defs} - {None}
+                clash = internal_names & client_names
+                if clash and self.client_tools_conflict == "error":
+                    raise AixonError(
+                        f"client tool(s) {sorted(clash)} collide with internal "
+                        f"tools of '{self.name}'. Set client_tools_conflict to "
+                        f"'internal' or 'client', or filter the defs."
+                    )
+                elif clash and self.client_tools_conflict == "internal":
+                    defs = [d for d in defs
+                            if (d.get("function") or {}).get("name") not in clash]
+                elif clash and self.client_tools_conflict == "client":
+                    lc_tools = [t for t in lc_tools if t.name not in clash]
+                proxies = _client_proxy_tools(defs)
+                client_tool_names = {t.name for t in proxies}
+                lc_tools = proxies if self.client_tools == "replace" else \
+                    lc_tools + proxies
+
         # _validate_subclass() (__init_subclass__ hook, above) already refuses
         # to register any concrete ToolAgent subclass with `llm=None`.
         assert self.llm is not None
         agent = create_agent(self.llm.request_chat_model(), lc_tools, system_prompt=system_prompt)
         lc_messages = to_langchain(messages)
         config = {"recursion_limit": 2 * self.max_iterations + 1}
-        return agent, lc_messages, config
+        return agent, lc_messages, config, client_tool_names
 
     def _emit_message_reasoning(self, message) -> None:
         """If a NEW AI message carries reasoning extracted by R2's
@@ -165,6 +353,49 @@ class ToolAgent(Agent, abstract=True):
                 totals[key] += usage[key]
         return totals
 
+    @staticmethod
+    def _surface_client_calls(new_messages,
+                              client_tool_names: set[str]) -> Message | None:
+        """If THIS run's model called a CLIENT tool (#18c), rebuild the
+        neutral assistant message carrying that turn's client tool_calls
+        (original ``id``/``args``) so the wire adapter emits
+        ``finish_reason="tool_calls"``. Returns ``None`` when no client tool
+        was called (or none is configured).
+
+        Pure static helper: ``new_messages`` must be the messages PRODUCED BY
+        this run (invoke/ainvoke: ``result["messages"][len(lc_messages):]``;
+        streams: the accumulated update messages) and ``client_tool_names``
+        the set ``_build_agent`` returned — no request state ever lives on
+        the (singleton, concurrently shared) agent instance. Scoping the scan
+        to the run's NEW messages also keeps a resumed request correct: the
+        history's own ``assistant(tool_calls)`` turn (the one the client
+        already executed) is not in ``new_messages``, so it can't re-surface.
+
+        The scan takes the FIRST AI message whose tool_calls include a client
+        tool, not just a run that ENDED on a client-proxy ToolMessage. That
+        covers the mixed turn (internal + client call in the SAME AI message):
+        LangChain's ``return_direct`` only ends the graph when ALL of a turn's
+        calls are return_direct, so a mixed turn keeps looping — the model
+        sees the proxy's sentinel as a "result" and may answer in text. A
+        proxy call never has a real result, so the client call must surface
+        regardless; any turns the model generated after the sentinel are
+        discarded (their cost is spent, but no fabricated "result" leaks)."""
+        if not client_tool_names:
+            return None
+        for m in new_messages:
+            if getattr(m, "type", "") != "ai":
+                continue
+            calls = [
+                {"name": c.get("name"), "args": c.get("args") or {},
+                 "id": c.get("id")}
+                for c in (getattr(m, "tool_calls", None) or [])
+                if c.get("name") in client_tool_names
+            ]
+            if calls:
+                return Message(role="assistant", content="",
+                               tool_calls=calls)
+        return None
+
     def _iteration_limit_error(self, exc: Exception) -> AixonError:
         """AixonError for an exhausted iteration budget (LangGraph's recursion
         limit), matching the Orchestrator's wrapping style: the neutral
@@ -193,7 +424,7 @@ class ToolAgent(Agent, abstract=True):
 
         from langgraph.errors import GraphRecursionError
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         outer_channel = current_channel()
         cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
@@ -223,6 +454,22 @@ class ToolAgent(Agent, abstract=True):
             # Only drain (and consume) the lines if we own this channel. When
             # nested, leave them in the outer channel for its owner to drain.
             reasoning_lines = [] if outer_channel is not None else channel.drain()
+        # Client tools (#18c): a run whose model called a CLIENT tool is NOT
+        # a final answer — the client must execute the call. Scan only THIS
+        # run's new messages (a resumed history's own tool_calls turn must
+        # not re-surface) and discard anything the model produced after the
+        # proxy sentinel.
+        surfaced = self._surface_client_calls(
+            result["messages"][len(lc_messages):], client_tool_names)
+        if surfaced is not None:
+            surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
+            # Same as the normal-answer path below: reasoning collected this
+            # run (tool-step labels, nested-agent emit_reasoning) must not be
+            # dropped just because the run ended on a client tool_calls
+            # surface instead of a text answer.
+            if reasoning_lines:
+                surfaced.reasoning = "\n".join(reasoning_lines)
+            return surfaced
         final = from_langchain(result["messages"][-1])
         # Usage must cover the WHOLE run (every model turn), not just the
         # final message that from_langchain converted above.
@@ -242,9 +489,10 @@ class ToolAgent(Agent, abstract=True):
 
         from langgraph.errors import GraphRecursionError
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
+        seen_messages: list = []
         with reasoning_channel() as channel:
             try:
                 for update in agent.stream(
@@ -253,6 +501,14 @@ class ToolAgent(Agent, abstract=True):
                     # Each update is {node_name: {"messages": [...]}}.
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
+                            # Only accumulated when client tools are actually
+                            # in play — _surface_client_calls short-circuits
+                            # to None on an empty client_tool_names anyway, so
+                            # retaining every message here for a plain request
+                            # (no client tools) is pure unbounded memory with
+                            # no payoff.
+                            if client_tool_names:
+                                seen_messages.append(m)
                             if getattr(m, "type", "") == "ai":
                                 self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
@@ -281,6 +537,15 @@ class ToolAgent(Agent, abstract=True):
             # Any trailing reasoning emitted after the last update.
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
+        # Client tools (#18c): a run whose model called a CLIENT tool is not
+        # a final answer — surface those calls instead of any content the
+        # model produced after the proxy sentinel, and skip the normal
+        # content/done tail below.
+        surfaced = self._surface_client_calls(seen_messages, client_tool_names)
+        if surfaced is not None:
+            yield Chunk(tool_calls=surfaced.tool_calls)
+            yield Chunk(done=True)
+            return
         if final_content:
             yield Chunk(content=final_content)
         yield Chunk(done=True)
@@ -299,7 +564,7 @@ class ToolAgent(Agent, abstract=True):
 
         from aixon._interop.messages import from_langchain
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         outer_channel = current_channel()
         cm = nullcontext(outer_channel) if outer_channel is not None else reasoning_channel()
         with cm as channel:
@@ -321,6 +586,17 @@ class ToolAgent(Agent, abstract=True):
                     self._emit_message_reasoning(m)
                     self._emit_tool_call_labels(m)
             reasoning_lines = [] if outer_channel is not None else channel.drain()
+        # See the sync invoke() comment: a client tool call surfaces as
+        # Message.tool_calls; post-sentinel model output is discarded.
+        surfaced = self._surface_client_calls(
+            result["messages"][len(lc_messages):], client_tool_names)
+        if surfaced is not None:
+            surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
+            # See the sync invoke() comment: reasoning must not be dropped on
+            # the client-tool-calls-surfaced path either.
+            if reasoning_lines:
+                surfaced.reasoning = "\n".join(reasoning_lines)
+            return surfaced
         final = from_langchain(result["messages"][-1])
         # See the sync invoke() comment: usage covers the WHOLE run.
         final.usage = self._sum_usage(result["messages"][len(lc_messages):])
@@ -345,10 +621,11 @@ class ToolAgent(Agent, abstract=True):
 
         from aixon._interop.messages import _flatten_content
 
-        agent, lc_messages, config = self._build_agent(messages)
+        agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
         timed_out = False
+        seen_messages: list = []
         with reasoning_channel() as channel:
             stream = agent.astream(
                 {"messages": lc_messages}, config=config, stream_mode="updates"
@@ -372,6 +649,10 @@ class ToolAgent(Agent, abstract=True):
                         raise self._iteration_limit_error(exc) from exc
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
+                            # See stream(): only kept when client tools are
+                            # actually in play.
+                            if client_tool_names:
+                                seen_messages.append(m)
                             if getattr(m, "type", "") == "ai":
                                 self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
@@ -399,6 +680,14 @@ class ToolAgent(Agent, abstract=True):
                 )
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
+        # Client tools (#18c): same short-circuit as stream() — a client
+        # tool call surfaces as Chunk.tool_calls; post-sentinel content is
+        # discarded.
+        surfaced = self._surface_client_calls(seen_messages, client_tool_names)
+        if surfaced is not None:
+            yield Chunk(tool_calls=surfaced.tool_calls)
+            yield Chunk(done=True)
+            return
         if final_content:
             yield Chunk(content=final_content)
         yield Chunk(done=True)
