@@ -29,6 +29,38 @@ if TYPE_CHECKING:
 
 _log = Logger("aixon.tool_agent")
 
+_CLIENT_TOOL_STOP = "__aixon_client_tool_call__"
+
+
+def _client_proxy_tools(defs: list[dict]) -> list:
+    """One ``return_direct`` ``StructuredTool`` per client tool def (#18c).
+
+    Calling a proxy ENDS the graph immediately (the same ``return_direct``
+    precedent used by the OnlyOffice native-bridge tools) instead of running
+    real work — the proxy body is a stub. The post-run detection
+    (``_surface_client_calls``) recognizes the resulting ``ToolMessage`` by
+    name and rebuilds the neutral ``Message.tool_calls`` the CLIENT must
+    execute, so the LangGraph loop never actually "does" the client's tool."""
+    from langchain_core.tools import StructuredTool
+
+    proxies = []
+    for d in defs:
+        fn = (d.get("function") or {})
+        name = fn.get("name")
+        if not name:
+            continue
+
+        def _stop(**kwargs):  # noqa: ANN003 — schema comes from the client def
+            return _CLIENT_TOOL_STOP
+
+        proxies.append(StructuredTool.from_function(
+            func=_stop, name=name,
+            description=fn.get("description") or name,
+            args_schema=fn.get("parameters") or None,
+            return_direct=True,
+        ))
+    return proxies
+
 
 class ToolAgent(Agent, abstract=True):
     """Tool-calling agent. Declarative attributes:
@@ -62,6 +94,20 @@ class ToolAgent(Agent, abstract=True):
     # assistant turns are replaced by a short stub when building the payload —
     # already-consumed query dumps stop re-billing every turn. None = off.
     prune_tool_results_after: int | None = None
+
+    # Client tools (#18c): "ignore" (default) | "merge" (client defs join the
+    # internal tools; a CLIENT call ends the turn with Message.tool_calls) |
+    # "replace" (client defs only for this request).
+    client_tools: str = "ignore"
+    # Name collision between an internal tool and a client def:
+    # "error" (explicit, default) | "internal" (client def dropped) |
+    # "client" (internal tool dropped).
+    client_tools_conflict: str = "error"
+
+    def client_tools_filter(self, defs: list[dict]) -> list[dict]:
+        """Curation hook (#18c): which client tool defs are exposed. Default:
+        all of them. Override e.g. to allow only a prefix."""
+        return defs
 
     # Tool-call hooks (#17): override for deterministic guardrails/telemetry.
     # on_tool_start may return a dict to REWRITE the call's kwargs; raising in
@@ -107,6 +153,21 @@ class ToolAgent(Agent, abstract=True):
             raise AixonError(
                 f"'{cls.__name__}' has prune_tool_results_after={prune!r}; "
                 f"use None (off) or an int >= 1 (keep the last N assistant turns)."
+            )
+        # #18c: client_tools/client_tools_conflict are declarative enums,
+        # validated at registration so a typo fails loudly instead of
+        # silently behaving as "ignore"/"error" at request time.
+        mode = getattr(cls, "client_tools", "ignore")
+        if mode not in ("ignore", "merge", "replace"):
+            raise AixonError(
+                f"'{cls.__name__}' has client_tools={mode!r}; use 'ignore', "
+                f"'merge' or 'replace'."
+            )
+        conflict = getattr(cls, "client_tools_conflict", "error")
+        if conflict not in ("error", "internal", "client"):
+            raise AixonError(
+                f"'{cls.__name__}' has client_tools_conflict={conflict!r}; "
+                f"use 'error', 'internal' or 'client'."
             )
 
     # ---- internal: build the langgraph agent + neutral message prep -------
@@ -155,6 +216,36 @@ class ToolAgent(Agent, abstract=True):
             on_tool_start=self.on_tool_start if overridden else None,
             on_tool_end=self.on_tool_end if overridden else None,
         )
+
+        # Client tools (#18c): request-scoped, so recomputed on every
+        # _build_agent call (the first step of all 4 entry points) rather
+        # than cached on the instance across requests.
+        self._client_tool_names: set[str] = set()
+        if self.client_tools != "ignore":
+            from aixon.runtime import current_client_tools
+
+            defs = self.client_tools_filter(current_client_tools())
+            if defs:
+                internal_names = {t.name for t in lc_tools}
+                client_names = {(d.get("function") or {}).get("name")
+                                 for d in defs} - {None}
+                clash = internal_names & client_names
+                if clash and self.client_tools_conflict == "error":
+                    raise AixonError(
+                        f"client tool(s) {sorted(clash)} collide with internal "
+                        f"tools of '{self.name}'. Set client_tools_conflict to "
+                        f"'internal' or 'client', or filter the defs."
+                    )
+                if clash and self.client_tools_conflict == "internal":
+                    defs = [d for d in defs
+                            if (d.get("function") or {}).get("name") not in clash]
+                if clash and self.client_tools_conflict == "client":
+                    lc_tools = [t for t in lc_tools if t.name not in clash]
+                proxies = _client_proxy_tools(defs)
+                self._client_tool_names = {t.name for t in proxies}
+                lc_tools = proxies if self.client_tools == "replace" else \
+                    lc_tools + proxies
+
         # _validate_subclass() (__init_subclass__ hook, above) already refuses
         # to register any concrete ToolAgent subclass with `llm=None`.
         assert self.llm is not None
@@ -231,6 +322,33 @@ class ToolAgent(Agent, abstract=True):
                 totals[key] += usage[key]
         return totals
 
+    def _surface_client_calls(self, result_messages) -> Message | None:
+        """If the run ended on a client-proxy ``ToolMessage`` (#18c), rebuild
+        the neutral assistant message carrying THAT turn's client tool_calls
+        (with their original ``id``/``args``) so the wire adapter emits
+        ``finish_reason="tool_calls"``. Returns ``None`` on any other ending
+        (no client tools configured, or the run finished normally)."""
+        if not self._client_tool_names:
+            return None
+        last = result_messages[-1]
+        if getattr(last, "type", "") != "tool":
+            return None
+        if getattr(last, "name", "") not in self._client_tool_names:
+            return None
+        # The last AI message of the run carries the original calls (id/args).
+        for m in reversed(result_messages):
+            if getattr(m, "type", "") == "ai" and getattr(m, "tool_calls", None):
+                calls = [
+                    {"name": c.get("name"), "args": c.get("args") or {},
+                     "id": c.get("id")}
+                    for c in m.tool_calls
+                    if c.get("name") in self._client_tool_names
+                ]
+                if calls:
+                    return Message(role="assistant", content="",
+                                   tool_calls=calls)
+        return None
+
     def _iteration_limit_error(self, exc: Exception) -> AixonError:
         """AixonError for an exhausted iteration budget (LangGraph's recursion
         limit), matching the Orchestrator's wrapping style: the neutral
@@ -289,6 +407,14 @@ class ToolAgent(Agent, abstract=True):
             # Only drain (and consume) the lines if we own this channel. When
             # nested, leave them in the outer channel for its owner to drain.
             reasoning_lines = [] if outer_channel is not None else channel.drain()
+        # Client tools (#18c): a run that ends on a client-proxy ToolMessage
+        # is NOT a final answer — it's the model asking the CLIENT to run a
+        # tool. Surface those calls on a fresh Message instead of converting
+        # the (meaningless) proxy ToolMessage as if it were the answer.
+        surfaced = self._surface_client_calls(result["messages"])
+        if surfaced is not None:
+            surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
+            return surfaced
         final = from_langchain(result["messages"][-1])
         # Usage must cover the WHOLE run (every model turn), not just the
         # final message that from_langchain converted above.
@@ -311,6 +437,7 @@ class ToolAgent(Agent, abstract=True):
         agent, lc_messages, config = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
+        seen_messages: list = []
         with reasoning_channel() as channel:
             try:
                 for update in agent.stream(
@@ -319,6 +446,7 @@ class ToolAgent(Agent, abstract=True):
                     # Each update is {node_name: {"messages": [...]}}.
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
+                            seen_messages.append(m)
                             if getattr(m, "type", "") == "ai":
                                 self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
@@ -347,6 +475,14 @@ class ToolAgent(Agent, abstract=True):
             # Any trailing reasoning emitted after the last update.
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
+        # Client tools (#18c): a run ending on a client-proxy ToolMessage is
+        # not a final answer — surface those calls instead of any preamble
+        # content, and skip the normal content/done tail below.
+        surfaced = self._surface_client_calls(seen_messages) if seen_messages else None
+        if surfaced is not None:
+            yield Chunk(tool_calls=surfaced.tool_calls)
+            yield Chunk(done=True)
+            return
         if final_content:
             yield Chunk(content=final_content)
         yield Chunk(done=True)
@@ -387,6 +523,12 @@ class ToolAgent(Agent, abstract=True):
                     self._emit_message_reasoning(m)
                     self._emit_tool_call_labels(m)
             reasoning_lines = [] if outer_channel is not None else channel.drain()
+        # See the sync invoke() comment: a client-proxy ending surfaces the
+        # client's tool_calls instead of the (meaningless) proxy ToolMessage.
+        surfaced = self._surface_client_calls(result["messages"])
+        if surfaced is not None:
+            surfaced.usage = self._sum_usage(result["messages"][len(lc_messages):])
+            return surfaced
         final = from_langchain(result["messages"][-1])
         # See the sync invoke() comment: usage covers the WHOLE run.
         final.usage = self._sum_usage(result["messages"][len(lc_messages):])
@@ -415,6 +557,7 @@ class ToolAgent(Agent, abstract=True):
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
         timed_out = False
+        seen_messages: list = []
         with reasoning_channel() as channel:
             stream = agent.astream(
                 {"messages": lc_messages}, config=config, stream_mode="updates"
@@ -438,6 +581,7 @@ class ToolAgent(Agent, abstract=True):
                         raise self._iteration_limit_error(exc) from exc
                     for node_state in update.values():
                         for m in node_state.get("messages", []) or []:
+                            seen_messages.append(m)
                             if getattr(m, "type", "") == "ai":
                                 self._emit_message_reasoning(m)
                                 self._emit_tool_call_labels(m)
@@ -465,6 +609,14 @@ class ToolAgent(Agent, abstract=True):
                 )
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
+        # Client tools (#18c): same short-circuit as stream() — a run ending
+        # on a client-proxy ToolMessage surfaces the client's tool_calls
+        # instead of any preamble content.
+        surfaced = self._surface_client_calls(seen_messages) if seen_messages else None
+        if surfaced is not None:
+            yield Chunk(tool_calls=surfaced.tool_calls)
+            yield Chunk(done=True)
+            return
         if final_content:
             yield Chunk(content=final_content)
         yield Chunk(done=True)

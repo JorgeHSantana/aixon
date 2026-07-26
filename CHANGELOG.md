@@ -8,20 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`LLM.complete`/`acomplete`/`stream`/`astream` aceitam `tools`/`tool_choice`;
-  `LLMAgent(client_tools=True)` repassa os do cliente (#18a).** `tools` no
-  shape wire OpenAI (`{"type": "function", "function": {...}}` — o mesmo que
-  `ParsedRequest.tools` já normaliza) é bindado no chat model via
-  `model.bind_tools(tools, **extra)` só para aquela chamada; `tool_choice`,
-  quando dado, vai junto. `stream`/`astream` acumulam os `tool_calls` do
-  modelo ao longo dos chunks (via `AIMessageChunk` somável) e emitem
-  `Chunk(tool_calls=[...])` — shape neutro `{"name", "args", "id"}` — antes do
-  `Chunk(done=True)`. Sem `tools`, o caminho é byte-idêntico ao anterior.
-  `LLMAgent.client_tools: bool = False` — quando `True`, lê
-  `current_client_tools()`/`current_tool_choice()` (`aixon/runtime.py`) e
-  repassa aos 4 métodos; sem tools declaradas no request, é um no-op. Novo
-  contextvar `aixon.runtime.tool_choice_scope`/`current_tool_choice()`,
-  espelhando o par `client_tools`/`current_client_tools()` já existente.
+- **Client tools de ponta a ponta — passthrough, transporte de `tool_choice`
+  e merge de primeira classe no `ToolAgent` (#18a+#18b+#18c).**
+  - **#18a** — `LLM.complete`/`acomplete`/`stream`/`astream` aceitam
+    `tools`/`tool_choice`. `tools` no shape wire OpenAI
+    (`{"type": "function", "function": {...}}` — o mesmo que
+    `ParsedRequest.tools` já normaliza) é bindado no chat model via
+    `model.bind_tools(tools, **extra)` só para aquela chamada; `tool_choice`,
+    quando dado, vai junto. `stream`/`astream` acumulam os `tool_calls` do
+    modelo ao longo dos chunks (via `AIMessageChunk` somável) e emitem
+    `Chunk(tool_calls=[...])` — shape neutro `{"name", "args", "id"}` — antes
+    do `Chunk(done=True)`. Sem `tools`, o caminho é byte-idêntico ao anterior.
+    `LLMAgent.client_tools: bool = False` — quando `True`, lê
+    `current_client_tools()`/`current_tool_choice()` (`aixon/runtime.py`) e
+    repassa aos 4 métodos (passthrough cru — o agente decide sozinho quando
+    responder com `tool_calls`); sem tools declaradas no request, é um no-op.
+  - **#18b** — `tool_choice` do adapter OpenAI virou campo de transporte, não
+    passthrough descartado: saiu do params-passthrough e entrou em
+    `_TRANSPORT_FIELDS`/`ParsedRequest.tool_choice`; o `Server` publica
+    `tool_choice_scope(pr.tool_choice)` (novo contextvar, espelhando o par
+    `client_tools`/`current_client_tools()` já existente) junto de
+    `client_tools(pr.tools)` nos dois caminhos (sync e stream), então
+    `LLMAgent(client_tools=True)` e qualquer agente que leia
+    `current_tool_choice()` agora o recebem de fato. Adapter Anthropic fica
+    de fora desta task — dialeto de `tool_choice` da Anthropic tem shape
+    próprio (`{"type": "auto"|"any"|"tool", "name": ...}`); registrado como
+    follow-up da issue #18.
+  - **#18c** — `ToolAgent(client_tools="ignore"|"merge"|"replace")`: caminho
+    de primeira classe onde os defs do cliente entram no MESMO loop de
+    tool-calling das tools internas do agente. Uma call de tool INTERNA
+    executa server-side e o loop continua normalmente; uma call de tool do
+    CLIENTE encerra o turno na hora via um proxy `return_direct` por def
+    (`_client_proxy_tools`, mesmo mecanismo da ponte nativa do OnlyOffice) —
+    o run devolve `Message(role="assistant", content="", tool_calls=[...])`
+    com usage somado do run inteiro; em `stream`/`astream`,
+    `Chunk(tool_calls=...)` seguido de `Chunk(done=True)`, sem content. Novo
+    `client_tools_conflict: str = "error"` resolve colisão de nome entre uma
+    tool interna e um def do cliente: `"error"` (default — `AixonError` já na
+    montagem, citando as tools em colisão), `"internal"` (descarta o def do
+    cliente) ou `"client"` (remove a tool interna daquele request). Novo hook
+    `client_tools_filter(self, defs) -> defs` (default identidade) para
+    curadoria antes da política de conflito. Retomada: a request seguinte
+    traz `assistant(tool_calls=...)` + `role="tool"` no histórico — já
+    coberto pelo `to_langchain`/`from_langchain` existentes, sem mudança no
+    `_interop`. Limitação v1 documentada: turno misto (interna + cliente na
+    MESMA resposta do modelo) só surfaceia as calls do cliente — a interna
+    re-executa na retomada se o modelo a re-emitir. Ambos os novos atributos
+    são validados em `_validate_subclass` (valor fora do enum → `AixonError`
+    no registro). Documentado em `docs/agents.md` ("Client tools mesclados no
+    loop (#18c)") e `docs/server.md` ("Client tools", com a tabela
+    `client_tools` × `client_tools_conflict`); demo executável
+    `examples/client_tools/merge_demo.py`.
+
+  **Nota de migração: nenhuma** — tudo opt-in (`client_tools="ignore"` e
+  `LLMAgent.client_tools=False` são os defaults, byte-idênticos ao
+  comportamento anterior). Única mudança de comportamento observável:
+  `tool_choice` sem `tools` no mesmo request agora responde `400` (antes:
+  descarte silencioso).
 - **`ToolAgent`: hooks `on_tool_start`/`on_tool_end` no loop de tool-calling (#17).**
   Duas sobrescritas opcionais, no-op por padrão (zero mudança de
   comportamento). `on_tool_start(self, name, args)` roda ANTES de cada tool
@@ -89,18 +132,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no logger `aixon.reflective` — grep-friendly para medir a taxa de fallback
   do `revision_mode="patch"` antes de promovê-lo a default. Zero mudança de
   comportamento.
-
-### Fixed
-- **`tool_choice` do adapter OpenAI agora é campo de transporte, não passthrough
-  descartado (#18b).** `tool_choice` saiu do params-passthrough e entrou em
-  `_TRANSPORT_FIELDS`/`ParsedRequest.tool_choice`; o `Server` publica
-  `tool_choice_scope(pr.tool_choice)` junto de `client_tools(pr.tools)` nos
-  dois caminhos (sync e stream), então `LLMAgent(client_tools=True)` (#18a) e
-  qualquer agente que leia `current_tool_choice()` agora o recebem de fato.
-  `tool_choice` sem `tools` no mesmo request agora responde 400 (antes:
-  descarte silencioso). Adapter Anthropic fica de fora desta task — dialeto de
-  `tool_choice` da Anthropic tem shape próprio (`{"type": "auto"|"any"|"tool",
-  "name": ...}`); registrado como follow-up da issue #18.
 
 ## [0.1.20] - 2026-07-23
 

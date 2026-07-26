@@ -53,6 +53,7 @@ class PlannerAgent(LLMAgent):
 |---|---|---|---|
 | `llm` | `LLM` | **Yes** | The language model. Missing `llm` on a concrete subclass raises `AixonError` at import time. |
 | `prompt` | `str` | No | System prompt prepended to every `invoke`/`stream` call. |
+| `client_tools` | `bool` | No (default `False`) | Raw passthrough (#18a): when `True`, forwards the request's `aixon.runtime.current_client_tools()`/`current_tool_choice()` straight to `LLM.complete`/`acomplete`/`stream`/`astream` for all 4 methods — the agent itself decides nothing, it just gives the model the client's tools. No tools declared on the request → no-op. See [server.md](server.md#openaiadapter) ("Client tools") for the request/response shape and the first-class `ToolAgent(client_tools="merge")` alternative below. |
 
 **How it works:** `invoke` prepends the system prompt (if any) as a
 `Message(role="system", content=self.prompt)` and delegates to
@@ -276,6 +277,9 @@ class ResearchAgent(ToolAgent):
 | `prune_tool_results_after` | `int \| None` | `None` | Opt-in pruning of old tool results (#16). `None` disables it (zero behavior change). See "Poda de tool results antigos (#16)" below. |
 | `on_tool_start` | `method` | no-op | Pre-call hook (#17). See "Hooks de tool call (#17)" below. |
 | `on_tool_end` | `method` | no-op | Post-call hook (#17). See "Hooks de tool call (#17)" below. |
+| `client_tools` | `str` | `"ignore"` | First-class client tools (#18c): `"ignore"` \| `"merge"` \| `"replace"`. See "Client tools mesclados no loop (#18c)" below. |
+| `client_tools_conflict` | `str` | `"error"` | Name-collision policy between an internal tool and a client def: `"error"` \| `"internal"` \| `"client"`. |
+| `client_tools_filter` | `method` | identity | Curation hook (#18c): `client_tools_filter(self, defs) -> defs` — override to keep only a subset of the client's declared tools. |
 
 **Tool-call memoization (request scope).** Within one served request (and
 within one `ReflectiveAgent` run), a tool called again with the SAME arguments
@@ -390,6 +394,56 @@ class GuardedAgent(ToolAgent):
 - Como os hooks do #9/#5, só se aplicam a entradas `AgentTool`/callable; um
   `BaseTool` cru passado em `tools` continua sem guard (sem shield, sem memo,
   sem hooks).
+
+### Client tools mesclados no loop (#18c)
+
+`LLMAgent(client_tools=True)` (acima) repassa os tools do cliente crus — o
+agente decide sozinho quando responder com `tool_calls`. `ToolAgent` tem um
+caminho de primeira classe: `client_tools="merge"` (ou `"replace"`) injeta os
+defs do cliente como tools de VERDADE no mesmo loop de tool-calling das tools
+internas do agente, com uma diferença crítica — a call de uma tool interna
+executa server-side e o loop continua normalmente; a call de uma tool do
+CLIENTE encerra o turno na hora (via um proxy `return_direct`, o mesmo
+mecanismo da ponte nativa do OnlyOffice) e o run devolve
+`Message(role="assistant", content="", tool_calls=[...])`.
+
+```python
+class RedatorAgent(ToolAgent):
+    llm = LLM("gpt-5.4", temperature=0.2)
+    tools = [buscar_no_banco]          # tool interna — executa aqui
+    client_tools = "merge"             # + os tools que o editor declarar
+    client_tools_conflict = "error"    # default: nome colidindo é erro explícito
+
+    def client_tools_filter(self, defs):
+        # curadoria opcional: só expõe tools do cliente com um prefixo esperado
+        return [d for d in defs if d["function"]["name"].startswith("doc_")]
+```
+
+- `client_tools`: `"ignore"` (default, zero mudança) | `"merge"` (soma aos
+  tools internos) | `"replace"` (só os do cliente, para aquele request).
+- `client_tools_conflict` resolve um nome que aparece tanto numa tool interna
+  quanto num def do cliente: `"error"` (default — `AixonError` já na montagem
+  do grafo, citando as tools em colisão), `"internal"` (descarta o def do
+  cliente, a interna vence), `"client"` (remove a tool interna daquele
+  request, só o proxy do cliente fica exposto sob aquele nome).
+- `client_tools_filter(self, defs)` roda ANTES da política de conflito —
+  curadoria de quais defs do cliente sequer entram na disputa. Default:
+  identidade (todos).
+- **Retomada**: o cliente executa a call localmente e faz um novo request com
+  `assistant(tool_calls=[...])` + `role="tool"` (o resultado) no histórico —
+  o mesmo round-trip neutro que qualquer resultado de tool usa
+  (`to_langchain`/`from_langchain`); nada de especial do lado do cliente.
+- **Limitação v1 — turno misto**: se o modelo chamar uma tool interna E uma
+  do cliente NO MESMO turno, só as calls do cliente aparecem em
+  `Message.tool_calls` daquele run (a interna já executou server-side, mas o
+  resultado dela não volta nessa resposta — o `ToolNode` do LangGraph roda
+  todas as calls do turno antes do proxy `return_direct` cortar o grafo). Se
+  o modelo re-emitir a mesma call interna no próximo turno (já com o
+  resultado do cliente no histórico), ela roda de novo; se não re-emitir, o
+  resultado daquele turno se perde. Detalhe completo do request/response e
+  tabela `client_tools` × `client_tools_conflict`:
+  [server.md](server.md#openaiadapter) ("Client tools"). Demo executável:
+  `examples/client_tools/merge_demo.py`.
 
 ### Nesting agents as tools
 
