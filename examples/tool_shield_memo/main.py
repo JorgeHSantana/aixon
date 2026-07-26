@@ -26,8 +26,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from aixon import LLM, ToolAgent
-from aixon.message import Message
+from aixon import LLM, Agent, ToolAgent
+from aixon.message import Chunk, Message
 from aixon.providers.base import Provider, register_provider
 from aixon.toolcache import tool_call_cache
 
@@ -113,6 +113,23 @@ class FieldAssistantAgent(ToolAgent):
     shield_tool_errors = True
 
 
+class TicketEchoAgent(Agent):
+    """Offline callee for the audience="agent" demo (#15): echoes the exact
+    text it received, so the printed output PROVES the subagent frame was
+    appended to the call — no LLM, no network."""
+
+    name = "ticket-echo"
+    hidden = True
+    description = "Echoes the received text (shows the subagent frame)."
+
+    def invoke(self, messages: list[Message]) -> Message:
+        return Message(role="assistant", content=messages[-1].content)
+
+    def stream(self, messages: list[Message]):
+        yield Chunk(content=messages[-1].content)
+        yield Chunk(done=True)
+
+
 def main() -> None:
     question = [Message(role="user", content="DB status and Recife weather?")]
     print(f"> {question[0].content}\n")
@@ -128,11 +145,13 @@ def main() -> None:
     print(f"get_weather was asked twice with the same args but executed "
           f"{CALLS['weather']} time(s) — the second call was memoized.")
 
-    # audience="agent" (#15): a caller that is ANOTHER agent, not a human, gets
-    # the subagent frame appended to its call text (see docs/agents.md).
-    peer_tool = FieldAssistantAgent().as_tool(audience="agent")
-    print(f"\nas_tool(audience='agent') built: '{peer_tool.name}' — dense-facts "
-          f"framing for a subagent caller instead of human-facing prose.")
+    # audience="agent" (#15): a subagent is just another tool — the shield and
+    # the memoization above apply to it too. With audience="agent" the caller's
+    # text gains the subagent frame; this echo callee prints back EXACTLY what
+    # it received, proving the frame arrives (offline, no network call).
+    peer_tool = TicketEchoAgent().as_tool(audience="agent")
+    print("\nas_tool(audience='agent') — text the subagent actually received:")
+    print(repr(peer_tool.func("Resuma o chamado 4711")))
 
 
 if __name__ == "__main__":
