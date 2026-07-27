@@ -605,17 +605,44 @@ class ToolAgent(Agent, abstract=True):
         _log.info(f"agent '{self.name}' completed async ({len(reasoning_lines)} step(s))")
         return final
 
+    # How often astream() polls the ReasoningChannel while a LangGraph node is
+    # still running (#20), so reasoning emitted from inside it flows live.
+    reasoning_flush_interval: float = 0.25
+
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """Async stream mirroring ``stream`` over the graph's ``astream``.
 
         ``max_execution_time`` is a HARD wall here, not just a between-update
-        check: each step is awaited under ``asyncio.wait_for`` with the time
-        remaining until the deadline, so a step that stalls mid-flight (e.g. a
-        provider stream that stops delivering bytes) is cancelled at the
-        deadline instead of hanging the request forever. The underlying graph
-        stream is closed on the way out.
+        check: each step is awaited under a poll loop (below) with the time
+        remaining until the deadline as the outer bound, so a step that stalls
+        mid-flight (e.g. a provider stream that stops delivering bytes) is
+        cancelled at the deadline instead of hanging the request forever. The
+        underlying graph stream is closed on the way out.
+
+        Live reasoning drain (#20): a plain ``await stream.__anext__()`` only
+        resumes when a LangGraph node COMPLETES, so reasoning a nested agent
+        emits from inside a still-running tool node (``emit_reasoning``
+        targeting the shared ``ReasoningChannel``) sits buffered until that
+        node finishes — on a slow nested tool, minutes of internal activity
+        appear to hang. Instead, the wait for the next update runs as a
+        background task (``next_task``) polled with ``asyncio.wait(...,
+        timeout=reasoning_flush_interval)`` in a loop: every tick the channel
+        is drained and yielded regardless of whether the task has finished,
+        so reasoning surfaces as soon as it's emitted rather than only at the
+        next graph update. Only ONE task is ever in flight — a new
+        ``stream.__anext__()`` is issued after the previous one is fully
+        consumed — and it is cancelled (and awaited, swallowing whatever it
+        raises) before the method returns on every exit path, so no task is
+        ever left pending on the loop.
+
+        The SYNC ``stream()`` does not get this treatment: a blocking
+        iterator has no way to be polled concurrently with a timer, so its
+        between-update drain (unchanged, see ``stream()``) is the best it can
+        do. Live progress during a slow nested tool call is therefore an
+        async-path (``astream``) capability — which is what ``Server`` uses.
         """
         import asyncio
+        import contextlib
 
         from langgraph.errors import GraphRecursionError
 
@@ -623,6 +650,7 @@ class ToolAgent(Agent, abstract=True):
 
         agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
+        tick = self.reasoning_flush_interval
         final_content = ""
         timed_out = False
         seen_messages: list = []
@@ -630,20 +658,24 @@ class ToolAgent(Agent, abstract=True):
             stream = agent.astream(
                 {"messages": lc_messages}, config=config, stream_mode="updates"
             )
+            next_task: "asyncio.Task | None" = None
             try:
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         timed_out = True
                         break
+                    if next_task is None:
+                        next_task = asyncio.ensure_future(stream.__anext__())
+                    await asyncio.wait({next_task}, timeout=min(tick, remaining))
+                    for line in channel.drain():
+                        yield Chunk(reasoning=line + "\n")
+                    if not next_task.done():
+                        continue  # still running the node — keep polling/draining
+                    task, next_task = next_task, None
                     try:
-                        update = await asyncio.wait_for(
-                            stream.__anext__(), timeout=remaining
-                        )
+                        update = task.result()
                     except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        timed_out = True
                         break
                     except GraphRecursionError as exc:
                         raise self._iteration_limit_error(exc) from exc
@@ -667,6 +699,16 @@ class ToolAgent(Agent, abstract=True):
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
             finally:
+                # Deadline/exception exit with a poll still in flight: cancel
+                # it and await the cancellation so nothing is left running on
+                # the loop after this generator returns (whatever it raises —
+                # CancelledError, the original StopAsyncIteration/graph error,
+                # or a benign result from a last-instant completion — is
+                # irrelevant here; the stream is being torn down either way).
+                if next_task is not None and not next_task.done():
+                    next_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await next_task
                 aclose = getattr(stream, "aclose", None)
                 if aclose is not None:
                     try:

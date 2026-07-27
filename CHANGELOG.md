@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`ToolAgent.astream`: drenagem AO VIVO do `ReasoningChannel` durante o nó
+  de tools (#20).** Reasoning emitido de DENTRO de uma tool (ex.: um agente
+  aninhado exposto como especialista, chamando `emit_reasoning` para labels
+  de tool call, do juiz, retries) ficava represado no canal até o nó de tools
+  do LangGraph completar — em uma tool lenta/aninhada, minutos de atividade
+  interna morriam parados até o fim da chamada. `astream` agora aguarda o
+  próximo update com `asyncio.wait(..., timeout=reasoning_flush_interval)`
+  em loop, drenando e emitindo o canal a cada tick (padrão 0.25s) em vez de
+  bloquear até o update chegar. Deadline/cancelamento (`max_execution_time`)
+  preservam a semântica exata anterior. Novo atributo declarativo
+  `reasoning_flush_interval: float = 0.25`. `stream()` (síncrono) fica como
+  estava — um iterator bloqueante não permite poll concorrente; ver
+  `docs/agents.md`.
+
 ## [0.1.21] - 2026-07-26
 
 ### Added

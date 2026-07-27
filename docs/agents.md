@@ -280,6 +280,17 @@ class ResearchAgent(ToolAgent):
 | `client_tools` | `str` | `"ignore"` | First-class client tools (#18c): `"ignore"` \| `"merge"` \| `"replace"`. See "Client tools mesclados no loop (#18c)" below. |
 | `client_tools_conflict` | `str` | `"error"` | Name-collision policy between an internal tool and a client def: `"error"` \| `"internal"` \| `"client"`. |
 | `client_tools_filter` | `method` | identity | Curation hook (#18c): `client_tools_filter(self, defs) -> defs` — override to keep only a subset of the client's declared tools. |
+| `reasoning_flush_interval` | `float` | `0.25` | `astream` only (#20): how often (seconds) the ReasoningChannel is polled and drained while a tool node is still running. See "Streaming ao vivo (#20)" below. |
+
+**Streaming ao vivo (#20).** `astream` polls for the next LangGraph update
+instead of blocking on it, draining and yielding the ReasoningChannel every
+`reasoning_flush_interval` regardless of whether the update has arrived — so
+reasoning a NESTED agent emits from inside a still-running tool call (e.g. a
+specialist agent invoked as a tool, itself streaming labels/retries) surfaces
+as soon as it's emitted instead of being buffered until that tool call
+completes. The sync `stream()` keeps its old between-update drain: a blocking
+iterator can't be polled concurrently with a timer, so live progress during a
+slow nested tool is an `astream`-only capability — which is what `Server` uses.
 
 **Tool-call memoization (request scope).** Within one served request (and
 within one `ReflectiveAgent` run), a tool called again with the SAME arguments
