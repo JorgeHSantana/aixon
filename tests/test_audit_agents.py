@@ -223,7 +223,13 @@ def test_stream_deadline_does_not_yield_preamble_as_content(monkeypatch):
 
     reasoning = "".join(c.reasoning for c in chunks if c.reasoning)
     assert "max_execution_time" in reasoning  # the stopped line is kept
-    assert not any(c.content for c in chunks)  # no misleading final content
+    # No misleading final content (the preamble is never surfaced as the
+    # answer) — but #19: a deadline break with NOTHING accumulated must not
+    # close mute either, so the one content chunk that DOES appear is the
+    # honest timeout message, not the preamble.
+    contents = [c.content for c in chunks if c.content]
+    assert contents == [agent.timeout_message.format(seconds=agent.max_execution_time)]
+    assert _PREAMBLE not in "".join(contents)
     assert chunks[-1].done is True
 
 
@@ -257,7 +263,13 @@ def test_astream_deadline_does_not_yield_preamble_as_content(monkeypatch):
 
     reasoning = "".join(c.reasoning for c in chunks if c.reasoning)
     assert "max_execution_time" in reasoning
-    assert not any(c.content for c in chunks)
+    # See test_stream_deadline_does_not_yield_preamble_as_content: the
+    # preamble must never surface as content, but #19 means the run must not
+    # close mute either — the one content chunk is the honest timeout
+    # message.
+    contents = [c.content for c in chunks if c.content]
+    assert contents == [agent.timeout_message.format(seconds=agent.max_execution_time)]
+    assert _PREAMBLE not in "".join(contents)
     assert chunks[-1].done is True
 
 

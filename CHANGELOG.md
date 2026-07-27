@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`ToolAgent`: timeout em `stream`/`astream` sem content nunca mais morre
+  mudo (#19).** Quando `max_execution_time` estourava com o run ainda sem
+  nenhuma resposta acumulada, o caminho `timed_out`/deadline-break só emitia
+  o reasoning `"(stopped: exceeded max_execution_time ...)"` — escondido
+  pelas UIs de chat que colapsam o bloco de pensamento — e fechava com
+  `Chunk(done=True)` sem nunca ter emitido `Chunk(content=...)`: resposta
+  vazia, agente aparentemente mudo. Agora, se `final_content` continuar vazio
+  no fechamento do timeout, um `Chunk(content=self.timeout_message.format(
+  seconds=self.max_execution_time))` é emitido antes do `done` — mensagem
+  honesta e sobrescrevível pelo novo atributo declarativo `timeout_message`.
+  Content já acumulado (resposta final real, não o preâmbulo de uma chamada
+  de tool) continua entregue como antes, sem a mensagem de timeout.
+  `invoke`/`ainvoke` não mudaram — já levantam `AixonError` visível no
+  timeout. Ver `docs/agents.md`.
 - **`ToolAgent.astream`: drenagem AO VIVO do `ReasoningChannel` durante o nó
   de tools (#20).** Reasoning emitido de DENTRO de uma tool (ex.: um agente
   aninhado exposto como especialista, chamando `emit_reasoning` para labels

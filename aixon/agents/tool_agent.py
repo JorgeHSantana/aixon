@@ -87,6 +87,14 @@ class ToolAgent(Agent, abstract=True):
     tools: list = []
     max_iterations: int = 15
     max_execution_time: int = 600
+    # Timeout message (#19): emitted as CONTENT when the run hits
+    # max_execution_time with no accumulated answer — an agent must never
+    # die mute on the streaming path. {seconds} is interpolated.
+    timeout_message: str = (
+        "A tarefa excedeu o tempo limite ({seconds}s) antes de produzir uma "
+        "resposta. Tente restringir o pedido (período menor, menos fontes) "
+        "ou repetir em partes."
+    )
     # Error shield (#9): True (default) converts ANY exception raised by a tool
     # into a readable error result handed back to the model, so one failing
     # tool/service reports instead of killing the whole run/stream. Set False
@@ -492,6 +500,7 @@ class ToolAgent(Agent, abstract=True):
         agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
+        timed_out = False
         seen_messages: list = []
         with reasoning_channel() as channel:
             try:
@@ -525,6 +534,7 @@ class ToolAgent(Agent, abstract=True):
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
                     if time.monotonic() > deadline:
+                        timed_out = True
                         emit_reasoning(
                             f"(stopped: exceeded max_execution_time "
                             f"{self.max_execution_time}s)"
@@ -548,6 +558,11 @@ class ToolAgent(Agent, abstract=True):
             return
         if final_content:
             yield Chunk(content=final_content)
+        elif timed_out:
+            # #19: the deadline broke the run with NOTHING accumulated — an
+            # agent must never die mute. Partial content (final_content set)
+            # keeps today's behavior: delivered as-is, no timeout message.
+            yield Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
         yield Chunk(done=True)
 
     # ---- async neutral boundary -----------------------------------------
@@ -732,4 +747,9 @@ class ToolAgent(Agent, abstract=True):
             return
         if final_content:
             yield Chunk(content=final_content)
+        elif timed_out:
+            # #19: same rule as stream() — nothing accumulated by the
+            # deadline means the run must not close with an empty content.
+            # Partial content (final_content set) keeps today's behavior.
+            yield Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
         yield Chunk(done=True)
