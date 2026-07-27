@@ -719,18 +719,37 @@ tool = agent.as_tool(audience="agent")  # #15 — see "Nesting agents as tools"
 `func` drives `agent.stream()` (and `coroutine` drives `agent.astream()`, #22)
 to completion: each call creates a fresh `[Message(role="user",
 content=text)]` — the agent's state never leaks between tool calls. Every
-yielded `Chunk.content` is joined into the returned string (byte-identical to
-what `invoke()`/`ainvoke()` would have returned), and every yielded
-`Chunk.reasoning` is re-emitted **live**, right away, onto the CALLER's active
-`ReasoningChannel` — not buffered until the whole subagent run finishes. That
-means a nested agent's tool-call labels, judge lines and retries flow through
-the parent's stream in real time, so the #20 drain has something to drain
-while a slow nested tool is still running instead of the caller looking stuck
-for the subagent's entire wall-clock time. `as_tool()` sets both `func` and
-`coroutine`: `coerce_tools` registers them dual, and the tool runs on the sync
-(`invoke` → `func`) and async (`ainvoke` → `coroutine`) parent paths. The same
-`AgentTool` shape is returned by `Retriever.as_tool()`, so
-`ToolAgent.tools` handles both uniformly.
+yielded `Chunk.content` is joined into the returned string — byte-identical
+to what `invoke()`/`ainvoke()` would have returned **for a normal answer**.
+A worker that blows its OWN `max_execution_time` with nothing accumulated is
+the one case where this diverges: `stream()`/`astream()` emit `timeout_message`
+as CONTENT instead of dying mute (#19 — direct callers must never get an
+empty answer), but `as_tool()` cannot let that look like a legitimate
+subagent response reaching the parent model as fact. It detects a final
+content that byte-matches the wrapped agent's own formatted
+`timeout_message` (or, through a `ReflectiveAgent`'s pass-through, its
+wrapped worker's) and raises `AixonError` instead — the parent's tool-call
+shield (#9) turns that into a visible `TOOL ERROR` result, restoring the
+pre-#22 semantics where the same timeout reached `as_tool()` via a raising
+`invoke()`/`ainvoke()` (#22/#24-sweep — see CHANGELOG `[Unreleased]`). Every
+yielded `Chunk.reasoning` is re-emitted **live**, right away, onto the
+CALLER's active `ReasoningChannel` — not buffered until the whole subagent
+run finishes. That means a nested agent's tool-call labels, judge lines and
+retries flow through the parent's stream in real time, so the #20 drain has
+something to drain while a slow nested tool is still running instead of the
+caller looking stuck for the subagent's entire wall-clock time. `as_tool()`
+sets both `func` and `coroutine`: `coerce_tools` registers them dual, and the
+tool runs on the sync (`invoke` → `func`) and async (`ainvoke` → `coroutine`)
+parent paths. The same `AgentTool` shape is returned by `Retriever.as_tool()`,
+so `ToolAgent.tools` handles both uniformly.
+
+A stream that yields BOTH content and tool_calls in the same run is not
+expected from any built-in `stream()`/`astream()` (they yield either
+content, or a `tool_calls`-without-content client-tool leak, never both) —
+if a custom one does, `as_tool()` keeps the content and silently drops the
+tool_calls (there is no channel to relay them back through a tool result),
+logging a warning on `aixon.agent` naming the discarded call(s) so the drop
+is visible in telemetry instead of a silent data loss.
 
 A cache hit (`aixon.toolcache`, `memoize=True` default) is served by
 `coerce_tools`' wrapper before `func`/`coroutine` ever run — so a memoized

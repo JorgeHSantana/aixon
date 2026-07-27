@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`Agent.as_tool()`: um subagente que estoura seu próprio
+  `max_execution_time` volta a virar `TOOL ERROR` para o pai, não uma
+  resposta legítima (#22 follow-up, sweep-0123).** #22 passou a dirigir o
+  agente embrulhado por `stream()`/`astream()` (nunca mais `invoke()`/
+  `ainvoke()`) para o reasoning fluir ao vivo no canal do chamador. Um
+  worker que bate o próprio deadline sem nada acumulado emite
+  `timeout_message` como CONTENT (#19 — um agente não pode morrer mudo no
+  caminho de streaming) — mas, por dentro de `as_tool()`, esse texto virava
+  o retorno NORMAL da tool: antes de #22, o mesmo timeout alcançava
+  `as_tool()` via um `invoke()`/`ainvoke()` que levantava `AixonError`, e o
+  shield de tool-call do pai (#9) convertia isso num `TOOL ERROR` visível;
+  depois de #22, o modelo pai passou a poder tratar a desculpa de timeout do
+  especialista como fato. `as_tool()` agora detecta um conteúdo final que
+  bate byte a byte com o `timeout_message` formatado do próprio agente
+  embrulhado (ou, no caso de um `ReflectiveAgent` cujo `stream`/`astream`
+  repassam o timeout do WORKER inalterado, o do `agent._worker`) e levanta
+  `AixonError` em vez de devolvê-lo — restaurando a semântica pré-#22.
+  Conteúdo normal continua byte-idêntico ao `invoke()`/`ainvoke()` direto.
+
+### Changed
+- **`Agent.as_tool()`: invariante content×tool_calls no mesmo run agora loga
+  um warning quando violado (sweep-0123).** Nenhum `stream()`/`astream()`
+  embutido produz CONTENT e `tool_calls` no mesmo run hoje (ou só content,
+  ou só `tool_calls` sem content — #18c) — mas um `Agent` customizado não é
+  impedido de fazê-lo. O retorno não muda (content sempre venceu, `tool_calls`
+  já era descartado em silêncio), mas agora um warning no logger
+  `aixon.agent` nomeia as calls descartadas, para o gap ficar visível em
+  telemetria em vez de silencioso.
+
 ## [0.1.23] - 2026-07-27
 
 ### Added
