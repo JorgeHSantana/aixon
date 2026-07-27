@@ -272,6 +272,7 @@ class ResearchAgent(ToolAgent):
 | `tools` | `list` | `[]` | Mix of `AgentTool`, `Retriever`, LangChain `@tool` functions, or any callable. All are coerced to `BaseTool` internally via `coerce_tools`. |
 | `max_iterations` | `int` | `15` | Maximum tool-call rounds before the loop stops. |
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds. |
+| `timeout_message` | `str` | see below | Content emitted (#19) when `stream`/`astream` hits `max_execution_time` with NO answer accumulated yet — `{seconds}` is interpolated. See "Timeout sem morrer mudo (#19)" below. |
 | `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
 | `shield_tool_errors` | `bool` | `True` | Error shield: any exception a tool raises (`httpx.ReadTimeout`, DB down, ...) becomes a readable `TOOL ERROR (...)` result handed back to the model — the agent reports the outage and/or proceeds, instead of the whole run/stream dying with an opaque server error. `False` restores the strict pre-shield behavior (exceptions propagate). Raw `BaseTool` entries are NOT shielded (see `coerce_tools`). |
 | `prune_tool_results_after` | `int \| None` | `None` | Opt-in pruning of old tool results (#16). `None` disables it (zero behavior change). See "Poda de tool results antigos (#16)" below. |
@@ -280,6 +281,30 @@ class ResearchAgent(ToolAgent):
 | `client_tools` | `str` | `"ignore"` | First-class client tools (#18c): `"ignore"` \| `"merge"` \| `"replace"`. See "Client tools mesclados no loop (#18c)" below. |
 | `client_tools_conflict` | `str` | `"error"` | Name-collision policy between an internal tool and a client def: `"error"` \| `"internal"` \| `"client"`. |
 | `client_tools_filter` | `method` | identity | Curation hook (#18c): `client_tools_filter(self, defs) -> defs` — override to keep only a subset of the client's declared tools. |
+| `reasoning_flush_interval` | `float` | `0.25` | `astream` only (#20): how often (seconds) the ReasoningChannel is polled and drained while a tool node is still running. See "Streaming ao vivo (#20)" below. |
+
+**Streaming ao vivo (#20).** `astream` polls for the next LangGraph update
+instead of blocking on it, draining and yielding the ReasoningChannel every
+`reasoning_flush_interval` regardless of whether the update has arrived — so
+reasoning a NESTED agent emits from inside a still-running tool call (e.g. a
+specialist agent invoked as a tool, itself streaming labels/retries) surfaces
+as soon as it's emitted instead of being buffered until that tool call
+completes. The sync `stream()` keeps its old between-update drain: a blocking
+iterator can't be polled concurrently with a timer, so live progress during a
+slow nested tool is an `astream`-only capability — which is what `Server` uses.
+
+**Timeout sem morrer mudo (#19).** If `max_execution_time` breaks a `stream`/
+`astream` run (the `timed_out`/deadline-break path) with **no** answer
+accumulated yet, the stream still emits a `Chunk(content=...)` carrying
+`timeout_message` (default: a short PT-BR sentence naming the elapsed
+seconds) right before the closing `Chunk(done=True)` — the "(stopped:
+exceeded max_execution_time ...)" reasoning line alone is not enough, since
+chat UIs collapse/hide reasoning and would otherwise show an empty reply. A
+run that already produced content by the time the deadline breaks (e.g. the
+model's final answer text, as opposed to a tool-call preamble) keeps
+delivering that content unchanged — `timeout_message` never overrides real
+output. `invoke`/`ainvoke` are untouched: they already raise a visible
+`AixonError` on timeout.
 
 **Tool-call memoization (request scope).** Within one served request (and
 within one `ReflectiveAgent` run), a tool called again with the SAME arguments

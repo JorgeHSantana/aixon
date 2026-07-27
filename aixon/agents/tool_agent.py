@@ -87,6 +87,14 @@ class ToolAgent(Agent, abstract=True):
     tools: list = []
     max_iterations: int = 15
     max_execution_time: int = 600
+    # Timeout message (#19): emitted as CONTENT when the run hits
+    # max_execution_time with no accumulated answer — an agent must never
+    # die mute on the streaming path. {seconds} is interpolated.
+    timeout_message: str = (
+        "A tarefa excedeu o tempo limite ({seconds}s) antes de produzir uma "
+        "resposta. Tente restringir o pedido (período menor, menos fontes) "
+        "ou repetir em partes."
+    )
     # Error shield (#9): True (default) converts ANY exception raised by a tool
     # into a readable error result handed back to the model, so one failing
     # tool/service reports instead of killing the whole run/stream. Set False
@@ -111,6 +119,14 @@ class ToolAgent(Agent, abstract=True):
     # "error" (explicit, default) | "internal" (client def dropped) |
     # "client" (internal tool dropped).
     client_tools_conflict: str = "error"
+
+    def _timeout_chunk(self) -> Chunk:
+        """The pass-through timeout-content chunk (#19 sweep #3): built once so
+        ``stream``/``astream`` emit byte-identical text, and so a wrapper
+        (e.g. ``ReflectiveAgent``, #19/#22-sweep) can pattern-match a worker's
+        candidate answer against ``self.timeout_message.format(seconds=...)``
+        without duplicating the interpolation."""
+        return Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
 
     def client_tools_filter(self, defs: list[dict]) -> list[dict]:
         """Curation hook (#18c): which client tool defs are exposed. Default:
@@ -492,6 +508,7 @@ class ToolAgent(Agent, abstract=True):
         agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
         final_content = ""
+        timed_out = False
         seen_messages: list = []
         with reasoning_channel() as channel:
             try:
@@ -525,6 +542,7 @@ class ToolAgent(Agent, abstract=True):
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
                     if time.monotonic() > deadline:
+                        timed_out = True
                         emit_reasoning(
                             f"(stopped: exceeded max_execution_time "
                             f"{self.max_execution_time}s)"
@@ -548,6 +566,11 @@ class ToolAgent(Agent, abstract=True):
             return
         if final_content:
             yield Chunk(content=final_content)
+        elif timed_out:
+            # #19: the deadline broke the run with NOTHING accumulated — an
+            # agent must never die mute. Partial content (final_content set)
+            # keeps today's behavior: delivered as-is, no timeout message.
+            yield self._timeout_chunk()
         yield Chunk(done=True)
 
     # ---- async neutral boundary -----------------------------------------
@@ -605,17 +628,44 @@ class ToolAgent(Agent, abstract=True):
         _log.info(f"agent '{self.name}' completed async ({len(reasoning_lines)} step(s))")
         return final
 
+    # How often astream() polls the ReasoningChannel while a LangGraph node is
+    # still running (#20), so reasoning emitted from inside it flows live.
+    reasoning_flush_interval: float = 0.25
+
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """Async stream mirroring ``stream`` over the graph's ``astream``.
 
         ``max_execution_time`` is a HARD wall here, not just a between-update
-        check: each step is awaited under ``asyncio.wait_for`` with the time
-        remaining until the deadline, so a step that stalls mid-flight (e.g. a
-        provider stream that stops delivering bytes) is cancelled at the
-        deadline instead of hanging the request forever. The underlying graph
-        stream is closed on the way out.
+        check: each step is awaited under a poll loop (below) with the time
+        remaining until the deadline as the outer bound, so a step that stalls
+        mid-flight (e.g. a provider stream that stops delivering bytes) is
+        cancelled at the deadline instead of hanging the request forever. The
+        underlying graph stream is closed on the way out.
+
+        Live reasoning drain (#20): a plain ``await stream.__anext__()`` only
+        resumes when a LangGraph node COMPLETES, so reasoning a nested agent
+        emits from inside a still-running tool node (``emit_reasoning``
+        targeting the shared ``ReasoningChannel``) sits buffered until that
+        node finishes — on a slow nested tool, minutes of internal activity
+        appear to hang. Instead, the wait for the next update runs as a
+        background task (``next_task``) polled with ``asyncio.wait(...,
+        timeout=reasoning_flush_interval)`` in a loop: every tick the channel
+        is drained and yielded regardless of whether the task has finished,
+        so reasoning surfaces as soon as it's emitted rather than only at the
+        next graph update. Only ONE task is ever in flight — a new
+        ``stream.__anext__()`` is issued after the previous one is fully
+        consumed — and it is cancelled (and awaited, swallowing whatever it
+        raises) before the method returns on every exit path, so no task is
+        ever left pending on the loop.
+
+        The SYNC ``stream()`` does not get this treatment: a blocking
+        iterator has no way to be polled concurrently with a timer, so its
+        between-update drain (unchanged, see ``stream()``) is the best it can
+        do. Live progress during a slow nested tool call is therefore an
+        async-path (``astream``) capability — which is what ``Server`` uses.
         """
         import asyncio
+        import contextlib
 
         from langgraph.errors import GraphRecursionError
 
@@ -623,6 +673,7 @@ class ToolAgent(Agent, abstract=True):
 
         agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
+        tick = self.reasoning_flush_interval
         final_content = ""
         timed_out = False
         seen_messages: list = []
@@ -630,20 +681,24 @@ class ToolAgent(Agent, abstract=True):
             stream = agent.astream(
                 {"messages": lc_messages}, config=config, stream_mode="updates"
             )
+            next_task: "asyncio.Task | None" = None
             try:
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         timed_out = True
                         break
+                    if next_task is None:
+                        next_task = asyncio.ensure_future(stream.__anext__())
+                    await asyncio.wait({next_task}, timeout=min(tick, remaining))
+                    for line in channel.drain():
+                        yield Chunk(reasoning=line + "\n")
+                    if not next_task.done():
+                        continue  # still running the node — keep polling/draining
+                    task, next_task = next_task, None
                     try:
-                        update = await asyncio.wait_for(
-                            stream.__anext__(), timeout=remaining
-                        )
+                        update = task.result()
                     except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        timed_out = True
                         break
                     except GraphRecursionError as exc:
                         raise self._iteration_limit_error(exc) from exc
@@ -667,6 +722,27 @@ class ToolAgent(Agent, abstract=True):
                     for line in channel.drain():
                         yield Chunk(reasoning=line + "\n")
             finally:
+                # Deadline/exception exit with a poll still in flight: cancel
+                # it and await the cancellation so nothing is left running on
+                # the loop after this generator returns (whatever it raises —
+                # CancelledError, the original StopAsyncIteration/graph error,
+                # or a benign result from a last-instant completion — is
+                # irrelevant here; the stream is being torn down either way).
+                if next_task is not None and not next_task.done():
+                    next_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await next_task
+                elif next_task is not None and not next_task.cancelled():
+                    # Sweep #1: the task already completed (this tick) but the
+                    # generator is being abandoned (GeneratorExit from a
+                    # consumer that stopped iterating right after the last
+                    # `yield` above) BEFORE the loop body reached
+                    # `task.result()` to retrieve it. An asyncio Task whose
+                    # exception is never fetched logs "Task exception was
+                    # never retrieved" at GC time — call `.exception()` here
+                    # to mark it observed (a normal/cancelled result is a
+                    # harmless no-op call).
+                    next_task.exception()
                 aclose = getattr(stream, "aclose", None)
                 if aclose is not None:
                     try:
@@ -690,4 +766,9 @@ class ToolAgent(Agent, abstract=True):
             return
         if final_content:
             yield Chunk(content=final_content)
+        elif timed_out:
+            # #19: same rule as stream() — nothing accumulated by the
+            # deadline means the run must not close with an empty content.
+            # Partial content (final_content set) keeps today's behavior.
+            yield self._timeout_chunk()
         yield Chunk(done=True)

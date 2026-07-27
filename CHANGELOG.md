@@ -5,6 +5,66 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.22] - 2026-07-27
+
+### Fixed
+- `reasoning_channel()`: `_current.reset(token)` no cleanup não estoura mais `ValueError` quando roda em Context diferente do que abriu o canal (ex.: finalização via GC de um async generator abandonado após desconexão abrupta de cliente) (#21).
+- **`ToolAgent`: timeout em `stream`/`astream` sem content nunca mais morre
+  mudo (#19).** Quando `max_execution_time` estourava com o run ainda sem
+  nenhuma resposta acumulada, o caminho `timed_out`/deadline-break só emitia
+  o reasoning `"(stopped: exceeded max_execution_time ...)"` — escondido
+  pelas UIs de chat que colapsam o bloco de pensamento — e fechava com
+  `Chunk(done=True)` sem nunca ter emitido `Chunk(content=...)`: resposta
+  vazia, agente aparentemente mudo. Agora, se `final_content` continuar vazio
+  no fechamento do timeout, um `Chunk(content=self.timeout_message.format(
+  seconds=self.max_execution_time))` é emitido antes do `done` — mensagem
+  honesta e sobrescrevível pelo novo atributo declarativo `timeout_message`.
+  **A mensagem só é emitida quando `timed_out=True` E `final_content` está
+  vazio** — content já acumulado (resposta final real, não o preâmbulo de uma
+  chamada de tool) continua entregue como antes, AS-IS, sem a mensagem de
+  timeout sobreposta (entrega parcial > mensagem de erro genérica).
+  `invoke`/`ainvoke` não mudaram — já levantam `AixonError` visível no
+  timeout. Ver `docs/agents.md`.
+- **`ReflectiveAgent` x timeout do worker (#19): a resposta de timeout do
+  worker não é mais julgada nem re-tentada.** Um worker `ToolAgent` cujo
+  `stream`/`astream` estourasse `max_execution_time` (#19, acima) agora
+  entregava `timeout_message` como CONTENT — um candidate answer normal aos
+  olhos do `ReflectiveAgent`, que o mandava para o juiz. Em `revision_mode=
+  "full"` isso via de regra reprovava e retentava, rodando o MESMO worker
+  lento por mais um `max_execution_time` inteiro inutilmente; em
+  `revision_mode="patch"`, se o worker estourasse de novo (ou batesse no
+  limite de recursão) na chamada de retry, o `AixonError` subia cru e
+  derrubava o stream sem nunca emitir `done`. Agora `_stream`/`_astream`
+  reconhecem a resposta de timeout do worker (comparação byte-a-byte contra
+  `worker.timeout_message.format(seconds=worker.max_execution_time)`) e a
+  repassam direto como content, sem passar pelo juiz; e qualquer `AixonError`
+  levantada por uma chamada ao worker é capturada, encerrando o stream com a
+  última resposta julgada em vez de propagar a exceção — e, se a falha
+  ocorrer já na PRIMEIRA chamada (nenhuma resposta acumulada ainda), o
+  content emitido é uma mensagem honesta derivada do erro (truncada em ~300
+  chars), nunca uma resposta final vazia.
+- **`ToolAgent.astream`: exceção de `next_task` sempre observada no
+  `finally`.** Se o consumidor abandonasse o generator exatamente no tick em
+  que a task de poll do próximo update (#20) completou com erro — antes de o
+  loop chegar em `task.result()` — a exceção nunca era recuperada e o asyncio
+  logava "Task exception was never retrieved" na coleta da task pelo GC. O
+  `finally` agora chama `next_task.exception()` quando a task está concluída
+  e não cancelada, marcando-a como observada; task ainda pendente segue com
+  o cancel+await de antes.
+- **`ToolAgent.astream`: drenagem AO VIVO do `ReasoningChannel` durante o nó
+  de tools (#20).** Reasoning emitido de DENTRO de uma tool (ex.: um agente
+  aninhado exposto como especialista, chamando `emit_reasoning` para labels
+  de tool call, do juiz, retries) ficava represado no canal até o nó de tools
+  do LangGraph completar — em uma tool lenta/aninhada, minutos de atividade
+  interna morriam parados até o fim da chamada. `astream` agora aguarda o
+  próximo update com `asyncio.wait(..., timeout=reasoning_flush_interval)`
+  em loop, drenando e emitindo o canal a cada tick (padrão 0.25s) em vez de
+  bloquear até o update chegar. Deadline/cancelamento (`max_execution_time`)
+  preservam a semântica exata anterior. Novo atributo declarativo
+  `reasoning_flush_interval: float = 0.25`. `stream()` (síncrono) fica como
+  estava — um iterator bloqueante não permite poll concorrente; ver
+  `docs/agents.md`.
+
 ## [0.1.21] - 2026-07-26
 
 ### Added

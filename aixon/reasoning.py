@@ -92,4 +92,11 @@ def reasoning_channel() -> Iterator[ReasoningChannel]:
     try:
         yield channel
     finally:
-        _current.reset(token)
+        try:
+            _current.reset(token)
+        except ValueError:
+            # (#21) reset() raises ValueError when cleanup runs in a different
+            # Context — e.g. GC-driven finalization of an abandoned async generator
+            # after an abrupt client disconnect. The var dies with that context;
+            # swallowing here only silences the unraisable-exception log noise.
+            pass
