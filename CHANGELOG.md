@@ -19,10 +19,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no fechamento do timeout, um `Chunk(content=self.timeout_message.format(
   seconds=self.max_execution_time))` é emitido antes do `done` — mensagem
   honesta e sobrescrevível pelo novo atributo declarativo `timeout_message`.
-  Content já acumulado (resposta final real, não o preâmbulo de uma chamada
-  de tool) continua entregue como antes, sem a mensagem de timeout.
+  **A mensagem só é emitida quando `timed_out=True` E `final_content` está
+  vazio** — content já acumulado (resposta final real, não o preâmbulo de uma
+  chamada de tool) continua entregue como antes, AS-IS, sem a mensagem de
+  timeout sobreposta (entrega parcial > mensagem de erro genérica).
   `invoke`/`ainvoke` não mudaram — já levantam `AixonError` visível no
   timeout. Ver `docs/agents.md`.
+- **`ReflectiveAgent` x timeout do worker (#19): a resposta de timeout do
+  worker não é mais julgada nem re-tentada.** Um worker `ToolAgent` cujo
+  `stream`/`astream` estourasse `max_execution_time` (#19, acima) agora
+  entregava `timeout_message` como CONTENT — um candidate answer normal aos
+  olhos do `ReflectiveAgent`, que o mandava para o juiz. Em `revision_mode=
+  "full"` isso via de regra reprovava e retentava, rodando o MESMO worker
+  lento por mais um `max_execution_time` inteiro inutilmente; em
+  `revision_mode="patch"`, se o worker estourasse de novo (ou batesse no
+  limite de recursão) na chamada de retry, o `AixonError` subia cru e
+  derrubava o stream sem nunca emitir `done`. Agora `_stream`/`_astream`
+  reconhecem a resposta de timeout do worker (comparação byte-a-byte contra
+  `worker.timeout_message.format(seconds=worker.max_execution_time)`) e a
+  repassam direto como content, sem passar pelo juiz; e qualquer `AixonError`
+  levantada por uma chamada de retry/patch ao worker é capturada, encerrando
+  o stream com a última resposta julgada em vez de propagar a exceção.
 - **`ToolAgent.astream`: drenagem AO VIVO do `ReasoningChannel` durante o nó
   de tools (#20).** Reasoning emitido de DENTRO de uma tool (ex.: um agente
   aninhado exposto como especialista, chamando `emit_reasoning` para labels

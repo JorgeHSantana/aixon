@@ -120,6 +120,14 @@ class ToolAgent(Agent, abstract=True):
     # "client" (internal tool dropped).
     client_tools_conflict: str = "error"
 
+    def _timeout_chunk(self) -> Chunk:
+        """The pass-through timeout-content chunk (#19 sweep #3): built once so
+        ``stream``/``astream`` emit byte-identical text, and so a wrapper
+        (e.g. ``ReflectiveAgent``, #19/#22-sweep) can pattern-match a worker's
+        candidate answer against ``self.timeout_message.format(seconds=...)``
+        without duplicating the interpolation."""
+        return Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
+
     def client_tools_filter(self, defs: list[dict]) -> list[dict]:
         """Curation hook (#18c): which client tool defs are exposed. Default:
         all of them. Override e.g. to allow only a prefix."""
@@ -562,7 +570,7 @@ class ToolAgent(Agent, abstract=True):
             # #19: the deadline broke the run with NOTHING accumulated — an
             # agent must never die mute. Partial content (final_content set)
             # keeps today's behavior: delivered as-is, no timeout message.
-            yield Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
+            yield self._timeout_chunk()
         yield Chunk(done=True)
 
     # ---- async neutral boundary -----------------------------------------
@@ -724,6 +732,17 @@ class ToolAgent(Agent, abstract=True):
                     next_task.cancel()
                     with contextlib.suppress(BaseException):
                         await next_task
+                elif next_task is not None and not next_task.cancelled():
+                    # Sweep #1: the task already completed (this tick) but the
+                    # generator is being abandoned (GeneratorExit from a
+                    # consumer that stopped iterating right after the last
+                    # `yield` above) BEFORE the loop body reached
+                    # `task.result()` to retrieve it. An asyncio Task whose
+                    # exception is never fetched logs "Task exception was
+                    # never retrieved" at GC time — call `.exception()` here
+                    # to mark it observed (a normal/cancelled result is a
+                    # harmless no-op call).
+                    next_task.exception()
                 aclose = getattr(stream, "aclose", None)
                 if aclose is not None:
                     try:
@@ -751,5 +770,5 @@ class ToolAgent(Agent, abstract=True):
             # #19: same rule as stream() — nothing accumulated by the
             # deadline means the run must not close with an empty content.
             # Partial content (final_content set) keeps today's behavior.
-            yield Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
+            yield self._timeout_chunk()
         yield Chunk(done=True)

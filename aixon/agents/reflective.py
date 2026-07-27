@@ -232,6 +232,34 @@ class ReflectiveAgent(Agent, abstract=True):
         first_line = verdict.strip().splitlines()[0].strip() if verdict.strip() else ""
         return first_line == APPROVE_SENTINEL
 
+    # ----- #19/#22-sweep: timeout interplay with the judge loop -------------
+
+    def _is_worker_timeout_answer(self, answer: Message) -> bool:
+        """True when *answer* is exactly the worker's #19 timeout pass-through
+        content: a ToolAgent worker whose stream/astream hit its own
+        ``max_execution_time`` with nothing accumulated emits
+        ``timeout_message`` as CONTENT so it never dies mute — but that text
+        is not a judgeable answer, and retrying it would re-run the same
+        (already slow) worker for another full deadline. Only ToolAgent
+        workers expose ``timeout_message``/``max_execution_time``; any other
+        worker type never matches."""
+        tm = getattr(self._worker, "timeout_message", None)
+        if tm is None:
+            return False
+        seconds = getattr(self._worker, "max_execution_time", 0)
+        return answer.content == tm.format(seconds=seconds)
+
+    def _timeout_exhausted_chunks(self, answer: Message) -> list[Chunk]:
+        """Chunks emitted when a retry/patch call into the worker raises
+        ``AixonError`` mid-loop (the worker blew its OWN deadline again, or
+        hit LangGraph's recursion limit — pre-existing, also reachable via
+        retry): fall back to the last judged *answer* instead of letting the
+        exception crash the stream, per this module's precept that a quality
+        shortfall must not crash a run that produced an answer."""
+        return [Chunk(reasoning=self.exhausted_label + "\n"),
+                Chunk(content=answer.content),
+                Chunk(done=True)]
+
     def _retry_messages(self, messages: list[Message], answer: Message,
                         critique: str) -> list[Message]:
         # New list — never mutate the caller's (same precept as _with_prompt).
@@ -415,18 +443,35 @@ class ReflectiveAgent(Agent, abstract=True):
             else:
                 parts: list[str] = []
                 worker_tool_calls: list[dict] | None = None
-                # See _invoke(): round 1 has no previous answer (no-op); retry
-                # rounds publish it as the predicted output (#6).
-                with prediction_scope(answer.content or None):
-                    for chunk in self._worker.stream(msgs):
-                        if chunk.reasoning:
-                            yield Chunk(reasoning=chunk.reasoning)
-                        if chunk.content:
-                            parts.append(chunk.content)
-                        if chunk.tool_calls:
-                            worker_tool_calls = chunk.tool_calls
+                try:
+                    # See _invoke(): round 1 has no previous answer (no-op);
+                    # retry rounds publish it as the predicted output (#6).
+                    with prediction_scope(answer.content or None):
+                        for chunk in self._worker.stream(msgs):
+                            if chunk.reasoning:
+                                yield Chunk(reasoning=chunk.reasoning)
+                            if chunk.content:
+                                parts.append(chunk.content)
+                            if chunk.tool_calls:
+                                worker_tool_calls = chunk.tool_calls
+                except AixonError:
+                    # (#19/#22-sweep) the worker blew ITS OWN deadline again
+                    # (or hit its recursion limit) on a retry round — `answer`
+                    # here still holds the previous round's (rejected)
+                    # candidate, or "" on round 1; either way, do not crash.
+                    for c in self._timeout_exhausted_chunks(answer):
+                        yield c
+                    return
                 answer = Message(role="assistant", content="".join(parts),
                                   tool_calls=worker_tool_calls or [])
+            # (#19/#22-sweep) a timeout answer is not a judgeable answer —
+            # retrying re-runs the same slow worker for another full deadline.
+            # Pass it through untouched, before should_judge AND before the
+            # judge — no round should ever burn a judge call on this text.
+            if self._is_worker_timeout_answer(answer):
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
             # (a tool-call answer is not judgeable text — surfaced client
             # calls pass through) — before should_judge AND before the judge.
             if answer.tool_calls and not answer.content:
@@ -455,7 +500,20 @@ class ReflectiveAgent(Agent, abstract=True):
             # produced via invoke (short output; its raw text must NEVER leak
             # as stream content) and the applied candidate is judged next round.
             if self.revision_mode == "patch" and answer.content:
-                pmsgs, applied_msg, _ = self._patch_round_sync(msgs, answer, verdict)
+                try:
+                    pmsgs, applied_msg, _ = self._patch_round_sync(msgs, answer, verdict)
+                except AixonError:
+                    # (#19/#22-sweep) the patch-mode retry calls the worker
+                    # via invoke() — a branch that was previously unreachable
+                    # from a timed-out worker only because the timeout answer
+                    # was always approved-or-content-empty upstream; now that
+                    # a normal rejected answer can legitimately reach here,
+                    # the worker's invoke() can raise AixonError (its own
+                    # deadline, or the recursion limit) on the 2nd overrun.
+                    # `answer` is still this round's (rejected) candidate.
+                    for c in self._timeout_exhausted_chunks(answer):
+                        yield c
+                    return
                 if applied_msg is not None:
                     patch_applied += 1
                     msgs, pending = pmsgs, applied_msg
@@ -554,17 +612,30 @@ class ReflectiveAgent(Agent, abstract=True):
             else:
                 parts: list[str] = []
                 worker_tool_calls: list[dict] | None = None
-                # See _invoke(): predicted output for retry rounds (#6).
-                with prediction_scope(answer.content or None):
-                    async for chunk in self._worker.astream(msgs):
-                        if chunk.reasoning:
-                            yield Chunk(reasoning=chunk.reasoning)
-                        if chunk.content:
-                            parts.append(chunk.content)
-                        if chunk.tool_calls:
-                            worker_tool_calls = chunk.tool_calls
+                try:
+                    # See _invoke(): predicted output for retry rounds (#6).
+                    with prediction_scope(answer.content or None):
+                        async for chunk in self._worker.astream(msgs):
+                            if chunk.reasoning:
+                                yield Chunk(reasoning=chunk.reasoning)
+                            if chunk.content:
+                                parts.append(chunk.content)
+                            if chunk.tool_calls:
+                                worker_tool_calls = chunk.tool_calls
+                except AixonError:
+                    # See _stream(): the worker blew its own deadline again
+                    # (or hit its recursion limit) on a retry round.
+                    for c in self._timeout_exhausted_chunks(answer):
+                        yield c
+                    return
                 answer = Message(role="assistant", content="".join(parts),
                                   tool_calls=worker_tool_calls or [])
+            # See _stream(): a timeout answer is not judgeable — pass through
+            # before should_judge/the judge, no round burns a judge call on it.
+            if self._is_worker_timeout_answer(answer):
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
             # See _stream(): pass-through before should_judge/the judge.
             if answer.tool_calls and not answer.content:
                 yield Chunk(tool_calls=answer.tool_calls)
@@ -590,8 +661,15 @@ class ReflectiveAgent(Agent, abstract=True):
                                                           max=self.max_rounds) + "\n")
             # See _stream(): patch mode first (#7), full regeneration fallback.
             if self.revision_mode == "patch" and answer.content:
-                pmsgs, applied_msg, _ = await self._patch_round_async(
-                    msgs, answer, verdict)
+                try:
+                    pmsgs, applied_msg, _ = await self._patch_round_async(
+                        msgs, answer, verdict)
+                except AixonError:
+                    # See _stream(): patch-mode retry's worker.ainvoke() can
+                    # raise on the 2nd overrun (or the recursion limit).
+                    for c in self._timeout_exhausted_chunks(answer):
+                        yield c
+                    return
                 if applied_msg is not None:
                     patch_applied += 1
                     msgs, pending = pmsgs, applied_msg
