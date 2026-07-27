@@ -352,18 +352,30 @@ class Agent(ABC):
         # one function (e.g. via `**kwargs` with a manual "did the caller
         # pass args_schema" branch) would break that inference for every
         # existing free-text tool.
+        # As variantes têm NOMES distintos (não redefinição condicional de
+        # `def _run`) porque o mypy exige assinaturas idênticas em variantes
+        # condicionais de uma mesma função; a atribuição a uma variável comum
+        # anotada `Callable[..., ...]` é o que unifica os dois shapes.
+        _run: Callable[..., str]
+        _arun: Callable[..., Awaitable[str]]
         if args_schema is None:
-            def _run(text: str) -> str:
+            def _run_text(text: str) -> str:
                 return _drive_sync(text)
 
-            async def _arun(text: str) -> str:
+            async def _arun_text(text: str) -> str:
                 return await _drive_async(text)
+
+            _run = _run_text
+            _arun = _arun_text
         else:
-            def _run(**kwargs: object) -> str:
+            def _run_kwargs(**kwargs: object) -> str:
                 return _drive_sync(render(kwargs))
 
-            async def _arun(**kwargs: object) -> str:
+            async def _arun_kwargs(**kwargs: object) -> str:
                 return await _drive_async(render(kwargs))
+
+            _run = _run_kwargs
+            _arun = _arun_kwargs
 
         return AgentTool(
             name=name or self.name,
