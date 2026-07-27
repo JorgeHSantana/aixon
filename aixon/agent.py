@@ -38,10 +38,7 @@ def _client_tool_leak_text(name: str, tool_calls: list[dict]) -> str:
     read as the subagent producing nothing; log a warning (so the gap is
     visible in telemetry) and hand back an explanatory string instead, so the
     caller's own model sees why the subagent came back empty-handed."""
-    names = ", ".join(sorted({
-        (c.get("name") if isinstance(c, dict) else getattr(c, "name", None)) or "?"
-        for c in tool_calls
-    }))
+    names = _tool_call_names(tool_calls)
     _log.warning(
         f"as_tool('{name}'): worker surfaced client tool call(s) ({names}) "
         f"with empty content — client tool calls do not cross as_tool"
@@ -51,6 +48,38 @@ def _client_tool_leak_text(name: str, tool_calls: list[dict]) -> str:
         f"chamadas de client tools não atravessam as_tool; trate diretamente "
         f"com o agente]"
     )
+
+
+def _timeout_texts(agent: "Agent") -> set[str]:
+    """Candidate strings that mean "this agent gave up on its OWN deadline,
+    not a real answer" (#19 pass-through content), for the given *agent*.
+
+    A plain ``ToolAgent`` exposes ``timeout_message``/``max_execution_time``
+    directly. A ``ReflectiveAgent`` does not declare these itself — its
+    ``stream``/``astream`` pass a timed-out WORKER's content straight through
+    unchanged (``_is_worker_timeout_answer`` in ``aixon/agents/reflective.py``)
+    — so its ``_worker`` (when present) is checked too. Returns an empty set
+    when neither the agent nor its worker exposes both attributes (e.g. a
+    bare ``Agent`` test double, or a worker that isn't a ``ToolAgent``)."""
+    texts: set[str] = set()
+    for candidate in (agent, getattr(agent, "_worker", None)):
+        if candidate is None:
+            continue
+        tm = getattr(candidate, "timeout_message", None)
+        seconds = getattr(candidate, "max_execution_time", None)
+        if tm is not None and seconds is not None:
+            texts.add(tm.format(seconds=seconds))
+    return texts
+
+
+def _tool_call_names(tool_calls: list[dict]) -> str:
+    """Sorted, comma-joined tool names out of a list of raw tool_call dicts
+    (each either a dict or an object with a ``.name``) — shared by the
+    client-tool-leak text and the content/tool_calls invariant warning."""
+    return ", ".join(sorted({
+        (c.get("name") if isinstance(c, dict) else getattr(c, "name", None)) or "?"
+        for c in tool_calls
+    }))
 
 
 def _default_render_input(kwargs: dict) -> str:
@@ -272,6 +301,19 @@ class Agent(ABC):
         surfacing a CLIENT tool call, #18c) is preserved, now read off
         ``Chunk.tool_calls`` instead of ``Message.tool_calls``.
 
+        #22 follow-up (sweep-0123): ONE case is deliberately NOT
+        byte-identical to ``invoke()``/``ainvoke()`` — a wrapped agent that
+        blows its OWN ``max_execution_time`` with nothing accumulated emits
+        its ``timeout_message`` as CONTENT instead of dying mute (#19); left
+        alone, that content would reach the caller as an ordinary, trustworthy
+        tool result. ``_timeout_texts`` detects it (byte-matching the wrapped
+        agent's own formatted ``timeout_message``, or its ``_worker``'s for a
+        ``ReflectiveAgent`` pass-through) and raises ``AixonError`` instead,
+        so the caller's tool-call shield (#9) turns it into a ``TOOL ERROR`` —
+        the same semantics ``as_tool()`` had pre-#22, when it drove
+        ``invoke()``/``ainvoke()`` and the timeout reached it as a raised
+        exception rather than as content.
+
         #23 — structured briefing. By default (``args_schema=None``, unchanged)
         the tool exposes a single free-text argument and ``func``/``coroutine``
         receive it positionally (``text: str``). Pass ``args_schema`` (a
@@ -323,6 +365,36 @@ class Agent(ABC):
                 if ch.tool_calls:
                     tool_calls.extend(ch.tool_calls)
             content = "".join(parts)
+            if content and tool_calls:
+                # Invariant (sweep-0123 item 2): a built-in stream() is not
+                # expected to yield BOTH content and tool_calls in the same
+                # run — but if a custom/future one does, `tool_calls` is
+                # silently dropped below (the caller only ever sees `content`
+                # returned as a string; there is no channel to relay
+                # tool_calls back through as_tool). Warn so the drop is
+                # visible in telemetry instead of a silent data loss.
+                _log.warning(
+                    f"as_tool('{self.name}'): discarding tool_calls "
+                    f"({_tool_call_names(tool_calls)}) — stream() produced "
+                    f"content alongside tool_calls in the same run"
+                )
+            if content and content in _timeout_texts(self):
+                # (#22 follow-up / sweep-0123 item 1) `content` is the
+                # wrapped agent's OWN #19 timeout pass-through, not a real
+                # answer — before #22 drove as_tool() through invoke()/
+                # ainvoke(), the same timeout raised AixonError here, and the
+                # parent's tool-call shield (#9) turned it into a visible
+                # TOOL ERROR. Since #22 switched to stream()/astream(), that
+                # AixonError was replaced by ordinary CONTENT (the #19
+                # pass-through exists so a DIRECT stream() call never dies
+                # mute) — which as_tool() then handed the parent model as a
+                # normal, trustworthy tool result. A failure must never look
+                # like a legitimate response reaching the caller as fact, so
+                # raise here too, restoring the pre-#22 semantics.
+                raise AixonError(
+                    f"subagente '{self.name}' excedeu o tempo limite antes "
+                    f"de responder"
+                )
             if tool_calls and not content:
                 return _client_tool_leak_text(self.name, tool_calls)
             return content
@@ -340,6 +412,20 @@ class Agent(ABC):
                 if ch.tool_calls:
                     tool_calls.extend(ch.tool_calls)
             content = "".join(parts)
+            if content and tool_calls:
+                # See _drive_sync's twin comment (sweep-0123 item 2).
+                _log.warning(
+                    f"as_tool('{self.name}'): discarding tool_calls "
+                    f"({_tool_call_names(tool_calls)}) — astream() produced "
+                    f"content alongside tool_calls in the same run"
+                )
+            if content and content in _timeout_texts(self):
+                # See _drive_sync's twin comment (#22 follow-up / sweep-0123
+                # item 1) — same fix, async path.
+                raise AixonError(
+                    f"subagente '{self.name}' excedeu o tempo limite antes "
+                    f"de responder"
+                )
             if tool_calls and not content:
                 return _client_tool_leak_text(self.name, tool_calls)
             return content

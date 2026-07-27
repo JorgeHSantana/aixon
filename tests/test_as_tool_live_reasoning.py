@@ -197,6 +197,65 @@ def test_as_tool_defensivo_astream_tool_calls_sem_content_tambem_avisa():
     assert "leakystream2" in out
 
 
+# ── (sweep-0123 item 2) invariante content×tool_calls num mesmo run ─────────
+
+def _mixed_stream_agent(name: str):
+    """Subagente cujo stream()/astream() produz CONTENT e tool_calls no MESMO
+    run — nenhum stream built-in faz isso hoje (ou emite só content, ou só
+    tool_calls sem content — #18c), mas o formato não é impossível para um
+    Agent custom. Hoje o retorno já prioriza content e descarta tool_calls
+    em silêncio; sweep-0123 item 2 só adiciona um warning nomeando o que foi
+    descartado, sem mudar o retorno."""
+    calls = [{"name": "inserir_no_documento", "args": {"texto": "x"}, "id": "c1"}]
+
+    def stream(self, messages):
+        yield Chunk(content="resposta parcial")
+        yield Chunk(tool_calls=calls)
+        yield Chunk(done=True)
+
+    async def astream(self, messages):
+        yield Chunk(content="resposta parcial")
+        yield Chunk(tool_calls=calls)
+        yield Chunk(done=True)
+
+    return type(
+        name.capitalize() + "Agent", (Agent,),
+        {
+            "name": name,
+            "invoke": lambda self, messages: Message(
+                role="assistant", content="resposta parcial", tool_calls=calls),
+            "stream": stream,
+            "astream": astream,
+        },
+    )
+
+
+def test_as_tool_stream_content_e_tool_calls_no_mesmo_run_avisa_mas_retorno_nao_muda(caplog):
+    _mixed_stream_agent("mixedstream1")
+    tool = get_registry().resolve("mixedstream1").as_tool()
+
+    with caplog.at_level(logging.WARNING, logger="aixon.agent"):
+        out = tool.func("faca algo")
+
+    assert out == "resposta parcial"  # retorno inalterado: content vence
+    assert any(
+        "mixedstream1" in m and "inserir_no_documento" in m for m in caplog.messages
+    )
+
+
+def test_as_tool_astream_content_e_tool_calls_no_mesmo_run_avisa_mas_retorno_nao_muda(caplog):
+    _mixed_stream_agent("mixedstream2")
+    tool = get_registry().resolve("mixedstream2").as_tool()
+
+    with caplog.at_level(logging.WARNING, logger="aixon.agent"):
+        out = asyncio.run(tool.coroutine("faca algo"))
+
+    assert out == "resposta parcial"
+    assert any(
+        "mixedstream2" in m and "inserir_no_documento" in m for m in caplog.messages
+    )
+
+
 # ── (d) audience="agent" continua anexando a moldura ─────────────────────────
 
 def test_as_tool_audience_agent_anexa_moldura_via_stream():
