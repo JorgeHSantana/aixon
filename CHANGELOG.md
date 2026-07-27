@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `reasoning_channel()`: `_current.reset(token)` no cleanup não estoura mais `ValueError` quando roda em Context diferente do que abriu o canal (ex.: finalização via GC de um async generator abandonado após desconexão abrupta de cliente) (#21).
 - **`ToolAgent`: timeout em `stream`/`astream` sem content nunca mais morre
   mudo (#19).** Quando `max_execution_time` estourava com o run ainda sem
   nenhuma resposta acumulada, o caminho `timed_out`/deadline-break só emitia
