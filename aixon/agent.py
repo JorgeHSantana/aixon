@@ -53,6 +53,18 @@ def _client_tool_leak_text(name: str, tool_calls: list[dict]) -> str:
     )
 
 
+def _default_render_input(kwargs: dict) -> str:
+    """Default ``render_input`` for ``as_tool(args_schema=...)`` (#23): one
+    ``"FIELD: value"`` line per kwarg, key upper-cased, in insertion order.
+    Fields whose value is ``None``, ``""`` or ``False`` are dropped — an
+    optional schema field the caller left empty/unset should not show up as
+    an empty line in the subagent's briefing."""
+    return "\n".join(
+        f"{k.upper()}: {v}" for k, v in kwargs.items()
+        if v not in (None, "", False)
+    )
+
+
 @dataclass
 class AgentTool:
     """Neutral descriptor of an Agent exposed as a callable tool. Later plans
@@ -236,6 +248,8 @@ class Agent(ABC):
     def as_tool(
         self, name: str | None = None, description: str | None = None,
         memoize: bool = True, audience: str = "human",
+        args_schema: dict | None = None,
+        render_input: Callable[[dict], str] | None = None,
     ) -> "AgentTool":
         """Expose this agent as a tool. Each call runs with a fresh message
         list, so the wrapped agent's state never leaks across invocations.
@@ -257,6 +271,22 @@ class Agent(ABC):
         joined) and the tool_calls-without-content defensive path (a worker
         surfacing a CLIENT tool call, #18c) is preserved, now read off
         ``Chunk.tool_calls`` instead of ``Message.tool_calls``.
+
+        #23 — structured briefing. By default (``args_schema=None``, unchanged)
+        the tool exposes a single free-text argument and ``func``/``coroutine``
+        receive it positionally (``text: str``). Pass ``args_schema`` (a
+        neutral JSON-Schema dict, same shape ``AgentTool.args_schema`` already
+        accepts from MCP) to expose STRUCTURED fields to the calling model
+        instead (e.g. ``objetivo``/``contexto``/``restricoes``) — the schema,
+        not a single string, is what the caller's LLM sees and fills in.
+        ``func``/``coroutine`` then receive the schema's fields as ``**kwargs``,
+        which are turned into the text the subagent actually reads via
+        ``render_input(kwargs) -> str``. Default ``render_input`` (used when
+        the argument is omitted): one ``"FIELD: value"`` line per kwarg, key
+        upper-cased, in insertion order, skipping any field whose value is
+        ``None``/``""``/``False`` (see ``_default_render_input``). The
+        ``audience="agent"`` suffix, when set, is appended AFTER rendering —
+        it frames the rendered briefing, not a raw field.
         """
         if audience not in ("human", "agent"):
             raise AixonError(
@@ -264,8 +294,9 @@ class Agent(ABC):
                 f"'agent' (anexa a moldura de subagente ao texto da chamada)."
             )
         suffix = _AGENT_AUDIENCE_SUFFIX if audience == "agent" else ""
+        render = render_input or _default_render_input
 
-        def _run(text: str) -> str:
+        def _drive_sync(text: str) -> str:
             # The parent's channel MUST be captured BEFORE iterating
             # self.stream(): stream() opens its OWN `with reasoning_channel()`
             # for the lifetime of its generator, which — because a plain
@@ -296,8 +327,8 @@ class Agent(ABC):
                 return _client_tool_leak_text(self.name, tool_calls)
             return content
 
-        async def _arun(text: str) -> str:
-            # Same capture-before-iterating rule as _run — see its comment.
+        async def _drive_async(text: str) -> str:
+            # Same capture-before-iterating rule as _drive_sync — see its comment.
             parent_channel = current_channel()
             parts: list[str] = []
             tool_calls: list[dict] = []
@@ -313,10 +344,32 @@ class Agent(ABC):
                 return _client_tool_leak_text(self.name, tool_calls)
             return content
 
+        # Two DISTINCT closures per sync/async path (not one `*args`-sniffing
+        # func): StructuredTool.from_function infers the LLM-facing signature
+        # from `func`'s own `inspect.signature` whenever no explicit
+        # `args_schema` overrides it, so the no-schema path MUST keep
+        # accepting a single positional `text` — collapsing both shapes into
+        # one function (e.g. via `**kwargs` with a manual "did the caller
+        # pass args_schema" branch) would break that inference for every
+        # existing free-text tool.
+        if args_schema is None:
+            def _run(text: str) -> str:
+                return _drive_sync(text)
+
+            async def _arun(text: str) -> str:
+                return await _drive_async(text)
+        else:
+            def _run(**kwargs: object) -> str:
+                return _drive_sync(render(kwargs))
+
+            async def _arun(**kwargs: object) -> str:
+                return await _drive_async(render(kwargs))
+
         return AgentTool(
             name=name or self.name,
             description=description or self.description,
             func=_run,
             coroutine=_arun,
             memoize=memoize,
+            args_schema=args_schema,
         )

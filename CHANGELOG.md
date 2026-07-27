@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`Agent.as_tool(args_schema=None, render_input=None)` — briefing
+  estruturado de agente-como-tool (#23).** Sem `args_schema` (default), nada
+  muda: a tool continua expondo um único argumento de texto livre. Com
+  `args_schema` (o mesmo dict de JSON-Schema neutro que `AgentTool.args_schema`
+  já aceitava de tools MCP), a tool coercida expõe campos estruturados ao
+  modelo chamador (visíveis em `StructuredTool.args_schema`/`.args`) em vez de
+  um único blob de texto — ex.: `objetivo`/`contexto` em vez de esperar que o
+  texto livre do chamador mencione tudo. `func`/`coroutine` passam a receber
+  os campos do schema como `**kwargs`, renderizados a texto via
+  `render_input(kwargs) -> str` antes de seguir o mesmo caminho
+  `stream()`/`astream()` do #22 (streaming interno preservado). Default de
+  `render_input`: uma linha `"CAMPO: valor"` por kwarg, chave maiúscula, na
+  ordem de inserção, pulando campos `None`/`""`/`False`. Composição com
+  `audience="agent"` (#15): o sufixo é anexado DEPOIS da renderização — a
+  moldura envolve o briefing já pronto, não um campo cru.
+
 ### Changed
 - **`Agent.as_tool()`: o `AgentTool` embrulhado agora roda por dentro do
   `stream()`/`astream()` do agente, não de `invoke()`/`ainvoke()` (#22).**

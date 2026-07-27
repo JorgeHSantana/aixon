@@ -6,7 +6,8 @@ of subtype — exposes the same interface:
 ```python
 agent.invoke(messages: list[Message]) -> Message
 agent.stream(messages: list[Message]) -> Iterator[Chunk]
-agent.as_tool(name=None, description=None, memoize=True, audience="human") -> AgentTool
+agent.as_tool(name=None, description=None, memoize=True, audience="human",
+              args_schema=None, render_input=None) -> AgentTool
 ```
 
 This uniformity means a `ToolAgent` can be a node in an `Orchestrator`, an
@@ -743,6 +744,63 @@ the text handed to the callee: `"agent"` appends the subagent frame
 (`_AGENT_AUDIENCE_SUFFIX`) so the callee answers with dense facts for another
 agent instead of human-facing prose. See "Nesting agents as tools" above for
 the rationale and an example. Any other value raises `AixonError`.
+
+### Structured briefing — `args_schema` + `render_input` (#23)
+
+By default a nested agent's tool exposes a single free-text argument to the
+calling model, and `func`/`coroutine` receive it positionally
+(`text: str`) — the caller's LLM writes one blob of prose, and that's exactly
+what the subagent gets. Pass `args_schema` (a neutral JSON-Schema dict — the
+same shape `AgentTool.args_schema` already accepts from MCP tools) to expose
+STRUCTURED fields instead:
+
+```python
+CobradorAgent().as_tool(
+    name="cobranca",
+    args_schema={
+        "type": "object",
+        "properties": {
+            "objetivo": {"type": "string", "description": "O que resolver"},
+            "contexto": {"type": "string", "description": "Contexto já apurado"},
+        },
+        "required": ["objetivo"],
+    },
+)
+```
+
+With `args_schema` set, the calling model fills in `objetivo`/`contexto` as
+separate typed fields (visible on the coerced tool as
+`StructuredTool.args_schema`/`.args`) instead of composing one string —
+sturdier for a multi-field briefing than hoping the model's free text mentions
+everything. `func`/`coroutine` then receive those fields as `**kwargs`, and
+`render_input(kwargs) -> str` turns them into the actual text the subagent
+reads. The **default** `render_input` (used whenever the argument is
+omitted) renders one `"FIELD: value"` line per kwarg, key upper-cased, in
+insertion order, dropping any field whose value is `None`/`""`/`False`:
+
+```python
+{"objetivo": "revisar contrato", "contexto": "cliente ACME"}
+# -> "OBJETIVO: revisar contrato\nCONTEXTO: cliente ACME"
+```
+
+Pass your own `render_input` to control the wording instead:
+
+```python
+CobradorAgent().as_tool(
+    name="cobranca",
+    args_schema=SCHEMA,
+    render_input=lambda kw: f"Resolva: {kw['objetivo']} (contexto: {kw.get('contexto', '—')})",
+)
+```
+
+Composition with the rest of `as_tool` is unchanged: `audience="agent"`
+appends its suffix to the ALREADY-rendered text (the frame wraps the
+briefing, not a raw field), and the call still runs through the same
+`stream()`/`astream()`-driven `func`/`coroutine` from #22 — internal
+reasoning still flows live to the caller's channel regardless of whether the
+tool takes free text or a structured schema. Without `args_schema` (the
+default, `None`), everything above is inert — the tool keeps taking a single
+positional `text` argument exactly as before.
 
 ---
 
