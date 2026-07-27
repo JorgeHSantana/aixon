@@ -38,8 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconhecem a resposta de timeout do worker (comparação byte-a-byte contra
   `worker.timeout_message.format(seconds=worker.max_execution_time)`) e a
   repassam direto como content, sem passar pelo juiz; e qualquer `AixonError`
-  levantada por uma chamada de retry/patch ao worker é capturada, encerrando
-  o stream com a última resposta julgada em vez de propagar a exceção.
+  levantada por uma chamada ao worker é capturada, encerrando o stream com a
+  última resposta julgada em vez de propagar a exceção — e, se a falha
+  ocorrer já na PRIMEIRA chamada (nenhuma resposta acumulada ainda), o
+  content emitido é uma mensagem honesta derivada do erro (truncada em ~300
+  chars), nunca uma resposta final vazia.
+- **`ToolAgent.astream`: exceção de `next_task` sempre observada no
+  `finally`.** Se o consumidor abandonasse o generator exatamente no tick em
+  que a task de poll do próximo update (#20) completou com erro — antes de o
+  loop chegar em `task.result()` — a exceção nunca era recuperada e o asyncio
+  logava "Task exception was never retrieved" na coleta da task pelo GC. O
+  `finally` agora chama `next_task.exception()` quando a task está concluída
+  e não cancelada, marcando-a como observada; task ainda pendente segue com
+  o cancel+await de antes.
 - **`ToolAgent.astream`: drenagem AO VIVO do `ReasoningChannel` durante o nó
   de tools (#20).** Reasoning emitido de DENTRO de uma tool (ex.: um agente
   aninhado exposto como especialista, chamando `emit_reasoning` para labels

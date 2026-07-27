@@ -43,6 +43,7 @@ from tests.test_reflective_patch import make_patch_reflective
 
 def make_timeout_worker(name: str, stream_answers: list[str], *,
                         invoke_raises: bool = False,
+                        stream_raises: bool = False,
                         max_execution_time: int = 42):
     """Concrete Agent shaped like a real ToolAgent worker for the purpose of
     these tests: it exposes ``timeout_message``/``max_execution_time`` (the
@@ -50,9 +51,11 @@ def make_timeout_worker(name: str, stream_answers: list[str], *,
     scripted stream()/astream() content plus invoke()/ainvoke() that can raise
     ``AixonError`` — reproducing a worker blowing its OWN deadline (or hitting
     its recursion limit) on the patch-mode retry's ``invoke``/``ainvoke``
-    call. ``stream_answers`` is consumed one entry per stream()/astream() call
-    (the last entry repeats). Returns (agent, calls) where ``calls`` counts
-    invocations per method name."""
+    call. ``stream_raises`` makes stream()/astream() themselves raise on
+    iteration (a round-1 failure: recursion limit / deadline before ANY
+    candidate). ``stream_answers`` is consumed one entry per stream()/astream()
+    call (the last entry repeats). Returns (agent, calls) where ``calls``
+    counts invocations per method name."""
     from aixon.agent import Agent
     from aixon.exceptions import AixonError
     from aixon.registry import get_registry
@@ -65,10 +68,23 @@ def make_timeout_worker(name: str, stream_answers: list[str], *,
         return stream_answers[i]
 
     def stream(self, messages: list[Message]):
+        # A generator: the raise fires on FIRST iteration — i.e. inside
+        # ReflectiveAgent._stream's try block, like a real ToolAgent whose
+        # graph blows the recursion limit mid-stream.
+        if stream_raises:
+            raise AixonError(
+                f"agent '{name}' hit its iteration limit (max_iterations=15) "
+                f"without producing a final answer."
+            )
         yield Chunk(content=_next("stream"))
         yield Chunk(done=True)
 
     async def astream(self, messages: list[Message]):
+        if stream_raises:
+            raise AixonError(
+                f"agent '{name}' hit its iteration limit (max_iterations=15) "
+                f"without producing a final answer."
+            )
         yield Chunk(content=_next("astream"))
         yield Chunk(done=True)
 
@@ -171,3 +187,40 @@ def test_astream_patch_retry_worker_ainvoke_raises_does_not_crash():
     assert calls["astream"] == 1
     assert calls["ainvoke"] == 1
     assert r.judge_llm.chat_model._idx == 1
+
+
+# ── (1c) round 1: the FIRST worker call raises — no candidate answer yet ────
+# The except-AixonError shield also covers the initial call; falling back to
+# `answer` there would emit Chunk(content="") + done — an EMPTY final answer,
+# the mute death #19 exists to eliminate, reopened via Reflective. The stream
+# must instead close with an honest non-empty message derived from the error.
+
+def test_stream_worker_raises_on_round_one_emits_honest_message():
+    worker, _ = make_timeout_worker("tow3", ["nunca usado"], stream_raises=True)
+    r = make_reflective("toref3", worker, ["APROVADO"], rounds=3)
+
+    chunks = list(r.stream(USER))  # must not raise AixonError
+
+    content = "".join(c.content or "" for c in chunks)
+    assert "falhou antes de produzir" in content
+    assert "iteration limit" in content
+    assert content != ""
+    assert chunks[-1].done is True
+    assert r.judge_llm.chat_model._idx == 0    # nada julgado — não houve resposta
+
+
+def test_astream_worker_raises_on_round_one_emits_honest_message():
+    worker, _ = make_timeout_worker("tow3a", ["nunca usado"], stream_raises=True)
+    r = make_reflective("toref3a", worker, ["APROVADO"], rounds=3)
+
+    async def run():
+        return [c async for c in r.astream(USER)]
+
+    chunks = asyncio.run(run())  # must not raise AixonError
+
+    content = "".join(c.content or "" for c in chunks)
+    assert "falhou antes de produzir" in content
+    assert "iteration limit" in content
+    assert content != ""
+    assert chunks[-1].done is True
+    assert r.judge_llm.chat_model._idx == 0

@@ -249,15 +249,31 @@ class ReflectiveAgent(Agent, abstract=True):
         seconds = getattr(self._worker, "max_execution_time", 0)
         return answer.content == tm.format(seconds=seconds)
 
-    def _timeout_exhausted_chunks(self, answer: Message) -> list[Chunk]:
-        """Chunks emitted when a retry/patch call into the worker raises
-        ``AixonError`` mid-loop (the worker blew its OWN deadline again, or
-        hit LangGraph's recursion limit — pre-existing, also reachable via
-        retry): fall back to the last judged *answer* instead of letting the
-        exception crash the stream, per this module's precept that a quality
-        shortfall must not crash a run that produced an answer."""
+    def _timeout_exhausted_chunks(self, answer: Message,
+                                  exc: AixonError) -> list[Chunk]:
+        """Chunks emitted when a worker call raises ``AixonError`` mid-loop
+        (the worker blew its OWN deadline again on a retry, or hit LangGraph's
+        recursion limit — reachable from round 1 too): fall back to the last
+        judged *answer* instead of letting the exception crash the stream, per
+        this module's precept that a quality shortfall must not crash a run
+        that produced an answer.
+
+        When there IS no answer yet (the round-1 worker call itself raised —
+        ``answer.content == ""``), falling back would emit an EMPTY content:
+        the mute death #19 exists to eliminate, reopened via Reflective. In
+        that case the content is an honest message derived from *exc* instead
+        (truncated at ~300 chars: the run already failed; a wall of provider
+        text helps no one)."""
+        if answer.content:
+            content = answer.content
+        else:
+            reason = str(exc)
+            if len(reason) > 300:
+                reason = reason[:300] + "…"
+            content = ("O agente interno falhou antes de produzir uma "
+                       f"resposta: {reason}")
         return [Chunk(reasoning=self.exhausted_label + "\n"),
-                Chunk(content=answer.content),
+                Chunk(content=content),
                 Chunk(done=True)]
 
     def _retry_messages(self, messages: list[Message], answer: Message,
@@ -454,12 +470,13 @@ class ReflectiveAgent(Agent, abstract=True):
                                 parts.append(chunk.content)
                             if chunk.tool_calls:
                                 worker_tool_calls = chunk.tool_calls
-                except AixonError:
+                except AixonError as exc:
                     # (#19/#22-sweep) the worker blew ITS OWN deadline again
                     # (or hit its recursion limit) on a retry round — `answer`
                     # here still holds the previous round's (rejected)
-                    # candidate, or "" on round 1; either way, do not crash.
-                    for c in self._timeout_exhausted_chunks(answer):
+                    # candidate, or "" on round 1 (then the helper derives an
+                    # honest message from exc); either way, do not crash.
+                    for c in self._timeout_exhausted_chunks(answer, exc):
                         yield c
                     return
                 answer = Message(role="assistant", content="".join(parts),
@@ -502,7 +519,7 @@ class ReflectiveAgent(Agent, abstract=True):
             if self.revision_mode == "patch" and answer.content:
                 try:
                     pmsgs, applied_msg, _ = self._patch_round_sync(msgs, answer, verdict)
-                except AixonError:
+                except AixonError as exc:
                     # (#19/#22-sweep) the patch-mode retry calls the worker
                     # via invoke() — a branch that was previously unreachable
                     # from a timed-out worker only because the timeout answer
@@ -511,7 +528,7 @@ class ReflectiveAgent(Agent, abstract=True):
                     # the worker's invoke() can raise AixonError (its own
                     # deadline, or the recursion limit) on the 2nd overrun.
                     # `answer` is still this round's (rejected) candidate.
-                    for c in self._timeout_exhausted_chunks(answer):
+                    for c in self._timeout_exhausted_chunks(answer, exc):
                         yield c
                     return
                 if applied_msg is not None:
@@ -622,10 +639,11 @@ class ReflectiveAgent(Agent, abstract=True):
                                 parts.append(chunk.content)
                             if chunk.tool_calls:
                                 worker_tool_calls = chunk.tool_calls
-                except AixonError:
+                except AixonError as exc:
                     # See _stream(): the worker blew its own deadline again
-                    # (or hit its recursion limit) on a retry round.
-                    for c in self._timeout_exhausted_chunks(answer):
+                    # (or hit its recursion limit) on a retry round; on round
+                    # 1 the helper derives an honest message from exc.
+                    for c in self._timeout_exhausted_chunks(answer, exc):
                         yield c
                     return
                 answer = Message(role="assistant", content="".join(parts),
@@ -664,10 +682,10 @@ class ReflectiveAgent(Agent, abstract=True):
                 try:
                     pmsgs, applied_msg, _ = await self._patch_round_async(
                         msgs, answer, verdict)
-                except AixonError:
+                except AixonError as exc:
                     # See _stream(): patch-mode retry's worker.ainvoke() can
                     # raise on the 2nd overrun (or the recursion limit).
-                    for c in self._timeout_exhausted_chunks(answer):
+                    for c in self._timeout_exhausted_chunks(answer, exc):
                         yield c
                     return
                 if applied_msg is not None:
