@@ -6,6 +6,8 @@ from aixon.message import Message, Chunk
 
 
 def _concrete(name_cls, reply, **attrs):
+    # stream() mirrors invoke()'s content (#22: as_tool now drives the
+    # subagent through stream()/astream(), not invoke()/ainvoke()).
     return type(
         name_cls,
         (Agent,),
@@ -13,7 +15,9 @@ def _concrete(name_cls, reply, **attrs):
             "invoke": lambda self, messages: Message(
                 role="assistant", content=reply + ":" + messages[-1].content
             ),
-            "stream": lambda self, m: iter([Chunk(done=True)]),
+            "stream": lambda self, m: iter([
+                Chunk(content=reply + ":" + m[-1].content), Chunk(done=True),
+            ]),
             **attrs,
         },
     )

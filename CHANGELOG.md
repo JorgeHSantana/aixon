@@ -5,6 +5,47 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23] - 2026-07-27
+
+### Added
+- **`Agent.as_tool(args_schema=None, render_input=None)` — briefing
+  estruturado de agente-como-tool (#23).** Sem `args_schema` (default), nada
+  muda: a tool continua expondo um único argumento de texto livre. Com
+  `args_schema` (o mesmo dict de JSON-Schema neutro que `AgentTool.args_schema`
+  já aceitava de tools MCP), a tool coercida expõe campos estruturados ao
+  modelo chamador (visíveis em `StructuredTool.args_schema`/`.args`) em vez de
+  um único blob de texto — ex.: `objetivo`/`contexto` em vez de esperar que o
+  texto livre do chamador mencione tudo. `func`/`coroutine` passam a receber
+  os campos do schema como `**kwargs`, renderizados a texto via
+  `render_input(kwargs) -> str` antes de seguir o mesmo caminho
+  `stream()`/`astream()` do #22 (streaming interno preservado). Default de
+  `render_input`: uma linha `"CAMPO: valor"` por kwarg, chave maiúscula, na
+  ordem de inserção, pulando campos `None`/`""`/`False`. Composição com
+  `audience="agent"` (#15): o sufixo é anexado DEPOIS da renderização — a
+  moldura envolve o briefing já pronto, não um campo cru.
+
+### Changed
+- **`Agent.as_tool()`: o `AgentTool` embrulhado agora roda por dentro do
+  `stream()`/`astream()` do agente, não de `invoke()`/`ainvoke()` (#22).**
+  Mesmo com o drain ao vivo da 0.1.22 (#20), um subagente aninhado via
+  `as_tool()` ficava mudo para o chamador durante TODA a sua execução —
+  `_run`/`_arun` chamavam `invoke`/`ainvoke`, cujos labels de tool só são
+  derivados pós-fato (das mensagens, depois que o run inteiro termina); nada
+  era emitido enquanto o subagente rodava, e o drain de 0,25s não tinha o que
+  drenar. Agora `_run`/`_arun` iteram `self.stream(...)`/`self.astream(...)`:
+  cada `Chunk.content` é acumulado no retorno (`"".join`, byte-idêntico ao
+  que `invoke()`/`ainvoke()` devolviam) e cada `Chunk.reasoning` não-vazio é
+  re-emitido AO VIVO no canal ATIVO de quem chamou a tool — os labels do
+  worker, do `ReflectiveAgent` (juiz/retries) etc. agora fluem em tempo real
+  por qualquer profundidade de aninhamento, sem mudar uma linha de aplicação.
+
+### Fixed
+- **`Agent.as_tool()`: o comportamento defensivo de `tool_calls` sem
+  `content` (#18c) é preservado no caminho `stream`/`astream` (#22).** Um
+  worker que surfaça uma chamada de ferramenta do CLIENTE sem texto
+  continua virando o texto explicativo + warning de log de antes — agora lido
+  de `Chunk.tool_calls` em vez de `Message.tool_calls`.
+
 ## [0.1.22] - 2026-07-27
 
 ### Fixed
