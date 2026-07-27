@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`Agent.as_tool()`: o `AgentTool` embrulhado agora roda por dentro do
+  `stream()`/`astream()` do agente, não de `invoke()`/`ainvoke()` (#22).**
+  Mesmo com o drain ao vivo da 0.1.22 (#20), um subagente aninhado via
+  `as_tool()` ficava mudo para o chamador durante TODA a sua execução —
+  `_run`/`_arun` chamavam `invoke`/`ainvoke`, cujos labels de tool só são
+  derivados pós-fato (das mensagens, depois que o run inteiro termina); nada
+  era emitido enquanto o subagente rodava, e o drain de 0,25s não tinha o que
+  drenar. Agora `_run`/`_arun` iteram `self.stream(...)`/`self.astream(...)`:
+  cada `Chunk.content` é acumulado no retorno (`"".join`, byte-idêntico ao
+  que `invoke()`/`ainvoke()` devolviam) e cada `Chunk.reasoning` não-vazio é
+  re-emitido AO VIVO no canal ATIVO de quem chamou a tool — os labels do
+  worker, do `ReflectiveAgent` (juiz/retries) etc. agora fluem em tempo real
+  por qualquer profundidade de aninhamento, sem mudar uma linha de aplicação.
+
+### Fixed
+- **`Agent.as_tool()`: o comportamento defensivo de `tool_calls` sem
+  `content` (#18c) é preservado no caminho `stream`/`astream` (#22).** Um
+  worker que surfaça uma chamada de ferramenta do CLIENTE sem texto
+  continua virando o texto explicativo + warning de log de antes — agora lido
+  de `Chunk.tool_calls` em vez de `Message.tool_calls`.
+
 ## [0.1.22] - 2026-07-27
 
 ### Fixed

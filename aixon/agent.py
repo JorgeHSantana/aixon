@@ -13,6 +13,7 @@ from typing import AsyncIterator, Awaitable, Callable, Iterator
 from aixon.exceptions import AixonError, NamingError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
+from aixon.reasoning import current_channel
 from aixon.registry import get_registry
 
 _log = Logger("aixon.agent")
@@ -242,7 +243,21 @@ class Agent(ABC):
         cache (see ``aixon.toolcache``).
         ``audience="agent"`` (#15) appends the subagent frame to each call's
         text, instructing the callee to answer with dense facts for another
-        agent instead of human-facing prose."""
+        agent instead of human-facing prose.
+
+        #22: the wrapped agent is driven through ``stream()``/``astream()``
+        (never ``invoke``/``ainvoke``) so its reasoning — tool-call labels,
+        judge lines, retries, whatever a nested ``emit_reasoning`` produces —
+        flows LIVE into the CALLER's channel instead of surfacing only after
+        the whole subagent run completes. That is what lets the #20 drain
+        actually have something to drain while a slow nested tool is still
+        running: without this, a subagent buried a few levels deep left the
+        UI stuck on "running a specialist..." for its entire wall-clock time.
+        The final string returned is unchanged (all yielded ``Chunk.content``
+        joined) and the tool_calls-without-content defensive path (a worker
+        surfacing a CLIENT tool call, #18c) is preserved, now read off
+        ``Chunk.tool_calls`` instead of ``Message.tool_calls``.
+        """
         if audience not in ("human", "agent"):
             raise AixonError(
                 f"as_tool(audience={audience!r}): use 'human' (default) ou "
@@ -251,16 +266,52 @@ class Agent(ABC):
         suffix = _AGENT_AUDIENCE_SUFFIX if audience == "agent" else ""
 
         def _run(text: str) -> str:
-            result = self.invoke([Message(role="user", content=text + suffix)])
-            if result.tool_calls and not result.content:
-                return _client_tool_leak_text(self.name, result.tool_calls)
-            return result.content
+            # The parent's channel MUST be captured BEFORE iterating
+            # self.stream(): stream() opens its OWN `with reasoning_channel()`
+            # for the lifetime of its generator, which — because a plain
+            # generator shares the caller's execution context across `yield`
+            # (no isolation, unlike a Task) — SHADOWS the ContextVar for as
+            # long as this loop is pulling chunks from it. Reading
+            # `current_channel()` (or calling the free `emit_reasoning()`)
+            # INSIDE the loop body would therefore see the CHILD's own
+            # channel, not the parent's, and any "re-emit" would silently
+            # loop back into the (already-drained) child channel instead of
+            # reaching the parent — never surfacing, and on a long-running
+            # nested agent, compounding as the child's own next drain tick
+            # picks the re-appended line back up. Capturing the reference
+            # once, up front, and calling `.emit()` on that object directly
+            # sidesteps the shadow entirely.
+            parent_channel = current_channel()
+            parts: list[str] = []
+            tool_calls: list[dict] = []
+            for ch in self.stream([Message(role="user", content=text + suffix)]):
+                if ch.reasoning and parent_channel is not None:
+                    parent_channel.emit(ch.reasoning.rstrip("\n"))
+                if ch.content:
+                    parts.append(ch.content)
+                if ch.tool_calls:
+                    tool_calls.extend(ch.tool_calls)
+            content = "".join(parts)
+            if tool_calls and not content:
+                return _client_tool_leak_text(self.name, tool_calls)
+            return content
 
         async def _arun(text: str) -> str:
-            result = await self.ainvoke([Message(role="user", content=text + suffix)])
-            if result.tool_calls and not result.content:
-                return _client_tool_leak_text(self.name, result.tool_calls)
-            return result.content
+            # Same capture-before-iterating rule as _run — see its comment.
+            parent_channel = current_channel()
+            parts: list[str] = []
+            tool_calls: list[dict] = []
+            async for ch in self.astream([Message(role="user", content=text + suffix)]):
+                if ch.reasoning and parent_channel is not None:
+                    parent_channel.emit(ch.reasoning.rstrip("\n"))
+                if ch.content:
+                    parts.append(ch.content)
+                if ch.tool_calls:
+                    tool_calls.extend(ch.tool_calls)
+            content = "".join(parts)
+            if tool_calls and not content:
+                return _client_tool_leak_text(self.name, tool_calls)
+            return content
 
         return AgentTool(
             name=name or self.name,

@@ -715,13 +715,28 @@ tool = agent.as_tool(name="planner", description="Decomposes goals")
 tool = agent.as_tool(audience="agent")  # #15 — see "Nesting agents as tools"
 ```
 
-`func` wraps `agent.invoke`: each call creates a fresh
-`[Message(role="user", content=text)]` — the agent's state never leaks between
-tool calls. `as_tool()` also sets `coroutine` (wrapping `ainvoke`), so the tool
-is **dual**: `coerce_tools` registers both, and the tool runs on the sync
-(`invoke` → `func`) and async (`ainvoke` → `coroutine`) paths. The same
+`func` drives `agent.stream()` (and `coroutine` drives `agent.astream()`, #22)
+to completion: each call creates a fresh `[Message(role="user",
+content=text)]` — the agent's state never leaks between tool calls. Every
+yielded `Chunk.content` is joined into the returned string (byte-identical to
+what `invoke()`/`ainvoke()` would have returned), and every yielded
+`Chunk.reasoning` is re-emitted **live**, right away, onto the CALLER's active
+`ReasoningChannel` — not buffered until the whole subagent run finishes. That
+means a nested agent's tool-call labels, judge lines and retries flow through
+the parent's stream in real time, so the #20 drain has something to drain
+while a slow nested tool is still running instead of the caller looking stuck
+for the subagent's entire wall-clock time. `as_tool()` sets both `func` and
+`coroutine`: `coerce_tools` registers them dual, and the tool runs on the sync
+(`invoke` → `func`) and async (`ainvoke` → `coroutine`) parent paths. The same
 `AgentTool` shape is returned by `Retriever.as_tool()`, so
 `ToolAgent.tools` handles both uniformly.
+
+A cache hit (`aixon.toolcache`, `memoize=True` default) is served by
+`coerce_tools`' wrapper before `func`/`coroutine` ever run — so a memoized
+repeat call produces **no** reasoning at all (the subagent's `stream()` never
+executes a second time). That silence is correct: re-running for a result
+you're about to throw away would burn the wall-clock time this feature exists
+to avoid surfacing.
 
 `audience` (default `"human"`, zero behavior change) controls the framing of
 the text handed to the callee: `"agent"` appends the subagent frame
