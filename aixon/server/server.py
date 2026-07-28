@@ -23,6 +23,7 @@ from typing import Optional
 
 from aixon.exceptions import AgentNotFoundError, AixonError
 from aixon.logging import Logger
+from aixon.observability import observe_request, request_identity
 from aixon.registry import get_registry
 from aixon.runtime import client_tools_scope, generation_params, tool_choice_scope
 from aixon.toolcache import tool_call_cache
@@ -276,6 +277,12 @@ class Server:
 
             tap = _tap_enabled(agent.name)
 
+            # Langfuse (#26, opcional): identidade do trace vinda dos headers
+            # que o frontend encaminha (Open WebUI:
+            # ENABLE_FORWARD_USER_INFO_HEADERS). Sem envs do Langfuse,
+            # observe_request é um no-op de custo zero.
+            ident = request_identity(request.headers)
+
             if pr.stream:
                 session = adapter.open_stream(model=model, request=pr)
 
@@ -293,13 +300,18 @@ class Server:
                         return line
 
                     try:
-                        with generation_params(pr.params), client_tools_scope(pr.tools), \
+                        with observe_request(
+                            agent.name, user_id=ident["user_id"],
+                            session_id=ident["session_id"],
+                            metadata={"adapter": adapter.name, "stream": True},
+                        ), generation_params(pr.params), \
+                                client_tools_scope(pr.tools), \
                                 tool_choice_scope(pr.tool_choice), tool_call_cache():
                             async for chunk in agent.astream(pr.messages):
                                 line = session.chunk(chunk)
                                 if line:
                                     yield emit(line)
-                        tail = session.finish()
+                            tail = session.finish()
                         if tail:
                             yield emit(tail)
                     except Exception as exc:
@@ -326,7 +338,11 @@ class Server:
             # never blocks the event loop. Request generation params are active
             # for the duration of the call via the runtime contextvar.
             try:
-                with generation_params(pr.params), client_tools_scope(pr.tools), \
+                with observe_request(
+                    agent.name, user_id=ident["user_id"],
+                    session_id=ident["session_id"],
+                    metadata={"adapter": adapter.name, "stream": False},
+                ), generation_params(pr.params), client_tools_scope(pr.tools), \
                         tool_choice_scope(pr.tool_choice), tool_call_cache():
                     message = await agent.ainvoke(pr.messages)
             except Exception as exc:
