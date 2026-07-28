@@ -122,7 +122,7 @@ def current_tool_choice():
 @contextmanager
 def tool_choice_scope(value) -> Iterator:
     """Publish (or clear, with ``None``) the client's ``tool_choice`` for the
-    duration of the block. Mirrors ``client_tools``'s scope pattern."""
+    duration of the block. Mirrors ``client_tools_scope``'s pattern."""
     token = _tool_choice.set(copy.deepcopy(value) if value is not None else None)
     try:
         yield value
