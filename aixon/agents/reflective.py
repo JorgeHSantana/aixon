@@ -253,7 +253,12 @@ class ReflectiveAgent(Agent, abstract=True):
         is not a judgeable answer, and retrying it would re-run the same
         (already slow) worker for another full deadline. Only ToolAgent
         workers expose ``timeout_message``/``max_execution_time``; any other
-        worker type never matches."""
+        worker type never matches.
+
+        Checked in ``_stream``/``_astream`` ONLY: a timeout pass-through is a
+        streaming-loop artifact — the worker's ``invoke``/``ainvoke`` raise
+        ``AixonError`` on deadline instead, so ``_invoke``/``_ainvoke`` can
+        never receive this text and intentionally have no check."""
         tm = getattr(self._worker, "timeout_message", None)
         if tm is None:
             return False
