@@ -9,7 +9,12 @@ The neutral boundary holds: the worker is called through ``Agent.invoke`` and
 the judge through ``LLM.complete`` — Message/Chunk only, no provider types.
 Exhausting the rounds is NOT an error: the last attempt is returned and the
 ``exhausted_label`` is emitted on the reasoning channel (neutral-error precept:
-a quality shortfall must not crash a run that produced an answer)."""
+a quality shortfall must not crash a run that produced an answer). The same
+precept covers the judge itself (#24): any exception raised by
+``judge_llm.complete``/``acomplete`` — in any round, including retries — is
+logged as a warning and swallowed; the current worker answer is delivered
+unreviewed, with ``judge_unavailable_label`` emitted on the reasoning
+channel. A judge outage must not crash a run that produced an answer either."""
 
 from __future__ import annotations
 
@@ -129,6 +134,12 @@ class ReflectiveAgent(Agent, abstract=True):
     patch_fallback_label: str = (
         "Correções pontuais não aplicáveis — regenerando a resposta completa…"
     )
+    # #24: judge_llm.complete/acomplete raised (any round, including a retry
+    # round) — the current worker answer is delivered unreviewed instead of
+    # crashing the run. See _judge_verdict_sync/_judge_verdict_async.
+    judge_unavailable_label: str = (
+        "Revisão indisponível — entregando sem conferência."
+    )
 
     # ----- validation (runs BEFORE registration; no registry ghosts) -------
 
@@ -242,7 +253,12 @@ class ReflectiveAgent(Agent, abstract=True):
         is not a judgeable answer, and retrying it would re-run the same
         (already slow) worker for another full deadline. Only ToolAgent
         workers expose ``timeout_message``/``max_execution_time``; any other
-        worker type never matches."""
+        worker type never matches.
+
+        Checked in ``_stream``/``_astream`` ONLY: a timeout pass-through is a
+        streaming-loop artifact — the worker's ``invoke``/``ainvoke`` raise
+        ``AixonError`` on deadline instead, so ``_invoke``/``_ainvoke`` can
+        never receive this text and intentionally have no check."""
         tm = getattr(self._worker, "timeout_message", None)
         if tm is None:
             return False
@@ -276,6 +292,14 @@ class ReflectiveAgent(Agent, abstract=True):
                 Chunk(content=content),
                 Chunk(done=True)]
 
+    def _judge_unavailable(self, exc: Exception) -> None:
+        """#24: log the judge-outage warning — shared text for all 4 call
+        paths so the message a human greps for never drifts between them."""
+        _log.warning(
+            f"reflective '{self.name}': judge unavailable ({exc}) — "
+            f"delivering unreviewed answer"
+        )
+
     def _retry_messages(self, messages: list[Message], answer: Message,
                         critique: str) -> list[Message]:
         # New list — never mutate the caller's (same precept as _with_prompt).
@@ -291,7 +315,11 @@ class ReflectiveAgent(Agent, abstract=True):
                  patch_fallback: int, outcome: str) -> None:
         """One structured line per run (#12) — grep-friendly so the patch
         fallback rate is a log query away: fallback_rate = sum(patch_fallback)
-        / (sum(patch_applied) + sum(patch_fallback)) grouped by agent."""
+        / (sum(patch_applied) + sum(patch_fallback)) grouped by agent.
+
+        ``outcome`` is one of "approved", "exhausted", or "judge_error" (#24:
+        the judge raised — the run ends there, so no later approved/exhausted
+        line follows; still exactly one line per run)."""
         _log.info(
             f"reflective_run agent={self.name} rounds={rounds} "
             f"patch_applied={patch_applied} patch_fallback={patch_fallback} "
@@ -389,7 +417,19 @@ class ReflectiveAgent(Agent, abstract=True):
         patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
-            verdict_msg = self.judge_llm.complete(self._judge_messages(messages, answer))
+            try:
+                verdict_msg = self.judge_llm.complete(
+                    self._judge_messages(messages, answer))
+            except Exception as exc:
+                # #24: the judge itself is unavailable (any round, including
+                # a retry round) — deliver the current worker answer
+                # unreviewed rather than crash a run that produced one.
+                self._judge_unavailable(exc)
+                emit_reasoning(self.judge_unavailable_label)
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback,
+                              outcome="judge_error")
+                return dataclasses.replace(answer, usage=total_usage)
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
             if self._approved(verdict):
@@ -500,9 +540,20 @@ class ReflectiveAgent(Agent, abstract=True):
                 yield Chunk(done=True)
                 return
             yield Chunk(reasoning=self.judge_label + "\n")
-            verdict = self.judge_llm.complete(
-                self._judge_messages(messages, answer)
-            ).content
+            try:
+                verdict = self.judge_llm.complete(
+                    self._judge_messages(messages, answer)
+                ).content
+            except Exception as exc:
+                # #24: see _invoke() — same outage, deliver unreviewed.
+                self._judge_unavailable(exc)
+                yield Chunk(reasoning=self.judge_unavailable_label + "\n")
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback,
+                              outcome="judge_error")
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
             if self._approved(verdict):
                 self._log_run(rounds=round_, patch_applied=patch_applied,
                               patch_fallback=patch_fallback, outcome="approved")
@@ -570,9 +621,18 @@ class ReflectiveAgent(Agent, abstract=True):
         patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
-            verdict_msg = await self.judge_llm.acomplete(
-                self._judge_messages(messages, answer)
-            )
+            try:
+                verdict_msg = await self.judge_llm.acomplete(
+                    self._judge_messages(messages, answer)
+                )
+            except Exception as exc:
+                # #24: see _invoke() — same outage, deliver unreviewed.
+                self._judge_unavailable(exc)
+                emit_reasoning(self.judge_unavailable_label)
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback,
+                              outcome="judge_error")
+                return dataclasses.replace(answer, usage=total_usage)
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
             if self._approved(verdict):
@@ -664,9 +724,21 @@ class ReflectiveAgent(Agent, abstract=True):
                 yield Chunk(done=True)
                 return
             yield Chunk(reasoning=self.judge_label + "\n")
-            verdict = (
-                await self.judge_llm.acomplete(self._judge_messages(messages, answer))
-            ).content
+            try:
+                verdict = (
+                    await self.judge_llm.acomplete(
+                        self._judge_messages(messages, answer))
+                ).content
+            except Exception as exc:
+                # #24: see _invoke() — same outage, deliver unreviewed.
+                self._judge_unavailable(exc)
+                yield Chunk(reasoning=self.judge_unavailable_label + "\n")
+                self._log_run(rounds=round_, patch_applied=patch_applied,
+                              patch_fallback=patch_fallback,
+                              outcome="judge_error")
+                yield Chunk(content=answer.content)
+                yield Chunk(done=True)
+                return
             if self._approved(verdict):
                 self._log_run(rounds=round_, patch_applied=patch_applied,
                               patch_fallback=patch_fallback, outcome="approved")

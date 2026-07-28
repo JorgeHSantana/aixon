@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.25] - 2026-07-28
+
+### Added
+- **`ReflectiveAgent`: juiz indisponível degrada graciosamente — entrega a
+  resposta do worker sem revisão (#24).** Qualquer exceção de
+  `judge_llm.complete`/`acomplete` — em qualquer rodada, inclusive numa
+  rodada de retry — deixou de derrubar o run (incidente real: créditos
+  esgotados do juiz transformavam a tool inteira em `TOOL ERROR`,
+  descartando uma resposta saudável do worker). Agora a resposta ATUAL do
+  worker é entregue sem revisão nos 4 caminhos neutros (`_invoke`/`_stream`/
+  `_ainvoke`/`_astream`), com `warning` no logger `aixon.reflective`, o novo
+  label `judge_unavailable_label` emitido no canal de reasoning, e
+  `reflective_run` logando `outcome=judge_error` (linha única por run, #12).
+  Sem mudança de comportamento quando o juiz funciona.
+
 ## [0.1.24] - 2026-07-27
 
 ### Fixed
