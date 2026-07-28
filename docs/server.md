@@ -200,13 +200,13 @@ Full OpenAI-compatible wire format. Served routes:
 > **Client tools.** Agentic clients (editors, IDEs) may send OpenAI `tools`
 > (and optionally `tool_choice`) on the request; the adapter extracts them
 > into `ParsedRequest.tools`/`ParsedRequest.tool_choice` and the Server
-> publishes them per request via `aixon.runtime.client_tools` /
+> publishes them per request via `aixon.runtime.client_tools_scope` /
 > `aixon.runtime.tool_choice_scope`. `tool_choice` **requires** `tools` on the
 > same request — sending it alone is rejected with `400` (a client asking the
 > model to pick a tool that doesn't exist is a request error, not a silent
 > no-op). Two opt-in ways for an agent to participate:
 >
-> - **Raw passthrough** — `LLMAgent(client_tools=True)` (#18a) or any agent
+> - **Raw passthrough** — `LLMAgent(client_tools="passthrough")` (#18a) or any agent
 >   that reads `aixon.runtime.current_client_tools()` /
 >   `current_tool_choice()` directly and decides for itself when to answer
 >   with `Message.tool_calls` (or `Chunk.tool_calls` on a stream).

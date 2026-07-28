@@ -37,7 +37,7 @@ class ParsedRequest:
       {"name", "description", "parameters"}}``) regardless of which adapter
       parsed the request — e.g. AnthropicAdapter converts its
       ``{name, description, input_schema}`` defs before returning this — or
-      ``None``. The Server publishes them via ``aixon.runtime.client_tools``
+      ``None``. The Server publishes them via ``aixon.runtime.client_tools_scope``
       so agents that support client-executed tools can read a single dialect
       via ``current_client_tools()``; agents that don't simply ignore.
     - ``tool_choice``: the client's wire-shaped ``tool_choice`` (#18b), or

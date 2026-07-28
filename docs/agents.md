@@ -54,7 +54,7 @@ class PlannerAgent(LLMAgent):
 |---|---|---|---|
 | `llm` | `LLM` | **Yes** | The language model. Missing `llm` on a concrete subclass raises `AixonError` at import time. |
 | `prompt` | `str` | No | System prompt prepended to every `invoke`/`stream` call. |
-| `client_tools` | `bool` | No (default `False`) | Raw passthrough (#18a): when `True`, forwards the request's `aixon.runtime.current_client_tools()`/`current_tool_choice()` straight to `LLM.complete`/`acomplete`/`stream`/`astream` for all 4 methods — the agent itself decides nothing, it just gives the model the client's tools. No tools declared on the request → no-op. See [server.md](server.md#openaiadapter) ("Client tools") for the request/response shape and the first-class `ToolAgent(client_tools="merge")` alternative below. |
+| `client_tools` | `str` | No (default `"ignore"`) | Raw passthrough (#18a, unified with `ToolAgent`'s vocabulary/default by #25): `"passthrough"` forwards the request's `aixon.runtime.current_client_tools()`/`current_tool_choice()` straight to `LLM.complete`/`acomplete`/`stream`/`astream` for all 4 methods — the agent itself decides nothing, it just gives the model the client's tools. `"ignore"` (default) → no-op, as does `"passthrough"` when no tools are declared on the request. A `bool` raises `AixonError` at registration with a migration message (`False`→`"ignore"`, `True`→`"passthrough"`). See [server.md](server.md#openaiadapter) ("Client tools") for the request/response shape and the first-class `ToolAgent(client_tools="merge")` alternative below. |
 
 **How it works:** `invoke` prepends the system prompt (if any) as a
 `Message(role="system", content=self.prompt)` and delegates to
@@ -438,7 +438,7 @@ class GuardedAgent(ToolAgent):
 
 ### Client tools mesclados no loop (#18c)
 
-`LLMAgent(client_tools=True)` (acima) repassa os tools do cliente crus — o
+`LLMAgent(client_tools="passthrough")` (acima) repassa os tools do cliente crus — o
 agente decide sozinho quando responder com `tool_calls`. `ToolAgent` tem um
 caminho de primeira classe: `client_tools="merge"` (ou `"replace"`) injeta os
 defs do cliente como tools de VERDADE no mesmo loop de tool-calling das tools

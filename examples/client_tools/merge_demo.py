@@ -24,7 +24,7 @@ result_do_cliente`` end to end, but calls ``ToolAgent.invoke`` directly (no
     PYTHONPATH=../.. python merge_demo.py
 
 See ``examples/client_tools/main.py`` for the raw-passthrough alternative
-(``LLMAgent(client_tools=True)``, #18a) and the README's "Modo merge (#18c)"
+(``LLMAgent(client_tools="passthrough")``, #18a) and the README's "Modo merge (#18c)"
 section for the request/response diagram.
 """
 
@@ -39,7 +39,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from aixon import LLM, ToolAgent
 from aixon.message import Message
 from aixon.providers.base import Provider, register_provider
-from aixon.runtime import client_tools
+from aixon.runtime import client_tools_scope
 
 # ── scripted driver model (offline) ──────────────────────────────────────────
 
@@ -131,7 +131,7 @@ def main() -> None:
     print(f"> {pergunta[0].content}\n")
 
     print("== request 1: editor -> agent (com tools=[inserir_no_documento]) ==")
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         resposta1 = RedatorAgent().invoke(pergunta)
     print("role:", resposta1.role)
     print("tool_calls:", resposta1.tool_calls)
@@ -148,7 +148,7 @@ def main() -> None:
         Message(role="assistant", content="", tool_calls=[call]),
         Message(role="tool", content=resultado, tool_call_id=call["id"]),
     ]
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         resposta2 = RedatorAgent().invoke(historico)
     print("role:", resposta2.role)
     print("content:", resposta2.content)
