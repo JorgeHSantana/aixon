@@ -595,6 +595,7 @@ class GerenteRevisadoAgent(ReflectiveAgent):
 | `retry_label` | `str` | No | Reasoning-channel label emitted before a retry. `{round}`/`{max}` are interpolated. Default: `"Refinando a resposta (rodada {round}/{max})…"`. |
 | `exhausted_label` | `str` | No | Reasoning-channel label emitted when `max_rounds` is reached without approval. Default: `"Rodadas esgotadas — entregando a melhor tentativa."`. |
 | `patch_fallback_label` | `str` | No | Label emitted when a `"patch"` retry didn't apply and the round falls back to full regeneration. |
+| `judge_unavailable_label` | `str` | No | Label emitted when `judge_llm` raises (see "Judge outage" below). Default: `"Revisão indisponível — entregando sem conferência."`. |
 
 Missing `agent`/`judge_llm`, an empty `judge_rubric`, or `max_rounds < 1` on a
 concrete subclass raises `AixonError` at import time — before registration
@@ -696,6 +697,18 @@ métrica decide a promoção de `patch` a default numa futura 0.2.0.
 
 Runs pulados pelo gate `should_judge` (#14) não geram linha `reflective_run` —
 não houve loop de julgamento a medir.
+
+### Judge indisponível degrada graciosamente (#24)
+
+Qualquer exceção levantada por `judge_llm.complete`/`acomplete` — em
+qualquer rodada, inclusive numa rodada de retry — não derruba o run: a
+resposta ATUAL do worker (a que estava sendo avaliada quando o juiz falhou)
+é entregue sem revisão, com `judge_unavailable_label` emitido no canal de
+reasoning e um `warning` no logger `aixon.reflective`. O `reflective_run`
+dessa execução loga `outcome=judge_error` (linha única por run, como os
+outros outcomes). Mesmo preceito do módulo: uma falha de qualidade — aqui, a
+própria avaliação de qualidade — não pode derrubar um run que já produziu
+uma resposta. Sem mudança de comportamento quando o juiz funciona.
 
 ---
 
