@@ -15,7 +15,7 @@ python main.py
 - **`ParsedRequest.tools`** — the OpenAI adapter extracts the client's tool
   definitions from the request body (they are transport, not a generation
   param).
-- **`LLMAgent(client_tools=True)`** (#18a) — the agent just sets the class
+- **`LLMAgent(client_tools="passthrough")`** (#18a) — the agent just sets the class
   attribute; `LLMAgent._client_bind` reads
   `aixon.runtime.current_client_tools()`/`current_tool_choice()` (same
   contextvar pattern as generation params) and forwards them to the LLM call,
@@ -42,7 +42,7 @@ finish_reason: stop
 answer: Done — the client reported the file was opened.
 ```
 
-`FileButlerAgent` is a plain `LLMAgent` with `client_tools = True`; the
+`FileButlerAgent` is a plain `LLMAgent` with `client_tools = "passthrough"`; the
 driving model (`ScriptedChatModel`) is scripted so the example is
 deterministic and offline. In a real deployment the same class attribute
 does the work with a real provider behind `LLM(...)` — no manual
@@ -50,7 +50,7 @@ does the work with a real provider behind `LLM(...)` — no manual
 
 ## Modo merge (#18c) — `ToolAgent(client_tools="merge")`
 
-`main.py` above shows the RAW passthrough (`LLMAgent(client_tools=True)`,
+`main.py` above shows the RAW passthrough (`LLMAgent(client_tools="passthrough")`,
 #18a): the agent itself decides when to answer with `tool_calls`. `ToolAgent`
 has a first-class alternative — `client_tools="merge"` (or `"replace"`) puts
 the client's declared tools in the SAME tool-calling loop as the agent's own
@@ -65,7 +65,7 @@ PYTHONPATH=../.. python merge_demo.py
 - An INTERNAL tool (`buscar_orcamento`) executes server-side inside the run,
   same as any normal `ToolAgent` tool call.
 - A CLIENT tool (`inserir_no_documento`, declared via
-  `aixon.runtime.client_tools(...)`, same contextvar the Server publishes
+  `aixon.runtime.client_tools_scope(...)`, same contextvar the Server publishes
   per request) ends the turn immediately — the run returns
   `Message(role="assistant", content="", tool_calls=[...])` instead of
   trying to execute it.

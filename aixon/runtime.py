@@ -88,8 +88,12 @@ def current_client_tools() -> list[dict]:
 
 
 @contextmanager
-def client_tools(tools: list[dict] | None) -> Iterator[list[dict]]:
-    """Publish the client's tool definitions for the duration of the block."""
+def client_tools_scope(tools: list[dict] | None) -> Iterator[list[dict]]:
+    """Publish the client's tool definitions for the duration of the block.
+
+    Named ``*_scope`` (#25) for consistency with ``tool_choice_scope``/
+    ``generation_params`` — renamed from ``client_tools`` (no back-compat
+    alias: internal-only usage, server.py + tests, pre-0.2.0)."""
     value = copy.deepcopy([t for t in tools if isinstance(t, dict)]) if tools else None
     token = _client_tools.set(value)
     try:
@@ -118,7 +122,7 @@ def current_tool_choice():
 @contextmanager
 def tool_choice_scope(value) -> Iterator:
     """Publish (or clear, with ``None``) the client's ``tool_choice`` for the
-    duration of the block. Mirrors ``client_tools``'s scope pattern."""
+    duration of the block. Mirrors ``client_tools_scope``'s pattern."""
     token = _tool_choice.set(copy.deepcopy(value) if value is not None else None)
     try:
         yield value

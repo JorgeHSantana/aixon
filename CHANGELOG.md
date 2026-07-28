@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.26] - 2026-07-28
+
+### Changed (BREAKING)
+- **`client_tools` unificado como `str` nos dois agentes + `aixon.runtime.client_tools_scope` (#25).**
+  Última janela barata antes do 0.2.0 (zero uso em produção ainda): a dívida
+  de API congelada desde a 0.1.21 — `LLMAgent.client_tools` era `bool` e
+  `ToolAgent.client_tools` era `str`, mesmo nome, tipos diferentes, e ainda
+  colidia de nome com o contextmanager `aixon.runtime.client_tools()` — foi
+  fechada em coordenada.
+  - `LLMAgent.client_tools` agora é `str = "ignore"` (era `bool = False`),
+    com o MESMO tipo/default/vocabulário coerente do `ToolAgent`:
+    `"ignore"` (default, ex-`False`) \| `"passthrough"` (ex-`True`). Um
+    `bool` passado a `client_tools` agora levanta `AixonError` NO REGISTRO
+    (`_validate_subclass`), citando os dois valores novos na mensagem de
+    migração — nunca mais um `True`/`False` silenciosamente tratado como
+    truthy/falsy. `ToolAgent.client_tools` não muda (`"ignore"` \| `"merge"`
+    \| `"replace"`, validação já existente desde #18c).
+  - `aixon.runtime.client_tools()` (o contextmanager que publica os
+    tool-defs do cliente por request) foi renomeado para
+    `client_tools_scope()` — consistente com `tool_choice_scope()`/
+    `generation_params()`. SEM alias de compatibilidade: uso interno só
+    (`server.py` + testes), então a troca é direta. `current_client_tools()`
+    (o getter) não muda de nome.
+  - Migração: `LLMAgent(client_tools=True)` → `LLMAgent(client_tools=
+    "passthrough")`; `LLMAgent(client_tools=False)` → remova o atributo ou
+    use `"ignore"` (default); `from aixon.runtime import client_tools` como
+    contextmanager → `client_tools_scope`.
+  - Atualizados: `aixon/agents/llm_agent.py`, `aixon/runtime.py`,
+    `aixon/server/server.py`, `aixon/server/protocol.py` (docstring),
+    `docs/agents.md`, `docs/server.md`, `RAG_KNOWLEDGE_BASE.md`,
+    `examples/client_tools/` (`main.py`, `merge_demo.py`, `README.md`), e
+    todos os testes que usavam o cm antigo ou `client_tools=True`.
+
 ## [0.1.25] - 2026-07-28
 
 ### Added

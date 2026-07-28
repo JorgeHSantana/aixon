@@ -4,7 +4,7 @@ Editors and IDEs (e.g. ONLYOFFICE's AI agent) POST ``tools`` on the request
 and execute the ``tool_calls`` the model returns — the OpenAI function-calling
 handshake, with execution on the CLIENT side. This example runs that whole
 loop in-process, with **no API key and no network call**, using the
-first-class opt-in for this pattern: ``LLMAgent(client_tools=True)`` (#18a,
+first-class opt-in for this pattern: ``LLMAgent(client_tools="passthrough")`` (#18a,
 see ``aixon/agents/llm_agent.py``). The agent does NOT read
 ``current_client_tools()`` itself anymore — it just sets the class attribute
 and the base class binds whatever the client declared onto the (here,
@@ -42,7 +42,7 @@ from aixon.server.server import Server
 
 # ── scripted driver model (offline) ──────────────────────────────────────────
 # A real deployment would put a real provider (OpenAI, Anthropic, ...) behind
-# this LLM; what this example is actually about is LLMAgent(client_tools=True)
+# this LLM; what this example is actually about is LLMAgent(client_tools="passthrough")
 # itself — the routing logic in aixon/agents/llm_agent.py is what matters.
 
 
@@ -91,7 +91,7 @@ class FileButlerAgent(LLMAgent):
     name = "FileButler"
     description = "Opens the file the user asks for using the client's own tools."
     llm = llm
-    client_tools = True  # #18a: bind current_client_tools()/current_tool_choice() raw
+    client_tools = "passthrough"  # #18a: bind current_client_tools()/current_tool_choice() raw
 
 
 # ── the "editor" (client) side ───────────────────────────────────────────────

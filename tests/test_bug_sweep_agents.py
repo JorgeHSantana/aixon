@@ -22,7 +22,7 @@ from aixon.llm import LLM
 from aixon.message import Message
 from aixon.providers.base import Provider, register_provider
 from aixon.registry import get_registry
-from aixon.runtime import client_tools, current_client_tools, generation_params
+from aixon.runtime import client_tools_scope, current_client_tools, generation_params
 from aixon._interop.tools import coerce_tools
 
 from tests._fakes import FakeChatModel, make_echo_agent, make_llm, register_fake_provider
@@ -180,7 +180,7 @@ def test_orchestrator_rejects_worker_named_supervisor():
 # ── A5: current_client_tools() deep-copies (no shared nested dicts) ────────
 
 def test_current_client_tools_deep_copies():
-    with client_tools([{"function": {"name": "f"}}]):
+    with client_tools_scope([{"function": {"name": "f"}}]):
         first = current_client_tools()
         first[0]["function"]["name"] = "mutated"
         second = current_client_tools()

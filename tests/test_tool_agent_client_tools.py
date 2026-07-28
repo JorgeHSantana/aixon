@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 from aixon.agents.tool_agent import ToolAgent
 from aixon.exceptions import AixonError
 from aixon.message import Message
-from aixon.runtime import client_tools
+from aixon.runtime import client_tools_scope
 from tests._fakes import make_llm
 
 DOC_TOOL = [{
@@ -49,7 +49,7 @@ def test_interna_executa_e_call_do_cliente_borbulha():
              "id": "c2"}]),
     ]
     agent = _merge_agent("mg18a", script)
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = agent.invoke(USER)
     assert out.role == "assistant"
     assert out.tool_calls == [
@@ -63,7 +63,7 @@ def test_ignore_default_nao_muda_nada():
         "name": "mg18b", "llm": llm, "tools": [soma],
     })
     from aixon.registry import get_registry
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = get_registry().resolve("mg18b").invoke(USER)
     assert out.content == "só texto" and not out.tool_calls
 
@@ -72,7 +72,7 @@ def test_conflito_de_nome_erro_explicito():
     colide = [{"type": "function", "function": {"name": "soma",
                "parameters": {"type": "object"}}}]
     agent = _merge_agent("mg18c", [AIMessage(content="x")])
-    with client_tools(colide):
+    with client_tools_scope(colide):
         with pytest.raises(AixonError, match="soma"):
             agent.invoke(USER)
 
@@ -86,7 +86,7 @@ def test_conflito_internal_descarta_a_do_cliente():
         AIMessage(content="dois"),
     ]
     agent = _merge_agent("mg18d", script, client_tools_conflict="internal")
-    with client_tools(colide):
+    with client_tools_scope(colide):
         out = agent.invoke(USER)
     assert out.content == "dois" and not out.tool_calls  # interna executou
 
@@ -97,7 +97,7 @@ def test_filter_curadoria():
 
     agent = _merge_agent("mg18e", [AIMessage(content="sem proxy")],
                          client_tools_filter=client_tools_filter)
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = agent.invoke(USER)
     assert out.content == "sem proxy" and not out.tool_calls
 
@@ -107,7 +107,7 @@ def test_replace_so_tools_do_cliente():
         {"name": "inserir_no_documento", "args": {"texto": "oi"},
          "id": "c9"}])]
     agent = _merge_agent("mg18f", script, client_tools="replace")
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = agent.invoke(USER)
     assert out.tool_calls[0]["id"] == "c9"
 
@@ -123,7 +123,7 @@ def test_retomada_com_tool_result_do_cliente():
              "id": "c2"}]),
         Message(role="tool", content="ok", tool_call_id="c2"),
     ]
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = agent.invoke(historico)
     assert out.content == "inserido com sucesso ✅"
 
@@ -152,7 +152,7 @@ def test_turno_misto_surfaceia_call_do_cliente():
         AIMessage(content="FINAL-TEXT"),
     ]
     agent = _merge_agent("mg18i", script)
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = agent.invoke(USER)
     assert out.content != "FINAL-TEXT"
     assert out.tool_calls == [
@@ -179,7 +179,7 @@ def test_surface_client_calls_e_funcao_pura():
     agent = _merge_agent("mg18j", [AIMessage(content="", tool_calls=[
         {"name": "inserir_no_documento", "args": {"texto": "oi"},
          "id": "c3"}])])
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         agent.invoke(USER)
     assert not hasattr(agent, "_client_tool_names")
 
@@ -196,7 +196,7 @@ def test_surfaced_preserva_reasoning_do_run():
              "id": "c2"}]),
     ]
     agent = _merge_agent("mg18k", script)
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = agent.invoke(USER)
     assert out.tool_calls == [
         {"name": "inserir_no_documento", "args": {"texto": "5"}, "id": "c2"}]
@@ -213,7 +213,7 @@ def test_ainvoke_surfaced_preserva_reasoning_do_run():
              "id": "c2"}]),
     ]
     agent = _merge_agent("mg18l", script)
-    with client_tools(DOC_TOOL):
+    with client_tools_scope(DOC_TOOL):
         out = asyncio.run(agent.ainvoke(USER))
     assert out.tool_calls == [
         {"name": "inserir_no_documento", "args": {"texto": "5"}, "id": "c2"}]

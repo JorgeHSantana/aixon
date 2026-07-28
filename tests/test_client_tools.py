@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 from aixon.message import Chunk, Message
-from aixon.runtime import client_tools, current_client_tools
+from aixon.runtime import client_tools_scope, current_client_tools
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.protocol import ParsedRequest
 
@@ -181,7 +181,7 @@ class TestStreamSession:
 class TestRuntimeChannel:
     def test_publish_and_read(self):
         assert current_client_tools() == []
-        with client_tools([TOOL_DEF]):
+        with client_tools_scope([TOOL_DEF]):
             got = current_client_tools()
             assert got == [TOOL_DEF]
             got.clear()  # mutating the copy must not pollute the channel
@@ -189,9 +189,9 @@ class TestRuntimeChannel:
         assert current_client_tools() == []
 
     def test_none_and_empty_are_empty(self):
-        with client_tools(None):
+        with client_tools_scope(None):
             assert current_client_tools() == []
-        with client_tools([]):
+        with client_tools_scope([]):
             assert current_client_tools() == []
 
 

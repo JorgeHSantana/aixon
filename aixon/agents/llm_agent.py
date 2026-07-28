@@ -34,22 +34,24 @@ class LLMAgent(Agent, abstract=True):
     _suffix: str = "Agent"
     llm: LLM         # declared; absence on a concrete subclass is an error
     prompt: str = ""
-    # Client tools (#18a): opt-in — when True, bind the request's
-    # client-declared tools (aixon.runtime.current_client_tools()) onto the
-    # LLM call and return the raw tool_calls to the caller/wire, instead of
-    # running any server-side tool loop. False (default) -> behavior
-    # unchanged from before #18a.
-    client_tools: bool = False
+    # Client tools (#18a, unified with ToolAgent's vocabulary by #25): opt-in
+    # — "passthrough" binds the request's client-declared tools
+    # (aixon.runtime.current_client_tools()) onto the LLM call and returns
+    # the raw tool_calls to the caller/wire, instead of running any
+    # server-side tool loop. "ignore" (default) -> behavior unchanged.
+    # Same type/default/vocabulary family as ToolAgent.client_tools (which
+    # additionally supports "merge"/"replace" for its first-class loop).
+    client_tools: str = "ignore"
 
     def _client_bind(self) -> dict:
         """Client-declared tools/tool_choice (#18a) to forward to the LLM.
 
-        Returns ``{}`` (no-op kwargs) when ``client_tools`` is off, or when
-        it's on but the current request declared no tools — the no-tools
-        path stays byte-identical either way. Otherwise returns
-        ``{"tools": ..., "tool_choice": ...}``, ready to splat into
+        Returns ``{}`` (no-op kwargs) when ``client_tools`` is ``"ignore"``,
+        or when it's ``"passthrough"`` but the current request declared no
+        tools — the no-tools path stays byte-identical either way. Otherwise
+        returns ``{"tools": ..., "tool_choice": ...}``, ready to splat into
         ``self.llm.complete/acomplete/stream/astream``."""
-        if not self.client_tools:
+        if self.client_tools != "passthrough":
             return {}
         from aixon.runtime import current_client_tools, current_tool_choice
 
@@ -63,20 +65,37 @@ class LLMAgent(Agent, abstract=True):
         """Require a concrete subclass to declare a class-level ``llm``. Runs
         (via Agent.__init_subclass__) after suffix validation and before
         registration, so a missing ``llm`` raises without registering a ghost.
-        Suffix errors still take precedence (NamingError is raised first)."""
+        Suffix errors still take precedence (NamingError is raised first).
+
+        Also validates ``client_tools`` (#25): it used to be a ``bool`` here
+        (mismatched with ToolAgent's ``str`` enum of the same name) — a
+        ``bool`` now raises loudly with a migration message instead of
+        silently behaving like whichever branch Python's truthiness picks."""
         llm_val = cls.__dict__.get("llm") or getattr(cls, "llm", None)
         if not isinstance(llm_val, LLM):
             raise AixonError(
                 f"'{cls.__name__}' must declare a class-level 'llm' attribute "
                 f"of type LLM (e.g. llm = LLM('gpt-4o-mini')). Got: {llm_val!r}."
             )
+        mode = getattr(cls, "client_tools", "ignore")
+        if isinstance(mode, bool):
+            raise AixonError(
+                f"'{cls.__name__}' has client_tools={mode!r} (bool) — since "
+                f"#25, LLMAgent.client_tools is a str like ToolAgent's: use "
+                f"'ignore' (was False) or 'passthrough' (was True)."
+            )
+        if mode not in ("ignore", "passthrough"):
+            raise AixonError(
+                f"'{cls.__name__}' has client_tools={mode!r}; use 'ignore' "
+                f"or 'passthrough'."
+            )
 
     def invoke(self, messages: list[Message]) -> Message:
         """Prepend system prompt (if any) and delegate to self.llm.complete.
 
-        When ``client_tools`` is on and the request declared tools, forwards
-        them (see ``_client_bind``) so the returned ``Message.tool_calls``
-        reflects whatever the model chose to call."""
+        When ``client_tools`` is ``"passthrough"`` and the request declared
+        tools, forwards them (see ``_client_bind``) so the returned
+        ``Message.tool_calls`` reflects whatever the model chose to call."""
         return self.llm.complete(self._with_prompt(messages), **self._client_bind())
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
