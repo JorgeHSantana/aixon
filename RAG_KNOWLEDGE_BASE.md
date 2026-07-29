@@ -1638,6 +1638,18 @@ Every chat route returns a dialect-appropriate JSON error body (never a raw trac
 
 The stream's terminal event (`[DONE]` / `message_stop`) is still emitted after the error event either way. The OpenAI adapter also accepts a `developer` role (mapped the same as `system`) instead of rejecting it as an unknown role.
 
+### 18.5 Langfuse observability (0.1.27, #26)
+
+Optional, OFF by default, zero cost when off. Install `aixon[langfuse]` and set `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` (+ `LANGFUSE_HOST` for self-hosted; omitted = Langfuse Cloud): every chat POST becomes ONE Langfuse trace named after the resolved agent.
+
+- The Server (`aixon/observability.py`) opens a root span per request, so ALL internal turns — ToolAgent workers, Orchestrator routing calls, the ReflectiveAgent judge — land in the same trace (each LangChain root run would otherwise become its own trace).
+- The Langfuse `CallbackHandler` is attached via langchain-core's `register_configure_hook` (the same mechanism as LangSmith's `tracing_v2_enabled`): every callback manager — graphs, chat models, langgraph fork threads — picks it up automatically, deduped by identity. No aixon call site passes callbacks.
+- **Per-agent** = trace name. **Per-model** = each generation records the REAL provider model that served that turn (worker and judge may differ); register model prices in Langfuse to get cost. **Per-user** = when the frontend forwards identity headers (Open WebUI with `ENABLE_FORWARD_USER_INFO_HEADERS=true`), `X-OpenWebUI-User-Email`/`-Id` becomes the trace `user_id` and `X-OpenWebUI-Chat-Id` the `session_id` (`request_identity()`).
+- Failure policy: missing SDK / bad config disables the integration for the process with ONE warning (sticky latch); an unreachable Langfuse only delays spans (the OTel exporter logs, never raises). A request is never broken by observability.
+- Serverless flush: by default the client flushes at the end of each request (Cloud Run freezes CPU after the response; batched spans might otherwise never leave). `AIXON_LANGFUSE_FLUSH_PER_REQUEST=0` disables the per-request flush for always-on deploys.
+
+Runnable example: `examples/langfuse/` (offline demo of the hook mechanism without the SDK; real trace when the envs are set). Guide: `docs/tracing.md`.
+
 ---
 
 ## 19. Usage tracking: Message.usage and the aixon.usage module
@@ -1847,6 +1859,8 @@ Key facts:
 | `LOG_LEVEL` | `INFO` | Framework log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `AIXON_DEBUG_REQUESTS` | disabled | Opt-in debug tap (section 18.3b): `1`/`true`/`yes` records every agent's chat requests as JSONL; a comma-separated list (`"Agent1,Agent2"`) records only those agents. Headers are never recorded. Temporary diagnostic tool only — never leave enabled in production. |
 | `AIXON_DEBUG_REQUESTS_DIR` | `./aixon-debug/` | Directory the debug tap writes JSONL records into, when `AIXON_DEBUG_REQUESTS` is set. |
+
+Langfuse (section 18.5, 0.1.27): `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` (both required to enable), `LANGFUSE_HOST` (default = Langfuse Cloud), `AIXON_LANGFUSE_FLUSH_PER_REQUEST` (default `1`; `0` skips the per-request flush).
 
 Vendor-retriever variables: `TAVILY_API_KEY`, `RAGIE_API_KEY`, `WEAVIATE_HOST`, `WEAVIATE_PORT`. Connector variables are whatever you name in `base_url_env` and `auth_token_env`.
 

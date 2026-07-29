@@ -38,25 +38,49 @@ Studio soma depuração visual do grafo (passo a passo, time-travel).
 > inteiras). LangSmith é SaaS — em produção com dados de clientes/pessoais,
 > use a rota self-hosted abaixo. LangSmith fica para dev com dados neutros.
 
-## 3. Langfuse self-hosted (produção — dados não saem da sua infra)
+## 3. Langfuse — integração de primeira classe (0.1.27+, #26)
 
-O Langfuse expõe um endpoint OTLP; a instrumentação OpenTelemetry do
-LangChain captura globalmente (sem tocar no aixon):
+O Server já vem instrumentado: instale o extra e configure as envs — nada
+de código.
 
 ```bash
-pip install opentelemetry-instrumentation-langchain opentelemetry-exporter-otlp
-export OTEL_EXPORTER_OTLP_ENDPOINT="https://SEU-LANGFUSE/api/public/otel"
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic <base64(pk:sk)>"
+pip install "aixon[langfuse]"
+export LANGFUSE_PUBLIC_KEY="pk-..."
+export LANGFUSE_SECRET_KEY="sk-..."
+export LANGFUSE_HOST="https://SEU-LANGFUSE"   # omitido = Langfuse Cloud
 ```
 
-```python
-# uma vez, no boot (ex.: main.py, antes de servir):
-from opentelemetry.instrumentation.langchain import LangchainInstrumentor
-LangchainInstrumentor().instrument()
-```
+Com as DUAS chaves presentes, cada POST de chat vira **um trace** com o nome
+do agente resolvido; sem elas, custo zero (nenhum import do SDK). Por dentro:
+um span raiz por request agrupa TODOS os turnos internos (workers,
+roteamento do orquestrador, juiz do reflective — que sem o span virariam
+traces separados), e o `CallbackHandler` do Langfuse é anexado via
+*configure hook* do langchain-core — o mesmo mecanismo do LangSmith, cobrindo
+grafos, modelos e forks do langgraph sem tocar em nenhum call-site.
 
-Alternativa: o `CallbackHandler` do SDK do Langfuse, quando você controla a
-invocação diretamente.
+- **Por agente**: nome do trace = agente. **Por modelo**: cada generation
+  registra o modelo REAL do provider que atendeu aquele turno (worker/juiz
+  podem usar modelos diferentes); cadastre os preços no Langfuse para ver
+  custo além de tokens. **Por usuário**: se o frontend encaminhar
+  identidade (Open WebUI: `ENABLE_FORWARD_USER_INFO_HEADERS=true`), os
+  headers `X-OpenWebUI-User-Email`/`-Id` viram `user_id` do trace e
+  `X-OpenWebUI-Chat-Id` vira `session_id`.
+- **Falha nunca derruba request**: SDK ausente/mal configurado desliga a
+  integração com um warning; Langfuse inalcançável só atrasa spans.
+- **Serverless**: por padrão há um `flush()` ao fim de cada request (Cloud
+  Run congela a CPU pós-resposta; sem o flush, spans em batch podem nunca
+  sair). Deploy com CPU always-on pode desligar:
+  `AIXON_LANGFUSE_FLUSH_PER_REQUEST=0`.
+
+Exemplo runnable: [examples/langfuse](../examples/langfuse/).
+
+Onde hospedar: VM com docker-compose (o stack v3 tem ClickHouse — não cabe
+em Cloud Run) ou Langfuse Cloud; para o aixon é indiferente, são as 3 envs.
+
+Rota manual (pré-0.1.27, segue válida fora do Server): a instrumentação
+OpenTelemetry do LangChain (`opentelemetry-instrumentation-langchain` +
+endpoint OTLP do Langfuse) captura globalmente, ou o `CallbackHandler` do
+SDK quando você controla a invocação diretamente.
 
 ## O que você enxerga de graça
 

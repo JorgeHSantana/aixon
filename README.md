@@ -70,6 +70,7 @@ pip install "aixon[ragie]"             # Ragie managed-RAG Retriever
 pip install "aixon[tavily]"            # Tavily web-search Retriever
 pip install "aixon[rerank]"            # flashrank reranking (for Weaviate)
 pip install "aixon[tiktoken]"          # token counting for the server `usage` field
+pip install "aixon[langfuse]"          # Langfuse observability (per-agent/user/model traces)
 pip install "aixon[all]"               # everything above
 ```
 
@@ -374,7 +375,7 @@ never registered.
 - [Agents](docs/agents.md) — `LLMAgent`, `ToolAgent`, `ReflectiveAgent`, declarative API, `as_tool`, async
 - [Orchestrator](docs/orchestrator.md) — three tiers, entry/topology, branching, recursion guards
 - [Server](docs/server.md) — `ProtocolAdapter`, adapters, auth, SSE
-- [Tracing](docs/tracing.md) — observability with LangSmith / Langfuse (self-hosted) / console: zero framework changes
+- [Tracing](docs/tracing.md) — observability: first-class Langfuse (`aixon[langfuse]` + envs — traces per agent/user/model), LangSmith, console
 - [Retrieval](docs/retrieval.md) — `Retriever`, `Embedding`, `Connector`, `MCPConnector`
 - [Vendor retrievers](docs/retrievers.md) — `Weaviate`, `Ragie`, `Tavily`
 - [CLI](docs/cli.md) — `chat`, `new`, `serve`, `list`
@@ -382,6 +383,7 @@ never registered.
 - [Example](examples/support_assistant) — a complete multi-agent support assistant, runnable offline
 - [Example: Reflective Review](examples/reflective_review) — the `ReflectiveAgent` loop, runnable offline
 - [Example: Tracing](examples/tracing) — the execution tree a tracer captures, runnable offline
+- [Example: Langfuse](examples/langfuse) — the first-class integration, offline demo or real traces
 
 ---
 
