@@ -21,17 +21,39 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from aixon.exceptions import AgentNotFoundError, AixonError
+from aixon.exceptions import (
+    AgentNotFoundError,
+    AixonError,
+    GatewayBudgetExceeded,
+    classify_gateway_error,
+)
 from aixon.logging import Logger
+from aixon.message import Chunk
 from aixon.observability import observe_request, request_identity
 from aixon.registry import get_registry
-from aixon.runtime import client_tools_scope, generation_params, tool_choice_scope
+from aixon.runtime import (
+    client_tools_scope,
+    generation_params,
+    tool_choice_scope,
+    user_email_scope,
+)
 from aixon.toolcache import tool_call_cache
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.usage import build_usage
 from aixon.server.protocol import ProtocolAdapter
 
 _log = Logger("aixon.server")
+
+# What the user is told when the gateway refuses the call: the text of the chat
+# message on a stream, the "message" of the 429 body without one. Each can be
+# replaced per Server (budget_exceeded_message / rate_limited_message).
+DEFAULT_BUDGET_EXCEEDED_MESSAGE = (
+    "Your usage budget has been exhausted. Please try again after it resets "
+    "or contact your administrator."
+)
+DEFAULT_RATE_LIMITED_MESSAGE = (
+    "Too many requests to the model right now. Please wait a moment and try again."
+)
 
 
 def _valid_token(raw: str) -> bool:
@@ -110,18 +132,38 @@ class Server:
     # = False` inside __new__ is circular (it needs _instance's own attribute
     # type first).
     _initialized: bool = False
+    # Declared for the same reason: `__init__` reads them back (singleton check)
+    # above the line that assigns them on the first construction.
+    budget_exceeded_message: str
+    rate_limited_message: str
 
-    def __new__(cls, adapters: list[ProtocolAdapter] | None = None):
+    def __new__(
+        cls,
+        adapters: list[ProtocolAdapter] | None = None,
+        *,
+        budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
+        rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
+    ):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, adapters: list[ProtocolAdapter] | None = None):
+    def __init__(
+        self,
+        adapters: list[ProtocolAdapter] | None = None,
+        *,
+        budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
+        rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
+    ):
         # Singleton: adapters are fixed on first construction. A later
         # Server(adapters=[...]) that asks for a DIFFERENT set raises instead of
         # silently ignoring the argument (which used to lock callers into
         # OpenAI-only without warning) — call Server._reset() first to rebuild.
+        # The gateway messages follow the same rule: the first construction
+        # fixes them, and a later one that asks for another text raises. The
+        # DEFAULT counts as "no opinion" (a bare Server() must keep working
+        # after the app configured the messages), so it keeps what was stored.
         if self._initialized:
             if adapters is not None and self._adapter_signature(adapters) != \
                     self._adapter_signature(self._protocol_adapters):
@@ -131,8 +173,23 @@ class Server:
                     "The singleton's adapters are fixed; call Server._reset() "
                     "before constructing it with a new adapter set."
                 )
+            for argument, asked, default, kept in (
+                ("budget_exceeded_message", budget_exceeded_message,
+                 DEFAULT_BUDGET_EXCEEDED_MESSAGE, self.budget_exceeded_message),
+                ("rate_limited_message", rate_limited_message,
+                 DEFAULT_RATE_LIMITED_MESSAGE, self.rate_limited_message),
+            ):
+                if asked not in (kept, default):
+                    raise AixonError(
+                        f"Server is already constructed with a different {argument} "
+                        f"({kept!r}). The singleton's messages are fixed; call "
+                        "Server._reset() before constructing it with a new "
+                        f"{argument}."
+                    )
             return
         self._protocol_adapters: list[ProtocolAdapter] = adapters or [OpenAIAdapter()]
+        self.budget_exceeded_message = budget_exceeded_message
+        self.rate_limited_message = rate_limited_message
         self._app = None
         self._initialized = True
 
@@ -230,6 +287,15 @@ class Server:
 
         app.add_api_route(path, list_models, methods=["GET"])
 
+    def _gateway_refusal(self, verdict: type[AixonError]) -> tuple[str, str, str]:
+        """``(message, type, code)`` the user gets when the gateway refused the
+        call with ``verdict``, one of the two ``classify_gateway_error`` gives.
+        The message is the same in a stream and in the 429 body; ``type`` and
+        ``code`` only exist in the body."""
+        if verdict is GatewayBudgetExceeded:
+            return self.budget_exceeded_message, "insufficient_quota", "budget_exceeded"
+        return self.rate_limited_message, "rate_limit_exceeded", "rate_limited"
+
     def _mount_chat(self, app, adapter, path) -> None:
         from fastapi import Request
         from starlette.responses import JSONResponse, StreamingResponse
@@ -283,6 +349,12 @@ class Server:
             # observe_request é um no-op de custo zero.
             ident = request_identity(request.headers)
 
+            # The end user's e-mail, published for the whole call: only the
+            # `gateway` provider reads it, so spend and limits are per person.
+            # The e-mail alone — never the user-id that request_identity falls
+            # back to for the trace. Absent or blank, the scope publishes None.
+            user_email = request.headers.get("x-openwebui-user-email")
+
             if pr.stream:
                 session = adapter.open_stream(model=model, request=pr)
 
@@ -305,6 +377,7 @@ class Server:
                             session_id=ident["session_id"],
                             metadata={"adapter": adapter.name, "stream": True},
                         ), generation_params(pr.params), \
+                                user_email_scope(user_email), \
                                 client_tools_scope(pr.tools), \
                                 tool_choice_scope(pr.tool_choice), tool_call_cache():
                             async for chunk in agent.astream(pr.messages):
@@ -315,11 +388,43 @@ class Server:
                         if tail:
                             yield emit(tail)
                     except Exception as exc:
-                        _log.error(
-                            f"{adapter.name}: stream via agent '{agent.name}' "
-                            f"failed: {exc}"
-                        )
-                        yield emit(session.error(exc))
+                        verdict = classify_gateway_error(exc)
+                        if verdict is None:
+                            _log.error(
+                                f"{adapter.name}: stream via agent '{agent.name}' "
+                                f"failed: {exc}"
+                            )
+                            yield emit(session.error(exc))
+                        else:
+                            # The gateway said no (budget spent, rate limit): an
+                            # answer for the user, not a server failure. It goes
+                            # out as the last message of a stream that ends as
+                            # usual — the content delta closes a <think> block
+                            # the failed run left open, then the finish chunk
+                            # and [DONE] follow — so a chat UI shows it instead
+                            # of a generic error event.
+                            _log.warning(
+                                f"{adapter.name}: stream via agent '{agent.name}' "
+                                f"refused by the gateway ({verdict.__name__}): {exc}"
+                            )
+                            try:
+                                text = self._gateway_refusal(verdict)[0]
+                                for chunk in (Chunk(content=text), Chunk(done=True)):
+                                    line = session.chunk(chunk)
+                                    if line:
+                                        yield emit(line)
+                                tail = session.finish()
+                                if tail:
+                                    yield emit(tail)
+                            except Exception as inner:
+                                # Same rule as any mid-stream failure: it must
+                                # not reach Starlette. Generic error, then done.
+                                _log.error(
+                                    f"{adapter.name}: stream via agent "
+                                    f"'{agent.name}' failed while reporting the "
+                                    f"gateway refusal: {inner}"
+                                )
+                                yield emit(session.error(inner))
                     try:
                         yield emit(session.done())
                     except Exception:
@@ -342,10 +447,24 @@ class Server:
                     agent.name, user_id=ident["user_id"],
                     session_id=ident["session_id"],
                     metadata={"adapter": adapter.name, "stream": False},
-                ), generation_params(pr.params), client_tools_scope(pr.tools), \
+                ), generation_params(pr.params), user_email_scope(user_email), \
+                        client_tools_scope(pr.tools), \
                         tool_choice_scope(pr.tool_choice), tool_call_cache():
                     message = await agent.ainvoke(pr.messages)
             except Exception as exc:
+                verdict = classify_gateway_error(exc)
+                if verdict is not None:
+                    # The gateway said no: tell the client so with a 429 it can
+                    # act on (the type/code pair is what tells the two apart).
+                    _log.warning(
+                        f"{adapter.name}: agent '{agent.name}' refused by the "
+                        f"gateway ({verdict.__name__}): {exc}"
+                    )
+                    text, err_type, err_code = self._gateway_refusal(verdict)
+                    return JSONResponse(
+                        {"error": {"message": text, "type": err_type, "code": err_code}},
+                        status_code=429,
+                    )
                 _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")
                 return JSONResponse(
                     {"error": {"message": "The agent failed to process the request.",
