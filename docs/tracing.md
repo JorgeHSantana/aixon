@@ -63,8 +63,10 @@ grafos, modelos e forks do langgraph sem tocar em nenhum call-site.
   podem usar modelos diferentes); cadastre os preços no Langfuse para ver
   custo além de tokens. **Por usuário**: se o frontend encaminhar
   identidade (Open WebUI: `ENABLE_FORWARD_USER_INFO_HEADERS=true`), os
-  headers `X-OpenWebUI-User-Email`/`-Id` viram `user_id` do trace e
-  `X-OpenWebUI-Chat-Id` vira `session_id`.
+  headers `X-OpenWebUI-User-Email`/`-Id` viram `user_id` do trace (o e-mail ou,
+  na falta dele, o user-id) e `X-OpenWebUI-Chat-Id` vira `session_id`. O repasse
+  da identidade ao gateway (provedor `gateway`, ver [agents.md](agents.md))
+  usa só o e-mail, nunca o user-id.
 - **Falha nunca derruba request**: SDK ausente/mal configurado desliga a
   integração com um warning; Langfuse inalcançável só atrasa spans.
 - **Serverless**: por padrão há um `flush()` ao fim de cada request (Cloud

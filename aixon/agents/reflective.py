@@ -147,7 +147,7 @@ class ReflectiveAgent(Agent, abstract=True):
     # #24: judge_llm.complete/acomplete raised (any round, including a retry
     # round) — the current worker answer is delivered unreviewed instead of
     # crashing the run (a gateway verdict excepted: it is re-raised, see the
-    # module docstring). See _judge_verdict_sync/_judge_verdict_async.
+    # module docstring). See _judge_unavailable.
     judge_unavailable_label: str = (
         "Revisão indisponível — entregando sem conferência."
     )

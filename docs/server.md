@@ -56,8 +56,15 @@ class Server:
     @classmethod
     def get_instance(cls) -> "Server": ...
 
-    def __init__(self, adapters: list[ProtocolAdapter] | None = None):
-        """Create a server. Defaults to [OpenAIAdapter()] if adapters is None."""
+    def __init__(
+        self,
+        adapters: list[ProtocolAdapter] | None = None,
+        *,
+        budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
+        rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
+    ):
+        """Create a server. Defaults to [OpenAIAdapter()] if adapters is None.
+        The two messages are what the user reads when the gateway refuses the call."""
 
     @property
     def app(self):
@@ -67,10 +74,28 @@ class Server:
         """Start uvicorn. Blocks until interrupted."""
 ```
 
+`budget_exceeded_message` and `rate_limited_message` are what the user is told
+when the `gateway` provider's call is refused: its budget is spent, or it is
+rate limiting the caller (see [Errors](#errors)). Their defaults are:
+
+- `budget_exceeded_message`: `Your usage budget has been exhausted. Please try again after it resets or contact your administrator.`
+- `rate_limited_message`: `Too many requests to the model right now. Please wait a moment and try again.`
+
 `Server` is a singleton — `Server.get_instance()` returns the existing instance
-or creates one. Multiple `Server()` calls in the same process share state.
-Adapters are fixed on first construction; later `Server(adapters=[...])` calls
-silently reuse the first instance's adapters.
+or creates one. Multiple `Server()` calls in the same process share state, and
+the **first construction fixes** the adapters and the two messages. A later
+construction:
+
+- with no arguments, or with arguments equal to what is stored (an equivalent
+  adapter set — the same adapter classes and mount prefixes, in the same order —
+  or the stored message), returns the same instance, unchanged;
+- with a **different** adapter set or a **different** message **raises
+  `AixonError`**, instead of silently ignoring the argument. Call
+  `Server._reset()` first to build the singleton again with the new
+  configuration;
+- passing a message's default text counts as having no opinion: a bare
+  `Server()` keeps working after the application configured the messages, and
+  keeps the ones stored.
 
 **Built-in routes (always public, no auth required):**
 
@@ -450,7 +475,12 @@ traceback) with the matching HTTP status:
 |---|---|---|
 | `400` | Request body isn't a JSON object, or `adapter.parse_request` raises (e.g. a malformed `messages` entry). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
 | `404` | `model` doesn't resolve to a registered agent (`AgentNotFoundError`). | `{"error": {"message": ..., "type": "model_not_found"}}` |
-| `500` | The agent raised while running (non-streaming). The real exception is logged server-side only; the client gets a generic message. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
+| `429` | The gateway refused the call (non-streaming): its budget is spent (an HTTP 422 mentioning "budget") or it is rate limiting the caller (an HTTP 429). The `message` is `budget_exceeded_message` or `rate_limited_message`. **Only an error from a request to `AIXON_GATEWAY_BASE_URL` counts**: a 429 from any other provider is not the gateway's and stays a `500`. | `{"error": {"message": ..., "type": "insufficient_quota" \| "rate_limit_exceeded", "code": "budget_exceeded" \| "rate_limited"}}` |
+| `500` | The agent raised while running (non-streaming), anything but a gateway refusal. The real exception is logged server-side only; the client gets a generic message. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
+
+The gateway error is found in the exception that reached the Server or in its
+`__cause__`/`__context__` chain, so a refusal wrapped by another exception on
+the way still gets its `429`. It is logged as a `warning`, not an `error`.
 
 **Mid-stream failures** cannot use an HTTP status — the `200`/
 `text/event-stream` headers already went out. Instead, once streaming has
@@ -467,6 +497,21 @@ the server log, never to the client:
 
 The stream's terminal event (`[DONE]` / `message_stop`) is still emitted after
 the error event either way.
+
+**The exception to the error event: a gateway refusal.** When the exception is a
+refusal by the gateway (budget spent or rate limited, classified as above), the
+stream gets **no** error event. The message goes out as the last content of a
+stream that ends as usual:
+
+- OpenAI: a `delta.content` carrying `budget_exceeded_message` or
+  `rate_limited_message` (it closes a `<think>` block that the failed run left
+  open), then the closing chunk with `finish_reason: "stop"`, then `[DONE]`.
+- Anthropic: a `text_delta` block with the message, then `message_delta` and
+  `message_stop`, with no `event: error`.
+
+A chat UI shows it as the assistant's reply instead of a generic error. Only a
+gateway refusal is treated this way: any other exception, a 429 from another
+provider included, keeps the generic error event above.
 
 ---
 
@@ -520,11 +565,34 @@ server.serve()
 ASGI
   -> adapter.parse_request        # wire body -> ParsedRequest (neutral)
   -> get_registry().resolve(model) # name / alias lookup
+  -> request scopes               # generation params, user e-mail, client tools / tool_choice, tool-call cache
   -> agent.invoke | agent.stream  # neutral Message[] / Chunk only
+  -> gateway refusal?             # budget / rate limit -> the quota message (see Errors)
   -> adapter.format_*             # neutral -> wire HTTP / SSE
 ```
 
 The Server is dialect-agnostic. Every wire detail lives in the adapter.
+
+**The user's e-mail.** Right before the agent runs, the Server reads the
+`x-openwebui-user-email` header (what Open WebUI sends with
+`ENABLE_FORWARD_USER_INFO_HEADERS=true`) and publishes it for the whole call,
+streaming or not, with `aixon.runtime.user_email_scope(email)`; an absent or
+blank header publishes no e-mail. The chain is:
+
+```
+x-openwebui-user-email header
+  -> user_email_scope(email) / current_user_email()
+  -> the gateway header (AIXON_GATEWAY_USER_HEADER, default X-OpenWebUI-User-Email)
+```
+
+Only the `gateway` provider reads `current_user_email()`: it stamps the e-mail on
+every HTTP request it sends, so the gateway meters spend and limits per person
+(see [agents.md](agents.md#llm--declaring-a-language-model)). No other provider
+ever receives it. Only the **e-mail** is forwarded, never the Open WebUI
+user-id: a Langfuse trace falls back to the user-id when there is no e-mail (see
+[tracing.md](tracing.md)), but the gateway never sees it. A request without the
+header runs with no e-mail, and the gateway then gets no header at all; refusing
+such a request is the application's job, not the Server's.
 
 ---
 

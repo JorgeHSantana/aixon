@@ -31,6 +31,7 @@ function required.
 | `aliases` | `list[str]` | `[]` | Alternate registry names. |
 | `hidden` | `bool` | `False` | Exclude from `get_registry().public()` and the `aixon chat` menu. |
 | `owned_by` | `str` | `"aixon"` | Shown in `/v1/models` response. |
+| `impose_model` | `bool` | `False` | `True` imposes the model of this agent's own `llm` on every LLM beneath it (its tools, sub-agents, judges, nodes) while it runs. Needs a class-level `llm`. See [Modelo imposto](#modelo-imposto-impose_model). |
 
 ---
 
@@ -63,7 +64,9 @@ yielding `Chunk` deltas and a final `Chunk(done=True)`. A leading `system` (or
 `developer` — OpenAI's system-role alias, treated identically) message in the
 caller's `messages` **wins** over the class-level `prompt` instead of both
 reaching the provider as two separate system messages; if that leading
-message's content is empty, it falls back to `self.prompt`.
+message's content is empty, it falls back to `self.prompt`. (`LLMAgent` has no
+`client_system`: the leading client message always replaces the prompt here.
+`ToolAgent` alone can append it instead — see below.)
 
 ### LLM — declaring a language model
 
@@ -93,6 +96,7 @@ API key to be present at import time.
 | `gemini-*` | `"google"` |
 | `glm*` | `"zai"` |
 | `grok*` | `"xai"` |
+| _(no prefix)_ | `"gateway"` — never inferred: reached only with `provider="gateway"` |
 
 Provider names are lowercase strings, not an enum. To override inference, pass
 `provider=` explicitly: `LLM("some-model", provider="openai")`.
@@ -112,6 +116,45 @@ providers, it does not fall back to `OPENAI_API_KEY` if unset; building the
 model raises `AixonError` instead of silently sending your OpenAI credential
 to the xAI endpoint. `XAI_BASE_URL` overrides the default
 (`https://api.x.ai/v1`).
+
+**Gateway (one OpenAI-compatible gateway in front of every call).**
+`LLM("tier-x", provider="gateway")` reuses `langchain_openai.ChatOpenAI` pointed
+at a gateway that speaks the OpenAI Chat Completions contract — a gateway like
+LiteLLM, where the caller names a *tier*, the gateway picks the real model and
+meters the spend per end user. Unlike z.AI and xAI there is no model-name prefix
+to infer it from: it is reached **only** through an explicit
+`provider="gateway"`. Three environment variables configure it:
+
+| Variable | Default | Description |
+|---|---|---|
+| `AIXON_GATEWAY_BASE_URL` | _(required)_ | The gateway's OpenAI-compatible URL, e.g. `http://gateway.example/v1`. |
+| `AIXON_GATEWAY_API_KEY` | _(required)_ | The gateway's key. |
+| `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Name of the header that carries the end user's e-mail. Empty turns the forwarding off. |
+
+A missing or blank required variable makes building the model raise
+`AixonError`: the provider never reads `OPENAI_API_KEY`, `OPENAI_BASE_URL` or
+`OPENAI_API_BASE`, so an OpenAI credential is never sent to the gateway by
+accident. Install with `pip install "aixon[gateway]"` (pulls in
+`langchain-openai`).
+
+*Who is asking.* Spend and limits at the gateway are per person, not per shared
+key, so every call made while `aixon.runtime.user_email_scope(email)` is active
+carries that e-mail in the header above. The `Server` opens the scope for each
+request from its `x-openwebui-user-email` header (see
+[server.md](server.md#request-flow)). The e-mail is read when the HTTP request
+is **sent**, from the caller's context, not when the model is built: the `LLM`
+caches one model, and that model serves many people. The hook is installed on
+**both** the sync HTTP client (`invoke`/`stream`) and the async one
+(`ainvoke`/`astream`, the path the `Server` runs agents on) — a hook on the sync
+client alone would be skipped on the async path with no error, and every user
+would be billed to the shared key. Without an e-mail no header goes out at all
+(refusing a request that arrives without identity is the application's job),
+and no other provider ever receives the e-mail.
+
+**`pinned`.** `LLM(..., pinned=True)` keeps this `LLM`'s own model and provider
+even while a model is imposed on the call (see [Modelo imposto](#modelo-imposto-impose_model)
+below). Default `False`. `pinned` is a keyword of `LLM`, not a vendor param: it
+never reaches the provider's constructor.
 
 ### Reasoning (extended thinking / reasoning effort)
 
@@ -149,6 +192,7 @@ a coarse effort dial.
 | `anthropic` | `thinking={"type": "enabled", "budget_tokens": ...}`. Anthropic's extended-thinking API requires `temperature == 1`; the knob **forces** it (logging a warning if the caller/request asked for a different value). `max_tokens` is raised to `budget_tokens + 4096` when absent or not already comfortably above the budget. |
 | `openai` | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`. No budget dial — only the effort string reaches the API. |
 | `xai` (Grok) | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`, forwarded verbatim — same translation as `openai`. |
+| `gateway` | `reasoning_effort=<effort>` constructor kwarg on `ChatOpenAI`, forwarded as is: the gateway hands it to whichever model it picked. Not sent under an imposed model (see [Modelo imposto](#modelo-imposto-impose_model)). |
 | `zai` (GLM) | `extra_body={"thinking": {"type": "enabled", ...}}` (merged with any caller-supplied `extra_body`). GLM has no budget/effort dial of its own — any non-off spec just turns thinking on. |
 | `google` (Gemini) | `thinking_budget=<budget_tokens>` and `include_thoughts=True` on `ChatGoogleGenerativeAI` — applied only if the installed `langchain-google-genai` declares those fields; an older install degrades gracefully (knob ignored, warning logged) instead of raising on an unknown kwarg. |
 | custom (no `supports_reasoning = True`) | the knob is **ignored** (with a warning) rather than forwarded — a pydantic-strict vendor constructor never sees the stray `reasoning` kwarg, so the build never breaks. |
@@ -208,11 +252,19 @@ the call (see `aixon.runtime.generation_params`) and apply **on top of** the
 - `ToolAgent` applies them via `LLM.request_chat_model()`: it builds a
   provider model with the params merged in as constructor kwargs *before*
   `Provider.build()` runs, so they go through the same reasoning translation
-  and validation every other constructor kwarg gets. No active params → the
-  cached `chat_model` (no rebuild). Models built for repeated identical param
-  combinations are cached (bounded to 8 entries, oldest-evicted-first) so a
-  hot request path reuses one provider client (and its HTTP connection pool)
-  instead of rebuilding an SDK client per call.
+  and validation every other constructor kwarg gets. No active params (and no
+  imposed model, below) → the cached `chat_model` (no rebuild). Models built
+  for repeated identical param combinations are cached (bounded to 8 entries,
+  oldest-evicted-first) so a hot request path reuses one provider client (and
+  its HTTP connection pool) instead of rebuilding an SDK client per call. The
+  cache key is the model, the provider, whether the model was imposed, and the
+  params; a lock guards the cache, because agents run on worker threads and
+  one `LLM` serves several requests at once.
+- **Under an imposed model** (`impose_model`, see
+  [Modelo imposto](#modelo-imposto-impose_model)) `request_chat_model()` builds
+  THAT model through the imposed provider, even with no params at all, and
+  hands it only the portable params. The same `LLM` used inside and outside
+  the scope never gets the other's model.
 
 Both paths read the exact same `ContextVar` and go through the exact same
 `request_chat_model()` builder, so a request's `temperature` override behaves
@@ -240,6 +292,89 @@ class MyProvider(Provider):
 register_provider(MyProvider())             # one instance, keyed by .name
 # then: LLM("my-model", provider="myvendor")
 ```
+
+### Modelo imposto (`impose_model`)
+
+Há deploys em que toda chamada de LLM passa por um gateway (o provedor
+`gateway`, acima) e quem escolhe o modelo é o gateway, por tier, não a classe de
+cada agente. `impose_model` leva essa escolha à árvore inteira: o agente declara
+o tier uma vez, e todo `LLM` abaixo dele roda nele.
+
+```python
+from aixon import LLM, ToolAgent
+
+class EspecialistaAgent(ToolAgent):
+    llm = LLM("gpt-5.4")                   # declarado na OpenAI...
+
+class CoordenadorAgent(ToolAgent):
+    llm          = LLM("tier-x", provider="gateway", temperature=0.2)
+    prompt       = "Você coordena os especialistas."
+    impose_model = True                    # ...mas roda no tier-x, pelo gateway
+    tools        = [EspecialistaAgent().as_tool(name="especialista")]
+```
+
+Enquanto um entry point do `CoordenadorAgent` roda (`invoke`, `ainvoke`,
+`stream` ou `astream`), o par (modelo, provedor) do `llm` dele fica publicado
+num `ContextVar` (`aixon.runtime.imposed_model_scope` /
+`current_imposed_model`). Todo `LLM` que não seja `pinned` e rode ali — as tools,
+os subagentes via `as_tool()`, o worker e o juiz de um `ReflectiveAgent`, os nós
+de um `Orchestrator` — constrói esse modelo pelo provedor imposto, no lugar do
+que declarou. Os padrões preservam o comportamento de antes: `impose_model =
+False` e um `LLM` fora de qualquer escopo não mudam em nada.
+
+- **Validação.** `impose_model` tem de ser `bool`, e `True` exige um `llm` de
+  classe do tipo `LLM` (aquele de onde sai o modelo imposto). As duas coisas são
+  checadas na definição da classe e levantam `AixonError` antes do registro.
+- **O escopo de fora vale.** Se já há um modelo imposto quando o agente começa a
+  rodar — por um agente mais externo, ou pela aplicação, com
+  `imposed_model_scope(modelo, provedor)` — o agente não abre o escopo dele: o
+  escopo mais externo decide. Um subagente com `impose_model = True` dentro de
+  um agente que não impõe, ao contrário, impõe o próprio modelo à própria
+  subárvore.
+- **Parâmetros portáveis.** Sob o escopo, só chegam ao build do modelo imposto
+  `temperature`, `top_p`, `max_tokens`, `stop`, `presence_penalty` e
+  `frequency_penalty` (`aixon.runtime.PORTABLE_PARAMS`), vindos da declaração do
+  `LLM` e da request (a request vence; `None` é descartado). Ficam de fora o
+  `reasoning` da classe, o `reasoning_effort` da request, o `prediction` e todo
+  outro kwarg da classe (`timeout`, `max_retries`, `seed`, `model_kwargs`...):
+  são ajustes para o modelo para o qual o agente foi escrito, e o ajuste do tier
+  é do gateway. `LLM(cache=True)` também segue o provedor que de fato responde.
+- **Falha fechada.** Sob o escopo, `llm.chat_model` — o modelo com que o `LLM` foi
+  CONFIGURADO — levanta `ImposedModelViolation` (um `AixonError`) em vez de
+  entregá-lo: rodar a chamada no modelo errado sem avisar seria pior que parar.
+  Respeitam o escopo `request_chat_model()`, `complete`/`acomplete`/`stream`/
+  `astream` e o `ToolAgent`. Para o `LLM` que precisa do modelo próprio, declare
+  `LLM(..., pinned=True)`. Um provedor imposto que não está registrado também
+  falha alto: `request_chat_model()` levanta `AixonError` citando o nome.
+- **Escopo por passo nos streams.** Em `invoke`/`ainvoke` o escopo envolve a
+  chamada inteira. Em `stream`/`astream` ele abre por passo — só enquanto o
+  iterador interno roda (criá-lo, cada `next`/`__anext__`, `close`/`aclose`) — e
+  fecha antes de cada chunk ser entregue. Quem consome o stream nunca vê o modelo
+  imposto, nem entre os chunks nem depois de abandonar o stream (`break`), e
+  consumidores que avançam o gerador de contextos diferentes a cada passo
+  funcionam. As tasks do asyncio e as threads que copiam o contexto (veja os
+  limites) iniciadas durante um passo herdam o escopo: é assim que o grafo e as
+  tools o recebem.
+- **Limites.**
+  - O `Embedding` não é coberto: ele não passa pelo `LLM`, então um
+    `OpenAIEmbedding` continua usando o provedor e a chave dele sob um modelo
+    imposto.
+  - `MCPToolset._discover`, quando chamado de dentro de um loop em execução (o
+    caminho do `Server`), roda numa thread de worker sem `copy_context` (#32).
+    A descoberta só faz `tools/list`, sem LLM, então não é afetada, mas nada que
+    dependa do escopo funciona ali.
+  - Só os entry points escritos no corpo de uma subclasse de `Agent` são
+    embrulhados. Um `invoke`/`ainvoke`/`stream`/`astream` que vem de um mixin
+    que não é `Agent`, ou que é atribuído à classe depois de criada
+    (`Cls.invoke = f`), roda fora do escopo, e `impose_model = True` não faz nada
+    por ele, em silêncio. (Um mixin que delega a `super().invoke(...)` funciona:
+    o `super()` cai no entry point embrulhado, que impõe o que roda abaixo.)
+  - Threads criadas com `threading.Thread`, `loop.run_in_executor` ou um
+    `ThreadPoolExecutor` puro não copiam o contexto: um `LLM` chamado de lá não
+    vê o modelo imposto e roda no modelo configurado dele, sem erro — e também
+    não vê o e-mail de `user_email_scope`. `asyncio.to_thread`, as tasks do
+    asyncio e os executors do LangChain e do LangGraph copiam, e as pontes
+    sync/async do próprio aixon também.
 
 ---
 
@@ -275,13 +410,14 @@ class ResearchAgent(ToolAgent):
 | `max_execution_time` | `int` | `600` | Wall-clock timeout in seconds. |
 | `timeout_message` | `str` | see below | Content emitted (#19) when `stream`/`astream` hits `max_execution_time` with NO answer accumulated yet — `{seconds}` is interpolated. See "Timeout sem morrer mudo (#19)" below. |
 | `tool_call_label` | `str` | `"Calling {name}..."` | `{name}`-templated reasoning label emitted before each tool call. Override for a friendlier phrase or i18n, e.g. `"Chamando {name}..."`. Consecutive duplicate labels are emitted once (a run calling the same tool N times in a row shows a single line). |
-| `shield_tool_errors` | `bool` | `True` | Error shield: any exception a tool raises (`httpx.ReadTimeout`, DB down, ...) becomes a readable `TOOL ERROR (...)` result handed back to the model — the agent reports the outage and/or proceeds, instead of the whole run/stream dying with an opaque server error. `False` restores the strict pre-shield behavior (exceptions propagate). Raw `BaseTool` entries are NOT shielded (see `coerce_tools`). |
+| `shield_tool_errors` | `bool` | `True` | Error shield: any exception a tool raises (`httpx.ReadTimeout`, DB down, ...) becomes a readable `TOOL ERROR (...)` result handed back to the model — the agent reports the outage and/or proceeds, instead of the whole run/stream dying with an opaque server error. The one exception is a verdict of the gateway (budget spent, rate limited — `classify_gateway_error`): it is the end of the request, not a tool failing, so the shield re-raises the same object (after `on_tool_end` has seen it) for the `Server` to answer. Only an error from a request to `AIXON_GATEWAY_BASE_URL` counts; a 429 from any other provider is shielded as before. `False` restores the strict pre-shield behavior (exceptions propagate). Raw `BaseTool` entries are NOT shielded (see `coerce_tools`). |
 | `prune_tool_results_after` | `int \| None` | `None` | Opt-in pruning of old tool results (#16). `None` disables it (zero behavior change). See "Poda de tool results antigos (#16)" below. |
 | `on_tool_start` | `method` | no-op | Pre-call hook (#17). See "Hooks de tool call (#17)" below. |
 | `on_tool_end` | `method` | no-op | Post-call hook (#17). See "Hooks de tool call (#17)" below. |
 | `client_tools` | `str` | `"ignore"` | First-class client tools (#18c): `"ignore"` \| `"merge"` \| `"replace"`. See "Client tools mesclados no loop (#18c)" below. |
 | `client_tools_conflict` | `str` | `"error"` | Name-collision policy between an internal tool and a client def: `"error"` \| `"internal"` \| `"client"`. |
 | `client_tools_filter` | `method` | identity | Curation hook (#18c): `client_tools_filter(self, defs) -> defs` — override to keep only a subset of the client's declared tools. |
+| `client_system` | `str` | `"replace"` | What a leading `system` (or `developer`) message sent by the CLIENT does to `prompt`: `"replace"` (default, the only behavior before 0.1.28) takes the prompt's place; `"append"` keeps the prompt first and puts the client's text after it, as context. Anything else raises `AixonError` at registration. `ToolAgent` only — see below. |
 | `reasoning_flush_interval` | `float` | `0.25` | `astream` only (#20): how often (seconds) the ReasoningChannel is polled and drained while a tool node is still running. See "Streaming ao vivo (#20)" below. |
 
 **Streaming ao vivo (#20).** `astream` polls for the next LangGraph update
@@ -319,6 +455,17 @@ or `my_function.aixon_memoize = False` on a plain callable.
 Like `LLMAgent`, a leading `system` (or `developer`) message in `messages`
 overrides `self.prompt` as the graph's `system_prompt` rather than both being
 sent to the provider.
+
+**`client_system = "append"`** is for a chat UI that sends a system message of
+its own (a model's, or a user's) to an agent whose `prompt` must keep governing
+the answer: the system prompt becomes `prompt`, a blank line, then the client's
+text. A side that is empty drops out, and two empty sides send no system prompt
+at all. Only the first message counts (it is consumed here, never sent as a
+message of its own); the default `"replace"` is exactly the behavior above.
+`client_system` exists **only on `ToolAgent`**: an `LLMAgent`, which always lets
+the client's message replace the prompt, never reads it, and declaring it there
+— or on a `ReflectiveAgent`, where the worker's own `client_system` is the one
+that counts — is accepted and ignored, without an error.
 
 **Tool coercion:** anything in `tools` is normalized at runtime:
 - An `AgentTool` (from `Agent.as_tool()` or `Retriever.as_tool()`) → `StructuredTool`
@@ -419,6 +566,9 @@ class GuardedAgent(ToolAgent):
   chamadas equivalentes); `None` mantém os args originais. Uma exceção aqui é
   tratada como a PRÓPRIA tool falhando: o shield (#9) converte em um `TOOL
   ERROR` devolvido ao modelo — o run não cai, só aquela chamada reporta erro.
+  A exceção é um veredito do gateway (orçamento esgotado, limite de
+  requisições): o shield o relança, o mesmo objeto, depois do `on_tool_end`
+  (ver `shield_tool_errors`).
 - `on_tool_end(self, name, args, result, error)` roda DEPOIS — inclusive em
   cache hit (`error=None`) e em falha da tool (`error` preenchido com a
   exceção, `result=None`). É só observação: qualquer exceção levantada aqui é
@@ -595,7 +745,7 @@ class GerenteRevisadoAgent(ReflectiveAgent):
 | `retry_label` | `str` | No | Reasoning-channel label emitted before a retry. `{round}`/`{max}` are interpolated. Default: `"Refinando a resposta (rodada {round}/{max})…"`. |
 | `exhausted_label` | `str` | No | Reasoning-channel label emitted when `max_rounds` is reached without approval. Default: `"Rodadas esgotadas — entregando a melhor tentativa."`. |
 | `patch_fallback_label` | `str` | No | Label emitted when a `"patch"` retry didn't apply and the round falls back to full regeneration. |
-| `judge_unavailable_label` | `str` | No | Label emitted when `judge_llm` raises (see "Judge outage" below). Default: `"Revisão indisponível — entregando sem conferência."`. |
+| `judge_unavailable_label` | `str` | No | Label emitted when `judge_llm` is unavailable, i.e. raises something other than a gateway verdict (see "Judge indisponível" below). Default: `"Revisão indisponível — entregando sem conferência."`. |
 
 Missing `agent`/`judge_llm`, an empty `judge_rubric`, or `max_rounds < 1` on a
 concrete subclass raises `AixonError` at import time — before registration
@@ -710,6 +860,18 @@ outros outcomes). Mesmo preceito do módulo: uma falha de qualidade — aqui, a
 própria avaliação de qualidade — não pode derrubar um run que já produziu
 uma resposta. Sem mudança de comportamento quando o juiz funciona.
 
+**Exceção: veredito do gateway.** Orçamento esgotado ou limite de requisições
+do gateway (`classify_gateway_error`) não é um juiz indisponível nem uma falha
+de qualidade: é o fim da request, e uma resposta entregue "sem revisão"
+esconderia o veredito de quem precisa respondê-lo (o `Server` o transforma na
+mensagem de cota). O erro é relançado, o mesmo objeto, antes de qualquer log,
+label ou linha `reflective_run`, nos 4 caminhos (`invoke`, `ainvoke`, `stream`,
+`astream`) e também para o worker: os handlers do #19 (o timeout ou o limite de
+recursão do worker numa rodada de retry, inclusive nas de patch) o relançam em
+vez de entregá-lo como conteúdo. Só conta o erro cuja request foi à
+`AIXON_GATEWAY_BASE_URL`: um 429 da OpenAI num juiz que roda direto nela segue
+sendo um juiz indisponível e degrada como descrito acima.
+
 ---
 
 ## Agent.as_tool — the neutral tool descriptor
@@ -755,6 +917,17 @@ sets both `func` and `coroutine`: `coerce_tools` registers them dual, and the
 tool runs on the sync (`invoke` → `func`) and async (`ainvoke` → `coroutine`)
 parent paths. The same `AgentTool` shape is returned by `Retriever.as_tool()`,
 so `ToolAgent.tools` handles both uniformly.
+
+**Gateway verdicts cross the tool.** A budget or rate-limit verdict of the
+gateway (`classify_gateway_error`) raised anywhere inside the wrapped agent is
+not a failing tool but the end of the request: it propagates out of
+`func`/`coroutine` and through the parent's shield (#9), which re-raises it
+instead of handing the model a `TOOL ERROR`, and through every `as_tool` level
+above, so the `Server` answers the whole request with its quota message. A
+`ReflectiveAgent` judge or worker inside the subagent behaves the same way.
+Only an error from a request to `AIXON_GATEWAY_BASE_URL` counts: any other
+exception that escapes the subagent, a 429 from another provider included,
+still reaches the parent as a `TOOL ERROR` (shield on).
 
 A stream that yields BOTH content and tool_calls in the same run is not
 expected from any built-in `stream()`/`astream()` (they yield either

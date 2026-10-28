@@ -95,10 +95,13 @@ class ToolAgent(Agent, abstract=True):
         "resposta. Tente restringir o pedido (período menor, menos fontes) "
         "ou repetir em partes."
     )
-    # Error shield (#9): True (default) converts ANY exception raised by a tool
+    # Error shield (#9): True (default) converts any exception raised by a tool
     # into a readable error result handed back to the model, so one failing
-    # tool/service reports instead of killing the whole run/stream. Set False
-    # for a strict policy where tool exceptions propagate (pre-#9 behavior).
+    # tool/service reports instead of killing the whole run/stream. The one
+    # exception is a verdict of the gateway (budget spent, rate limited:
+    # classify_gateway_error): it ends the request, so it is re-raised. Set
+    # False for a strict policy where tool exceptions propagate (pre-#9
+    # behavior).
     shield_tool_errors: bool = True
     tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
     # Context pruning (#16): with an int N, tool results OLDER than the last N
@@ -144,14 +147,17 @@ class ToolAgent(Agent, abstract=True):
 
     # Tool-call hooks (#17): override for deterministic guardrails/telemetry.
     # on_tool_start may return a dict to REWRITE the call's kwargs; raising in
-    # it is treated as the tool failing (shield applies). on_tool_end is
-    # observation-only — its exceptions are logged and swallowed.
+    # it is treated as the tool failing (shield applies, a gateway verdict
+    # excepted). on_tool_end is observation-only — its exceptions are logged
+    # and swallowed.
     def on_tool_start(self, name: str, args: dict):  # noqa: D401
         """Called before a tool executes. Return a dict to rewrite ``args``
         (the memo cache lookup runs on the rewritten kwargs); return None to
         keep them unchanged. Raising here is treated as the tool call itself
         failing — the error shield (#9) converts it to a TOOL ERROR result
-        and the run continues. Default: no-op."""
+        and the run continues. The exception is a verdict of the gateway
+        (budget spent, rate limited): the shield re-raises it, as it does for
+        a tool. Default: no-op."""
         return None
 
     def on_tool_end(self, name: str, args: dict, result, error) -> None:
