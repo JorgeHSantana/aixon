@@ -385,21 +385,8 @@ def test_anthropic_without_penalty_params_does_not_warn(fake_anthropic, caplog):
 
 
 # ── OpenAI translation ────────────────────────────────────────────────────────
-
-class _FakeChatOpenAI:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-@pytest.fixture
-def fake_openai(monkeypatch):
-    pytest.importorskip("langchain_openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr("langchain_openai.ChatOpenAI", _FakeChatOpenAI)
-    from aixon.providers.openai import OpenAIProvider
-
-    return OpenAIProvider()
-
+# (`fake_openai`/`fake_zai`/`fake_xai` and the `_FakeChatOpenAI` they patch in
+# live in tests/conftest.py: tests/test_gateway_provider.py shares them.)
 
 def test_openai_reasoning_off_is_byte_identical(fake_openai):
     model = fake_openai.build("gpt-5.4", temperature=0.2)
@@ -425,16 +412,6 @@ def test_openai_reasoning_effort_param_overrides_knob(fake_openai):
 
 
 # ── z.AI / GLM translation ────────────────────────────────────────────────────
-
-@pytest.fixture
-def fake_zai(monkeypatch):
-    pytest.importorskip("langchain_openai")
-    monkeypatch.setenv("ZAI_API_KEY", "test-key")
-    monkeypatch.setattr("langchain_openai.ChatOpenAI", _FakeChatOpenAI)
-    from aixon.providers.zai import ZAIProvider
-
-    return ZAIProvider()
-
 
 def test_zai_reasoning_off_is_byte_identical(fake_zai):
     model = fake_zai.build("glm-5.2")
@@ -468,16 +445,6 @@ def test_zai_reasoning_effort_param_overrides_knob(fake_zai):
 
 
 # ── xAI / Grok translation ────────────────────────────────────────────────────
-
-@pytest.fixture
-def fake_xai(monkeypatch):
-    pytest.importorskip("langchain_openai")
-    monkeypatch.setenv("XAI_API_KEY", "test-key")
-    monkeypatch.setattr("langchain_openai.ChatOpenAI", _FakeChatOpenAI)
-    from aixon.providers.xai import XAIProvider
-
-    return XAIProvider()
-
 
 def test_xai_reasoning_off_is_byte_identical(fake_xai):
     model = fake_xai.build("grok-4.5", temperature=0.2)

@@ -153,3 +153,39 @@ def prediction_scope(text: str | None) -> Iterator[str | None]:
         yield text or None
     finally:
         _prediction.reset(token)
+
+
+# The e-mail of the end user the current call acts for, published around the
+# agent call by whoever serves the request. ONLY the `gateway` provider reads
+# it, via current_user_email(), to tell the gateway whom the call is for (spend
+# and limits are then per person, not per shared key). No other provider looks
+# at it, so the e-mail never leaves the process towards OpenAI, xAI, z.AI,
+# Anthropic or Google.
+_user_email: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "aixon_user_email", default=None
+)
+
+
+def current_user_email() -> str | None:
+    """The end user's e-mail active for this context, or None."""
+    return _user_email.get()
+
+
+@contextmanager
+def user_email_scope(email: str | None) -> Iterator[str | None]:
+    """Publish (or clear, with None) the end user's e-mail for the block.
+
+    The e-mail is stripped and a blank one becomes None, so readers never
+    tell "" from absent. On exit the previous value comes back."""
+    value = (email or "").strip() or None
+    token = _user_email.set(value)
+    try:
+        yield value
+    finally:
+        try:
+            _user_email.reset(token)
+        except ValueError:
+            # (#21) Same as reasoning_channel(): reset() raises ValueError when
+            # cleanup runs in a different Context (GC-driven finalization of
+            # an abandoned async generator). The var dies with that context.
+            pass
