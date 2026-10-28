@@ -30,6 +30,29 @@ def rec():
     return make_recording_provider()
 
 
+@pytest.fixture
+def explodiu(monkeypatch) -> list[tuple[str, str]]:
+    """Booby-trap the providers an agent tree is DECLARED with: `build()` of
+    the OpenAI and Anthropic providers records `(provider, model)` in the
+    returned list and raises, so a test of an imposed model asserts
+    `explodiu == []`. The list is what makes the assertion mean something: a
+    tool's error shield swallows the `AssertionError` (it catches `Exception`)
+    and the run goes on, so without the list a specialist that really ran on
+    its configured provider would still let the test pass."""
+    from aixon.providers.anthropic import AnthropicProvider
+    from aixon.providers.openai import OpenAIProvider
+
+    used: list[tuple[str, str]] = []
+
+    def build(self, model, **params):
+        used.append((self.name, model))
+        raise AssertionError("provedor configurado foi usado")
+
+    monkeypatch.setattr(OpenAIProvider, "build", build)
+    monkeypatch.setattr(AnthropicProvider, "build", build)
+    return used
+
+
 class _FakeChatOpenAI:
     """Stands in for `langchain_openai.ChatOpenAI` and records the kwargs the
     provider handed it, so a test asserts exactly what would have reached the

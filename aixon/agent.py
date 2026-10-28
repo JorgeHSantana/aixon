@@ -6,15 +6,19 @@ subclasses self-register at definition time; abstract subtypes
 
 from __future__ import annotations
 
+import functools
+import inspect
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import AsyncIterator, Awaitable, Callable, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 
 from aixon.exceptions import AixonError, NamingError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.reasoning import current_channel
 from aixon.registry import get_registry
+from aixon.runtime import current_imposed_model, imposed_model_scope
 
 _log = Logger("aixon.agent")
 
@@ -121,6 +125,162 @@ class AgentTool:
     memoize: bool = True
 
 
+# ── impose_model (0.1.28) ────────────────────────────────────────────────────
+#
+# An agent with ``impose_model = True`` publishes the (model, provider) of its
+# own ``llm`` with ``imposed_model_scope`` around its entry points, so that
+# every LLM beneath it builds that model (see ``Agent.impose_model``).
+#
+# The scope is a ContextVar, and a generator runs in the context of whoever
+# consumes it. A ``with imposed_model_scope(...)`` held across a ``yield``
+# would therefore still be set when the consumer runs between two chunks, and
+# an abandoned async generator (``async for ...: break``) would leave it set
+# in the consumer's context for good: the finalizer that unwinds the ``with``
+# runs in another context, where the reset cannot undo it. So ``stream`` and
+# ``astream`` open the scope PER STEP, only while the inner iterator runs
+# (creating it, each next/__anext__, close/aclose), and close it again before
+# every chunk is handed over. Tasks and threads the inner code starts during a
+# step copy the context with the scope in it, which is how the graph and the
+# tools of a tree inherit it. Do not "simplify" this into one ``with`` around
+# a ``yield``: tests/test_agent_impose_model.py fails on it.
+
+_ENTRY_POINTS = ("invoke", "ainvoke", "stream", "astream")
+
+# Attribute of a wrapper: a function that already carries it (e.g. one assigned
+# from another class's body) is not wrapped a second time.
+_IMPOSING_WRAPPER = "_aixon_imposing_wrapper"
+
+
+def _step_scope(agent: "Agent") -> Callable[[], AbstractContextManager[Any]]:
+    """What each step of ``agent``'s run opens: a fresh ``imposed_model_scope``
+    of its own ``llm``'s model and provider, or a no-op when a scope is already
+    in force (the outer one wins). Called once, when the run starts executing,
+    so the answer is the one of the context the run really executes in."""
+    if current_imposed_model() is not None:
+        return nullcontext
+    llm: Any = getattr(agent, "llm")  # a class-level LLM: checked at class definition
+    model, provider = llm.model, llm._provider().name
+    return lambda: imposed_model_scope(model, provider)
+
+
+def _invoke_imposing(fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict) -> Any:
+    with _step_scope(agent)():
+        return fn(agent, *args, **kwargs)
+
+
+async def _ainvoke_imposing(fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict) -> Any:
+    with _step_scope(agent)():
+        return await fn(agent, *args, **kwargs)
+
+
+def _stream_imposing(
+    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
+) -> Iterator[Chunk]:
+    scope = _step_scope(agent)
+    with scope():  # creating the iterator may already run code (not a generator function)
+        inner = iter(fn(agent, *args, **kwargs))
+    try:
+        while True:
+            with scope():
+                try:
+                    chunk = next(inner)
+                except StopIteration:
+                    return
+            yield chunk  # the scope is closed here: the consumer never sees it
+    finally:
+        close = getattr(inner, "close", None)  # a plain iterator has none
+        if close is not None:
+            with scope():  # the inner iterator's own `finally` blocks run under it
+                close()
+
+
+async def _astream_imposing(
+    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
+) -> AsyncIterator[Chunk]:
+    scope = _step_scope(agent)
+    with scope():
+        inner = fn(agent, *args, **kwargs).__aiter__()
+    try:
+        while True:
+            with scope():
+                try:
+                    chunk = await inner.__anext__()
+                except StopAsyncIteration:
+                    return
+            yield chunk  # the scope is closed here: the consumer never sees it
+    finally:
+        aclose = getattr(inner, "aclose", None)
+        if aclose is not None:
+            with scope():
+                await aclose()
+
+
+_IMPOSING_RUNNERS: dict[str, Callable[..., Any]] = {
+    "invoke": _invoke_imposing,
+    "ainvoke": _ainvoke_imposing,
+    "stream": _stream_imposing,
+    "astream": _astream_imposing,
+}
+
+
+def _entry_wrapper(fn: Callable[..., Any], run: Callable[..., Any]) -> Callable[..., Any]:
+    """``fn`` behind the ``impose_model`` switch (see ``_wrap_entry_points``)."""
+
+    @functools.wraps(fn)  # keeps __wrapped__, __doc__ and __isabstractmethod__
+    def wrapper(self, *args, **kwargs):
+        if not self.impose_model:
+            return fn(self, *args, **kwargs)
+        return run(fn, self, args, kwargs)
+
+    setattr(wrapper, _IMPOSING_WRAPPER, True)
+    return wrapper
+
+
+def _wrap_entry_points(cls: type) -> None:
+    """Wrap the entry points ``cls`` itself defines (its own ``__dict__``, so
+    each function is wrapped once, where it is written; a subclass inherits the
+    wrapper) so that ``impose_model`` takes effect on them. Runs for every
+    subclass of ``Agent``, abstract subtypes included: ``ToolAgent`` and the
+    other subtypes define the entry points that concrete agents inherit.
+
+    The wrapper reads ``impose_model`` when it is called. Off, it returns
+    exactly ``fn(self, *args, **kwargs)``: the same object, with no layer in
+    between. On, it hands the call to the runner of the entry point.
+
+    Only functions written in the body of an ``Agent`` subclass are wrapped.
+    One supplied by a mixin that is not an ``Agent`` subclass, or assigned to
+    the class after it was created, is not: its own code runs outside the
+    scope. When it delegates to ``super()``, that call reaches a wrapper, which
+    imposes for what runs beneath it."""
+    for name in _ENTRY_POINTS:
+        fn = vars(cls).get(name)
+        if not inspect.isfunction(fn) or getattr(fn, _IMPOSING_WRAPPER, False):
+            continue
+        setattr(cls, name, _entry_wrapper(fn, _IMPOSING_RUNNERS[name]))
+
+
+def _validate_impose_model(cls: type["Agent"]) -> None:
+    """Refuse, at class definition and before registration, an ``impose_model``
+    that is not a bool, and ``impose_model=True`` on a class with no class-level
+    ``llm`` to impose."""
+    value = cls.impose_model
+    if not isinstance(value, bool):
+        raise AixonError(
+            f"'{cls.__name__}' has impose_model={value!r}; use True or False."
+        )
+    if not value:
+        return
+    from aixon.llm import LLM  # local: this module imports nothing of the LLM stack at load time
+
+    if not isinstance(getattr(cls, "llm", None), LLM):
+        raise AixonError(
+            f"'{cls.__name__}' sets impose_model=True, which imposes the model "
+            f"of its own `llm` on the whole tree below it, but it declares no "
+            f"class-level `llm` of type LLM (e.g. llm = LLM('tier-x', "
+            f"provider='gateway')). Got: {getattr(cls, 'llm', None)!r}."
+        )
+
+
 class Agent(ABC):
     # Declarative metadata (override in subclasses).
     name: str = ""
@@ -128,6 +288,17 @@ class Agent(ABC):
     aliases: list[str] = []
     hidden: bool = False
     owned_by: str = "aixon"
+    # Imposes this agent's own model on the whole tree below it (0.1.28): while
+    # one of its entry points runs, every LLM beneath it that is not `pinned` --
+    # its own, its tools', a reflective worker's, a judge's -- builds the model
+    # of THIS agent's `llm`, through that LLM's provider, instead of the one it
+    # was declared with, and gets only the portable generation params
+    # (aixon.runtime.PORTABLE_PARAMS). A model already imposed when the agent
+    # starts (by an agent further out, or by the application through
+    # imposed_model_scope) wins: the outermost imposer decides. It must be a
+    # bool, and True needs a class-level `llm` (an LLM): both are checked at
+    # class definition.
+    impose_model: bool = False
     # Per-agent default for the wire thought mode ("custom" | "content" |
     # "hidden"). None inherits the adapter's default. Precedence at the server
     # boundary: request ``thought_stream_mode`` > agent ``thought_mode`` >
@@ -145,6 +316,9 @@ class Agent(ABC):
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs):
         super().__init_subclass__(**kwargs)
+        # Abstract subtypes too: they define the entry points concrete agents
+        # inherit. Before anything below can refuse the class.
+        _wrap_entry_points(cls)
         if abstract:
             cls._abstract = True
             return
@@ -176,8 +350,11 @@ class Agent(ABC):
                 f"Can't instantiate abstract class {cls.__name__} without an "
                 f"implementation for abstract method(s) {sorted(abstracts)!r}"
             )
-        # Subtype validation runs BEFORE registration so a failed check never
-        # leaves a half-built agent in the registry.
+        # Validation runs BEFORE registration so a failed check never leaves a
+        # half-built agent in the registry. impose_model first: it is the same
+        # on every subtype, and the subtype hooks (e.g. ToolAgent's "missing
+        # llm") would otherwise answer for it with a message about something else.
+        _validate_impose_model(cls)
         cls._validate_subclass()
         cls()
 
