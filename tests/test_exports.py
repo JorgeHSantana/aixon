@@ -39,6 +39,7 @@ def test_plan1_exports_still_present():
         RegistrationError,
         GatewayBudgetExceeded,
         GatewayRateLimited,
+        ImposedModelViolation,
         classify_gateway_error,
         Chunk,
         Message,
@@ -54,3 +55,8 @@ def test_plan1_exports_still_present():
 def test_gateway_errors_in_public_all():
     for name in ("GatewayBudgetExceeded", "GatewayRateLimited", "classify_gateway_error"):
         assert name in aixon.__all__
+
+
+def test_imposed_model_violation_exported():
+    assert "ImposedModelViolation" in aixon.__all__
+    assert issubclass(aixon.ImposedModelViolation, aixon.AixonError)

@@ -29,6 +29,15 @@ GENERATION_PARAMS = frozenset(
     }
 )
 
+# The part of GENERATION_PARAMS that means the same thing to ANY model: the
+# sampling and length knobs. Only these cross over to an imposed model (see
+# imposed_model_scope). Everything else is a setting for the model the agent
+# was written against, and is dropped: the class's `reasoning`, the request's
+# `reasoning_effort`, `timeout`, `seed`, `prediction`, any vendor kwarg.
+PORTABLE_PARAMS = frozenset(
+    {"temperature", "top_p", "max_tokens", "stop", "presence_penalty", "frequency_penalty"}
+)
+
 # Provider-dialect spellings normalized to the canonical key above so downstream
 # models always receive kwargs every LangChain chat model understands. The
 # canonical key wins when both are present.
@@ -184,6 +193,43 @@ def user_email_scope(email: str | None) -> Iterator[str | None]:
     finally:
         try:
             _user_email.reset(token)
+        except ValueError:
+            # (#21) Same as reasoning_channel(): reset() raises ValueError when
+            # cleanup runs in a different Context (GC-driven finalization of
+            # an abandoned async generator). The var dies with that context.
+            pass
+
+
+# The model imposed on the current call, as a (model, provider) pair, published
+# by whoever runs the agent tree. While it is set, every LLM that is not
+# `pinned` builds THAT model instead of the one it was declared with, handing it
+# only the PORTABLE_PARAMS, and refuses to give out its configured chat_model
+# (a silent fallback would run the call on the wrong model).
+_imposed_model: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "aixon_imposed_model", default=None
+)
+
+
+def current_imposed_model() -> tuple[str, str] | None:
+    """The ``(model, provider)`` imposed on this context, or None."""
+    return _imposed_model.get()
+
+
+@contextmanager
+def imposed_model_scope(model: str, provider: str) -> Iterator[tuple[str, str]]:
+    """Impose ``model`` of ``provider`` on the LLM calls made in the block.
+
+    Always activates the pair it is given, and on exit the previous value comes
+    back. Which scope wins when they nest is not decided here: an agent that
+    finds one already active chooses whether to open its own.
+    """
+    value = (model, provider)
+    token = _imposed_model.set(value)
+    try:
+        yield value
+    finally:
+        try:
+            _imposed_model.reset(token)
         except ValueError:
             # (#21) Same as reasoning_channel(): reset() raises ValueError when
             # cleanup runs in a different Context (GC-driven finalization of

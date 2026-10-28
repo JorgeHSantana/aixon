@@ -37,6 +37,12 @@ class GatewayRateLimited(AixonError):
     """The gateway is rate-limiting the caller (HTTP 429)."""
 
 
+class ImposedModelViolation(AixonError):
+    """Code asked an ``LLM`` for the model it was configured with while another
+    model is imposed on the call (``aixon.runtime.imposed_model_scope``).
+    Raised instead of silently running the call on the configured model."""
+
+
 def _is_gateway_url(url: str) -> bool:
     """Is ``url`` under ``AIXON_GATEWAY_BASE_URL``? Never, if the env is unset."""
     raw = os.getenv("AIXON_GATEWAY_BASE_URL", "").strip()

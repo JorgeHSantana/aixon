@@ -20,6 +20,16 @@ def gateway_base_url(monkeypatch) -> str:
     return url
 
 
+@pytest.fixture
+def rec():
+    """A fresh RecordingProvider registered as "rec": the model that an
+    `imposed_model_scope(<model>, "rec")` imposes. `rec.model` answers every
+    build and `rec.builds` lists the `(model, params)` each one asked for."""
+    from tests._fakes import make_recording_provider
+
+    return make_recording_provider()
+
+
 class _FakeChatOpenAI:
     """Stands in for `langchain_openai.ChatOpenAI` and records the kwargs the
     provider handed it, so a test asserts exactly what would have reached the

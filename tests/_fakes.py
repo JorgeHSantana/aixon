@@ -100,6 +100,54 @@ def register_fake_provider() -> None:
 register_fake_provider()
 
 
+# ── Recording provider (stands in for the model a gateway imposes) ───────────
+
+class RecordingChatModel(FakeChatModel):
+    """FakeChatModel that also keeps the messages of every call it served:
+    `calls[i]` is what its i-th `_generate` received, so a test can assert what
+    an agent really sent (system prompt, history, tool results)."""
+
+    calls: list[list[BaseMessage]] = []
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: Optional[list[str]] = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.calls.append(list(messages))
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+class RecordingProvider(Provider):
+    """Provider whose `build()` records `(model, params)` in `builds` and always
+    answers with the SAME `model`, a RecordingChatModel. Sharing one model means
+    sharing one `script`, consumed in the order the calls happen across a whole
+    agent tree, whichever agent or LLM built it. `make_recording_provider`
+    registers one under a name; the `rec` fixture hands out the default one."""
+
+    env_key = "REC_API_KEY"
+
+    def __init__(self, name: str = "rec", script: list | None = None) -> None:
+        self.name = name
+        self.builds: list[tuple[str, dict]] = []
+        self.model = RecordingChatModel(script=list(script or []))
+
+    def build(self, model: str, **params: Any) -> RecordingChatModel:
+        self.builds.append((model, dict(params)))
+        return self.model
+
+
+def make_recording_provider(
+    name: str = "rec", script: list | None = None
+) -> RecordingProvider:
+    """A new RecordingProvider, registered as `name` (replacing any earlier one)."""
+    provider = RecordingProvider(name, script)
+    register_provider(provider)
+    return provider
+
+
 # ── Convenience factories (used by Plans 3/4/5/7) ────────────────────────────
 
 def make_llm(**params: Any) -> "LLM":
