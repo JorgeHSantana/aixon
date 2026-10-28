@@ -20,8 +20,11 @@ from aixon.exceptions import (
     AixonError,
     AgentNotFoundError,
     CompositionCycleError,
+    GatewayBudgetExceeded,
+    GatewayRateLimited,
     NamingError,
     RegistrationError,
+    classify_gateway_error,
 )
 from aixon.llm import LLM
 from aixon.logging import Logger
@@ -79,6 +82,10 @@ __all__ = [
     "TavilyRetriever",
     "RagieRetriever",
     "WeaviateRetriever",
+    # 0.1.28 — gateway errors
+    "GatewayBudgetExceeded",
+    "GatewayRateLimited",
+    "classify_gateway_error",
 ]
 
 # Plan 5 — server surface. aixon.server.server, protocol, and both adapters

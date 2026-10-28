@@ -21,6 +21,8 @@ from aixon.message import Chunk, Message
 from aixon.providers.base import Provider, register_provider
 
 if TYPE_CHECKING:
+    import openai
+
     from aixon.llm import LLM
 
 
@@ -133,3 +135,37 @@ def make_echo_agent(name: str = "echo", *, hidden: bool = False):
     from aixon.registry import get_registry
 
     return get_registry().resolve(name)
+
+
+# ── Gateway status errors (OpenAI-compatible gateway, HTTP 4xx/5xx) ──────────
+
+# What a gateway answers when an end user is over budget (HTTP 422).
+BUDGET = "ExceededBudget: End User=ana@example.com over budget. Spend=1.2, Budget=1.0"
+
+
+def make_gateway_status_error(
+    status: int,
+    message: str,
+    *,
+    body: dict | None = None,
+    url: str = "http://gateway.test/v1/chat/completions",
+) -> "openai.APIStatusError":
+    """The `openai.APIStatusError` the SDK raises for an HTTP `status` answer.
+
+    Picks the same subclass the SDK does (422 -> UnprocessableEntityError,
+    429 -> RateLimitError, anything else -> APIStatusError) and builds it on a
+    real `httpx.Response` for a POST to `url`. `body` is the JSON the server
+    answered (default: `{"error": {"message": <message>}}`); as in the SDK,
+    the error's own `.body` is its `"error"` member, and `str(error)` is
+    `message`. Nothing here touches the network.
+    """
+    import httpx
+    import openai
+
+    payload = body if body is not None else {"error": {"message": message}}
+    response = httpx.Response(status, request=httpx.Request("POST", url), json=payload)
+    cls: type[openai.APIStatusError] = {
+        422: openai.UnprocessableEntityError,
+        429: openai.RateLimitError,
+    }.get(status, openai.APIStatusError)
+    return cls(message, response=response, body=payload.get("error", payload))

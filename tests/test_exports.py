@@ -37,6 +37,9 @@ def test_plan1_exports_still_present():
         CompositionCycleError,
         NamingError,
         RegistrationError,
+        GatewayBudgetExceeded,
+        GatewayRateLimited,
+        classify_gateway_error,
         Chunk,
         Message,
         Role,
@@ -46,3 +49,8 @@ def test_plan1_exports_still_present():
         reset_registry,
     )
     assert True
+
+
+def test_gateway_errors_in_public_all():
+    for name in ("GatewayBudgetExceeded", "GatewayRateLimited", "classify_gateway_error"):
+        assert name in aixon.__all__
