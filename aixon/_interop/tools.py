@@ -13,7 +13,7 @@ import inspect
 from typing import TYPE_CHECKING, Any, Callable
 
 from aixon.agent import AgentTool
-from aixon.exceptions import AixonError
+from aixon.exceptions import AixonError, classify_gateway_error
 from aixon.logging import Logger
 from aixon.toolcache import ToolCallCache, current_tool_cache
 
@@ -73,7 +73,12 @@ def _guard(name: str, fn: Callable[..., Any], *, memoize: bool, shield: bool,
       Errors are NEVER cached — a later round may succeed.
     - error shield (#9): with ``shield=True``, ANY exception becomes a readable
       error string returned as the tool result, so one failing tool reports
-      instead of killing the whole run/stream.
+      instead of killing the whole run/stream. The one exception: a verdict of
+      the gateway (``classify_gateway_error``: budget spent, rate limited) is
+      not a tool failing but the end of the request, and nothing the model
+      could still say would answer it. It is re-raised, the same object, once
+      ``on_end`` has seen it (``error`` filled in), on the sync and the async
+      path alike.
     - pre/post hooks (#17): ``on_start(name, kwargs)`` runs first and may
       return a dict to REWRITE the call's kwargs (the memo cache lookup runs
       AFTER the rewrite, so a rewritten call gets its own cache key); an
@@ -97,7 +102,7 @@ def _guard(name: str, fn: Callable[..., Any], *, memoize: bool, shield: bool,
         return cache, key
 
     def _handle(exc: Exception) -> str:
-        if not shield:
+        if not shield or classify_gateway_error(exc) is not None:
             raise exc
         _log.warning(f"tool '{name}' failed: {str(exc).strip() or repr(exc)}")
         return _tool_error_text(name, exc)
@@ -182,6 +187,9 @@ def coerce_tools(tools: list, *, shield_errors: bool = True,
     rebuilding an arbitrary BaseTool (return_direct, injected state, custom
     schema) is lossy; wrap your function as a plain callable/AgentTool if you
     want the guard.
+
+    The shield never absorbs a verdict of the gateway (budget spent, rate
+    limited): it is re-raised to the caller — see ``_guard``.
 
     Raises ``AixonError`` for any other type.
     """
