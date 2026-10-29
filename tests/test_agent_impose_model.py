@@ -301,25 +301,51 @@ def test_llm_agent_imposes_and_streams(entry):
 # ── the wrapper ──────────────────────────────────────────────────────────────
 
 def test_off_returns_exactly_what_the_method_returns():
+    # A subclass of an imposer that sets impose_model back to False inherits
+    # the wrappers, and they must step aside: the very object the method
+    # returns, with no scope open while it runs.
     returned = {entry: object() for entry in ENTRIES}
+    seen: dict = {}
 
-    class PuroAgent(Agent):
+    class ImpositorAgent(Agent):
+        llm = LLM("tier-x", provider="rec")
+        impose_model = True
+
         def invoke(self, messages):
+            seen["invoke"] = current_imposed_model()
             return returned["invoke"]
 
         def ainvoke(self, messages):
+            seen["ainvoke"] = current_imposed_model()
             return returned["ainvoke"]
 
         def stream(self, messages):
+            seen["stream"] = current_imposed_model()
             return returned["stream"]
 
         def astream(self, messages):
+            seen["astream"] = current_imposed_model()
             return returned["astream"]
 
-    agent = get_registry().resolve("puroagent")
+    class DesligadoAgent(ImpositorAgent):
+        impose_model = False
 
-    for entry in ENTRIES:  # the very object, not one of ours wrapped around it
+    class ReescritoAgent(ImpositorAgent):
+        impose_model = False
+
+        def invoke(self, messages):
+            return returned["invoke"]
+
+    agent = get_registry().resolve("desligadoagent")
+
+    for entry in ENTRIES:
+        assert hasattr(vars(ImpositorAgent)[entry], "__wrapped__")
+        assert entry not in vars(DesligadoAgent)  # it runs the imposer's wrapper
+        # the very object, not one of ours wrapped around it, and no scope inside
         assert getattr(agent, entry)(ASK) is returned[entry]
+        assert seen.pop(entry) is None
+    # an entry point the subclass writes itself is left as written
+    assert not hasattr(vars(ReescritoAgent)["invoke"], "__wrapped__")
 
 
 def test_entry_points_are_wrapped_once():
