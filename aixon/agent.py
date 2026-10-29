@@ -139,10 +139,14 @@ class AgentTool:
 # runs in another context, where the reset cannot undo it. So ``stream`` and
 # ``astream`` open the scope PER STEP, only while the inner iterator runs
 # (creating it, each next/__anext__, close/aclose), and close it again before
-# every chunk is handed over. Tasks and threads the inner code starts during a
-# step copy the context with the scope in it, which is how the graph and the
-# tools of a tree inherit it. Do not "simplify" this into one ``with`` around
-# a ``yield``: tests/test_agent_impose_model.py fails on it.
+# every chunk is handed over. What the inner code starts during a step inherits
+# the scope only if it copies the context: asyncio tasks, ``asyncio.to_thread``
+# and the executors of LangChain/LangGraph do, which is how the graph and the
+# tools of a tree inherit it; a bare ``threading.Thread``,
+# ``ThreadPoolExecutor.submit`` or ``loop.run_in_executor`` does not, and code
+# run there sees no imposed model (nor the user e-mail). Do not "simplify" this
+# into one ``with`` around a ``yield``: tests/test_agent_impose_model.py fails
+# on it.
 
 _ENTRY_POINTS = ("invoke", "ainvoke", "stream", "astream")
 
@@ -237,24 +241,34 @@ def _entry_wrapper(fn: Callable[..., Any], run: Callable[..., Any]) -> Callable[
 
 
 def _wrap_entry_points(cls: type) -> None:
-    """Wrap the entry points ``cls`` itself defines (its own ``__dict__``, so
-    each function is wrapped once, where it is written; a subclass inherits the
-    wrapper) so that ``impose_model`` takes effect on them. Runs for every
-    subclass of ``Agent``, abstract subtypes included: ``ToolAgent`` and the
-    other subtypes define the entry points that concrete agents inherit.
+    """Wrap the entry points of a class that imposes (``impose_model`` is True
+    on it, declared or inherited, abstract subtypes included) so that its runs
+    open the scope. A class that does not impose is left exactly as written:
+    its entry points stay the coroutine function, async generator function and
+    generator function of the class bodies, which is what introspection
+    (``unittest.mock``, ``RunnableLambda``, a LangGraph node, ``coerce_tools``)
+    decides by.
 
-    The wrapper reads ``impose_model`` when it is called. Off, it returns
-    exactly ``fn(self, *args, **kwargs)``: the same object, with no layer in
-    between. On, it hands the call to the runner of the entry point.
+    Each entry point is looked up through the MRO, so one inherited from
+    ``ToolAgent`` or from a mixin that is not an ``Agent`` is wrapped too, and
+    the wrapper is set on ``cls`` itself. One that is already a wrapper (that
+    of an imposing parent, or one assigned from another class's body) is not
+    wrapped again, and an abstract method is left abstract: the subclass that
+    implements it, imposing by inheritance, wraps it then.
 
-    Only functions written in the body of an ``Agent`` subclass are wrapped.
-    One supplied by a mixin that is not an ``Agent`` subclass, or assigned to
-    the class after it was created, is not: its own code runs outside the
-    scope. When it delegates to ``super()``, that call reaches a wrapper, which
-    imposes for what runs beneath it."""
+    The wrapper reads ``impose_model`` when it is called, so a subclass of an
+    imposer that sets it back to False runs the function unwrapped: exactly
+    ``fn(self, *args, **kwargs)``. ``impose_model`` set on the class after it
+    was created takes no effect: the wrapping happens at class definition."""
+    if getattr(cls, "impose_model", False) is not True:
+        return
     for name in _ENTRY_POINTS:
-        fn = vars(cls).get(name)
-        if not inspect.isfunction(fn) or getattr(fn, _IMPOSING_WRAPPER, False):
+        fn = next((vars(k)[name] for k in cls.__mro__ if name in vars(k)), None)
+        if (
+            not inspect.isfunction(fn)
+            or getattr(fn, _IMPOSING_WRAPPER, False)
+            or getattr(fn, "__isabstractmethod__", False)
+        ):
             continue
         setattr(cls, name, _entry_wrapper(fn, _IMPOSING_RUNNERS[name]))
 
@@ -316,8 +330,9 @@ class Agent(ABC):
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs):
         super().__init_subclass__(**kwargs)
-        # Abstract subtypes too: they define the entry points concrete agents
-        # inherit. Before anything below can refuse the class.
+        # Abstract subtypes too: an abstract imposer (e.g. an application's
+        # base class) wraps the entry points its concrete agents inherit.
+        # Before anything below can refuse the class.
         _wrap_entry_points(cls)
         if abstract:
             cls._abstract = True

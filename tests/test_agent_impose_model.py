@@ -293,6 +293,9 @@ def test_off_returns_exactly_what_the_method_returns():
 
 def test_entry_points_are_wrapped_once():
     class UmAgent(Agent):
+        llm = LLM("tier-x", provider="rec")
+        impose_model = True
+
         def invoke(self, messages):
             return Message(role="assistant", content="")
 
@@ -312,6 +315,9 @@ def test_entry_points_are_wrapped_once():
 
 def test_abstract_subtypes_are_wrapped_and_their_subclasses_inherit_it():
     class BaseAgent(Agent, abstract=True):
+        llm = LLM("tier-x", provider="rec")
+        impose_model = True
+
         def invoke(self, messages):
             return Message(role="assistant", content="")
 
@@ -334,6 +340,9 @@ def test_abstract_subtypes_are_wrapped_and_their_subclasses_inherit_it():
 
 def test_wrapping_keeps_abstract_methods_abstract():
     class BaseAgent(Agent, abstract=True):
+        llm = LLM("tier-x", provider="rec")
+        impose_model = True
+
         @abstractmethod
         def invoke(self, messages): ...
 
@@ -610,3 +619,55 @@ def test_sync_only_agent_is_bridged_to_async_under_the_scope():
 
     assert asyncio.run(go()) == [None, None]
     assert seen == [("invoke", PAIR), ("stream", PAIR)]
+
+
+# ── only an imposer is wrapped ───────────────────────────────────────────────
+
+def test_agents_that_do_not_impose_keep_their_entry_points():
+    """An agent that does not impose is exactly what it was in 0.1.27: its entry
+    points are the functions of the class bodies, so whatever decides by
+    introspection (unittest.mock, RunnableLambda, a LangGraph node, @tool,
+    coerce_tools) sees a coroutine function, an async generator function and
+    a generator function."""
+    import inspect
+    from unittest import mock
+
+    from aixon.agents.orchestrator import Orchestrator
+
+    class EcoSemImporAgent(LLMAgent):
+        llm = LLM("fake-1", provider="fake")
+
+    for cls in (LLMAgent, ToolAgent, ReflectiveAgent, Orchestrator, EcoSemImporAgent):
+        for name in ENTRIES:
+            assert not hasattr(getattr(cls, name), "__wrapped__"), (cls, name)
+        assert inspect.iscoroutinefunction(cls.ainvoke), cls
+        assert inspect.isasyncgenfunction(cls.astream), cls
+        assert inspect.isgeneratorfunction(cls.stream), cls
+
+    with mock.patch.object(EcoSemImporAgent, "ainvoke") as patched:
+        assert isinstance(patched, mock.AsyncMock)
+
+
+def test_entry_point_from_a_mixin_is_imposed():
+    seen: list = []
+
+    class SondaMixin:  # not an Agent: its functions are found through the MRO
+        def invoke(self, messages):
+            seen.append(current_imposed_model())
+            return Message(role="assistant", content="ok")
+
+        def stream(self, messages):
+            seen.append(current_imposed_model())
+            yield Chunk(done=True)
+
+    class MisturaAgent(SondaMixin, Agent):
+        llm = LLM("tier-x", provider="rec")
+        impose_model = True
+
+    agent = get_registry().resolve("misturaagent")
+    agent.invoke(ASK)
+    list(agent.stream(ASK))
+    assert seen == [PAIR, PAIR]
+    # the wrapper sits on the imposer; the mixin is left as it was written
+    assert vars(MisturaAgent)["invoke"].__wrapped__ is vars(SondaMixin)["invoke"]
+    assert not hasattr(vars(SondaMixin)["invoke"], "__wrapped__")
