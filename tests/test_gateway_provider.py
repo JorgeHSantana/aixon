@@ -58,6 +58,28 @@ def test_build_ignores_openai_env(gw_env):
     assert (m.request_timeout, m.max_retries) == (DEFAULT_TIMEOUT_S, DEFAULT_MAX_RETRIES)
 
 
+def test_build_ignores_openai_proxy_org_and_project_env(monkeypatch):
+    # Meant for the OpenAI agents: OPENAI_PROXY made the build fail (ChatOpenAI
+    # refuses a proxy next to the identity clients), and the SDK filled the
+    # OpenAI-Organization/OpenAI-Project headers in from the other two.
+    wire = FakeGatewayWire().install(monkeypatch)
+    monkeypatch.setenv("OPENAI_PROXY", "http://openai-proxy.test:3128")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-must-not-leak")
+    monkeypatch.setenv("OPENAI_ORGANIZATION", "org-must-not-leak")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-must-not-leak")
+    llm = LLM("tier-x", provider="gateway")
+
+    with user_email_scope("ana@example.com"):
+        llm.complete(USER)
+        asyncio.run(llm.acomplete(USER))
+
+    assert len(wire.requests) == 2
+    for request in wire.requests:
+        assert "openai-organization" not in request.headers
+        assert "openai-project" not in request.headers
+        assert request.headers["x-openwebui-user-email"] == "ana@example.com"
+
+
 def test_only_by_explicit_provider():
     assert get_provider("gateway").name == "gateway"
     # no inference rule: a model name never selects the gateway
@@ -196,6 +218,33 @@ def test_no_email_no_header(monkeypatch, email):
     assert all("x-openwebui-user-email" not in r.headers for r in wire.requests)
 
 
+def test_header_does_not_stick_to_the_next_request_without_email(monkeypatch):
+    # One LLM, hence one cached model and one HTTP client per path, serves a
+    # request with an e-mail and, right after it, requests without one (outside
+    # any scope and under user_email_scope(None)). The hook keeps nothing: the
+    # later ones go out with no header at all, on both paths.
+    wire = FakeGatewayWire().install(monkeypatch)
+    llm = LLM("tier-x", provider="gateway")
+
+    async def ask_async() -> None:
+        with user_email_scope("ana@example.com"):
+            await llm.acomplete(USER)
+        await llm.acomplete(USER)
+        with user_email_scope(None):
+            await llm.acomplete(USER)
+
+    with user_email_scope("ana@example.com"):
+        llm.complete(USER)
+    llm.complete(USER)
+    with user_email_scope(None):
+        llm.complete(USER)
+    asyncio.run(ask_async())
+
+    assert [r.headers.get("x-openwebui-user-email") for r in wire.requests] == [
+        "ana@example.com", None, None,
+    ] * 2
+
+
 def test_custom_header_name(monkeypatch):
     wire = FakeGatewayWire().install(monkeypatch)
     monkeypatch.setenv("AIXON_GATEWAY_USER_HEADER", "X-End-User")
@@ -211,8 +260,29 @@ def test_custom_header_name(monkeypatch):
         assert "x-openwebui-user-email" not in request.headers
 
 
-def test_empty_header_env_disables_forwarding(gw_env, monkeypatch):
-    monkeypatch.setenv("AIXON_GATEWAY_USER_HEADER", "")
+def test_header_env_is_stripped(monkeypatch):
+    wire = FakeGatewayWire().install(monkeypatch)
+    monkeypatch.setenv("AIXON_GATEWAY_USER_HEADER", "  X-End-User \n")
+
+    with user_email_scope("ana@example.com"):
+        LLM("tier-x", provider="gateway").complete(USER)
+
+    assert wire.requests[0].headers["x-end-user"] == "ana@example.com"
+
+
+@pytest.mark.parametrize("name", ["X End", "X-End\nUser", "X-End:", "X-Ênd"],
+                         ids=["space", "newline", "colon", "non-ascii"])
+def test_invalid_header_env_fails_the_build(gw_env, monkeypatch, name):
+    monkeypatch.setenv("AIXON_GATEWAY_USER_HEADER", name)
+
+    with pytest.raises(AixonError, match="AIXON_GATEWAY_USER_HEADER") as caught:
+        get_provider("gateway").build("tier-x")
+    assert repr(name) in str(caught.value)
+
+
+@pytest.mark.parametrize("value", ["", "   "], ids=["empty", "blank"])
+def test_empty_header_env_disables_forwarding(gw_env, monkeypatch, value):
+    monkeypatch.setenv("AIXON_GATEWAY_USER_HEADER", value)
 
     m = get_provider("gateway").build("tier-x")
 

@@ -19,6 +19,8 @@ Environment:
 
 It NEVER reads OPENAI_API_KEY, OPENAI_BASE_URL or OPENAI_API_BASE: it hands
 ChatOpenAI its own key and URL, so the SDK has nothing to fill in from those.
+Nor does OPENAI_PROXY, OPENAI_ORG_ID, OPENAI_ORGANIZATION or OPENAI_PROJECT_ID
+reach the gateway: those are settings of the OpenAI agents.
 
 The end user's e-mail travels as that header on every call made while
 ``aixon.runtime.user_email_scope(email)`` is active. It is read when the request
@@ -35,6 +37,7 @@ leave, and the gateway would bill every user to the shared key.
 from __future__ import annotations
 
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError
@@ -51,6 +54,9 @@ if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
 
 DEFAULT_USER_HEADER = "X-OpenWebUI-User-Email"
+
+# An HTTP field name is a token (RFC 9110, section 5.6.2).
+_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 def _transports() -> tuple[httpx.BaseTransport | None, httpx.AsyncBaseTransport | None]:
@@ -71,6 +77,22 @@ def _required_env(name: str) -> str:
             f"or OPENAI_API_BASE."
         )
     return value
+
+
+def _user_header() -> str:
+    """The name AIXON_GATEWAY_USER_HEADER gives the e-mail header, stripped;
+    ``""`` (also a blank value) turns the forwarding off. A name that is not an
+    HTTP token fails the build here, with the env named, instead of on the
+    first request."""
+    name = os.getenv("AIXON_GATEWAY_USER_HEADER", DEFAULT_USER_HEADER).strip()
+    if name and not _HEADER_NAME.fullmatch(name):
+        raise AixonError(
+            f"AIXON_GATEWAY_USER_HEADER={name!r} is not a valid HTTP header "
+            f"name (letters, digits and !#$%&'*+-.^_`|~ only; no spaces, "
+            f"colons or line breaks). Set it to a header name, or to an empty "
+            f"value to turn the e-mail forwarding off."
+        )
+    return name
 
 
 def _identity_clients(header: str) -> dict[str, Any]:
@@ -119,20 +141,33 @@ class GatewayProvider(Provider):
             params["reasoning_effort"] = spec["effort"]
 
         # An empty header name turns the forwarding off: plain SDK clients.
-        header = os.getenv("AIXON_GATEWAY_USER_HEADER", DEFAULT_USER_HEADER)
+        header = _user_header()
         clients = _identity_clients(header) if header else {}
 
         # ChatOpenAI's `api_key` field is SecretStr | Callable | None, not a
         # bare str — wrap explicitly (api_key is non-empty, see above).
-        return ChatOpenAI(
+        chat = ChatOpenAI(
             model=model,
             api_key=SecretStr(api_key),
             base_url=base_url,
             # A gateway speaks Chat Completions; never let ChatOpenAI pick /responses.
             use_responses_api=False,
+            # OPENAI_PROXY is meant for the OpenAI agents: left to the field's
+            # default, ChatOpenAI reads it and refuses it next to the clients.
+            openai_proxy=None,
             **clients,
             **params,
         )
+        # Nor do OPENAI_ORG_ID / OPENAI_ORGANIZATION / OPENAI_PROJECT_ID belong
+        # to the gateway. No constructor argument keeps them out: given None,
+        # ChatOpenAI and then the SDK client read them from the environment.
+        # So clear them on the built clients, which compute the
+        # OpenAI-Organization / OpenAI-Project headers of each request from them.
+        chat.openai_organization = None
+        for client in (chat.root_client, chat.root_async_client):
+            client.organization = None
+            client.project = None
+        return chat
 
 
 register_provider(GatewayProvider())
