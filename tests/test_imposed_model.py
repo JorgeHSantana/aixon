@@ -72,6 +72,26 @@ def test_only_portable_params_reach_imposed_build(rec):
     assert rec.builds[-1][1]["temperature"] == 0.7
 
 
+def test_class_param_aliases_are_normalized_before_the_portable_filter(rec):
+    # `generation_params()` turns a request's dialect spellings into the
+    # canonical keys; the class's params get the same treatment under the scope,
+    # so a portable knob spelled the other way does not vanish.
+    llm = LLM("fake-1", provider="fake", max_completion_tokens=64, stop_sequences=["FIM"])
+
+    with imposed_model_scope("tier-x", "rec"):
+        llm.request_chat_model()
+    assert rec.builds[-1] == ("tier-x", {"max_tokens": 64, "stop": ["FIM"]})
+
+    # the canonical key wins over its alias, and the request over the class
+    both = LLM("fake-1", provider="fake", max_tokens=32, max_completion_tokens=64)
+    with imposed_model_scope("tier-x", "rec"):
+        both.request_chat_model()
+    assert rec.builds[-1] == ("tier-x", {"max_tokens": 32})
+    with imposed_model_scope("tier-x", "rec"), generation_params({"max_tokens": 8}):
+        both.request_chat_model()
+    assert rec.builds[-1] == ("tier-x", {"max_tokens": 8})
+
+
 def test_portable_params_are_exactly_the_contract():
     assert PORTABLE_PARAMS == frozenset(
         {"temperature", "top_p", "max_tokens", "stop", "presence_penalty", "frequency_penalty"}
@@ -161,6 +181,19 @@ def test_chat_model_fails_closed(rec):
     assert llm._chat_model is None  # nothing was built behind the error
     assert rec.builds == []
     assert isinstance(llm.chat_model, FakeChatModel)  # outside the scope: as ever
+
+
+def test_chat_model_built_before_the_scope_still_fails_closed(rec):
+    llm = LLM("fake-1", provider="fake")
+    configured = llm.chat_model  # built and cached outside any scope
+    assert isinstance(configured, FakeChatModel)
+
+    with imposed_model_scope("tier-x", "rec"):
+        with pytest.raises(ImposedModelViolation, match="tier-x"):
+            llm.chat_model  # the cache must not slip past the check
+
+    assert llm.chat_model is configured  # outside again: the same model as ever
+    assert rec.builds == []
 
 
 def test_unregistered_imposed_provider_fails_closed():

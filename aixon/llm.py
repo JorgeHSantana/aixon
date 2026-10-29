@@ -229,7 +229,7 @@ class LLM:
         stay behind. The cache key carries the model, the provider and whether
         it was imposed, so one LLM used inside and outside a scope never gets
         the other's model. A ``pinned`` LLM ignores the scope."""
-        from aixon.runtime import PORTABLE_PARAMS, current_generation_params
+        from aixon.runtime import _PARAM_ALIASES, PORTABLE_PARAMS, current_generation_params
 
         imposed = self._imposed()
         params = current_generation_params()
@@ -241,8 +241,14 @@ class LLM:
             model_name, build_params = self.model, params
         else:
             model_name = imposed[0]
+            # The class's dialect spellings get the normalization the request's
+            # already got in generation_params(): the canonical key wins.
+            class_params = dict(self.params)
+            for alias, canonical in _PARAM_ALIASES.items():
+                if class_params.get(alias) is not None and class_params.get(canonical) is None:
+                    class_params[canonical] = class_params[alias]
             build_params = {
-                k: v for k, v in {**self.params, **params}.items()
+                k: v for k, v in {**class_params, **params}.items()
                 if k in PORTABLE_PARAMS and v is not None
             }
 
