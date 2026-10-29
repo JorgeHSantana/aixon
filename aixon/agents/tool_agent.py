@@ -765,7 +765,7 @@ class ToolAgent(Agent, abstract=True):
                 if next_task is not None and not next_task.done():
                     next_task.cancel()
                     with contextlib.suppress(BaseException):
-                        await next_task
+                        await asyncio.wait({next_task})
                 elif next_task is not None and not next_task.cancelled():
                     # Sweep #1: the task already completed (this tick) but the
                     # generator is being abandoned (GeneratorExit from a
