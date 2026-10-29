@@ -12,9 +12,11 @@ gateway OpenAI-compatível (um gateway como o LiteLLM: o chamador nomeia um
 tier, o gateway escolhe o modelo real e mede o gasto por pessoa) agora declara
 esse gateway como provedor, impõe o modelo de um agente à árvore inteira,
 repassa a identidade de quem pergunta e responde ao estouro de cota com uma
-mensagem legível. Nada muda para quem não declara nada: os padrões preservam
-o comportamento da 0.1.27 (`Agent.impose_model = False`, `LLM(pinned=False)`,
-`ToolAgent.client_system = "replace"`).
+mensagem legível. Para quem não declara nada, o resultado das chamadas não
+muda: os padrões preservam o comportamento da 0.1.27
+(`Agent.impose_model = False`, `LLM(pinned=False)`,
+`ToolAgent.client_system = "replace"`). A exceção é a introspecção dos entry
+points dos agentes, descrita em Changed.
 
 ### Added
 - **Provedor `gateway` (OpenAI-compatível).** `LLM("tier-x", provider="gateway")`
@@ -92,6 +94,28 @@ o comportamento da 0.1.27 (`Agent.impose_model = False`, `LLM(pinned=False)`,
   modelo do outro), e o cache ganhou uma trava: os agentes rodam em threads, e
   despejar e inserir sem trava podia levantar `KeyError` ou estourar o limite de
   8 entradas.
+- **Os entry points de toda subclasse de `Agent` passam a ser funções comuns que
+  embrulham as originais, mesmo com `impose_model = False`.** O wrapper é o
+  gancho do `impose_model`: lê o atributo a cada chamada e, desligado, só
+  repassa. Chamar `invoke`/`ainvoke`/`stream`/`astream` devolve o mesmo que na
+  0.1.27, mas a introspecção muda: `inspect.iscoroutinefunction(agent.ainvoke)`,
+  `inspect.isasyncgenfunction(agent.astream)` e
+  `inspect.isgeneratorfunction(agent.stream)` passam a dar `False`, mesmo
+  quando o original é `async def` ou gerador (davam `True`), e `inspect.unwrap`
+  devolve a função original. Quem escolhe entre sync e async por essa
+  introspecção passa a tratar o método como síncrono:
+  `RunnableLambda(agent.ainvoke)` devolve a coroutine em vez do `Message` (com
+  `astream`/`stream`, o gerador em vez do `Chunk`); um nó assíncrono do LangGraph
+  (`add_node(nome, agent.ainvoke)`) falha com `InvalidUpdateError`; o
+  `BackgroundTasks` do Starlette nunca executa o corpo do `ainvoke`;
+  `patch.object(Agente, "ainvoke", ...)`, `create_autospec` e
+  `patch(..., autospec=True)` criam um dublê síncrono, e o `await` levanta
+  `TypeError`; um `agent.ainvoke` cru em `tools=[...]` (ou em `coerce_tools`) é
+  registrado como função síncrona, e a tool devolve a coroutine em vez do
+  resultado. Em vez do método cru, passe `agent.as_tool()` (para tools) ou uma
+  `async def` que faz `await agent.ainvoke(...)`; nos dublês,
+  `new_callable=AsyncMock`. Não use o `__wrapped__`: ele não vem ligado à
+  instância, e chamá-lo pula o escopo do `impose_model`.
 
 ## [0.1.27] - 2026-08-06
 

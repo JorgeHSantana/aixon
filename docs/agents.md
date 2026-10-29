@@ -319,8 +319,10 @@ num `ContextVar` (`aixon.runtime.imposed_model_scope` /
 `current_imposed_model`). Todo `LLM` que não seja `pinned` e rode ali — as tools,
 os subagentes via `as_tool()`, o worker e o juiz de um `ReflectiveAgent`, os nós
 de um `Orchestrator` — constrói esse modelo pelo provedor imposto, no lugar do
-que declarou. Os padrões preservam o comportamento de antes: `impose_model =
-False` e um `LLM` fora de qualquer escopo não mudam em nada.
+que declarou. Os padrões preservam o resultado das chamadas de antes: com
+`impose_model = False`, ou com um `LLM` fora de qualquer escopo, nenhuma chamada
+devolve outra coisa. A diferença está na introspecção dos entry points (veja os
+limites).
 
 - **Validação.** `impose_model` tem de ser `bool`, e `True` exige um `llm` de
   classe do tipo `LLM` (aquele de onde sai o modelo imposto). As duas coisas são
@@ -369,6 +371,30 @@ False` e um `LLM` fora de qualquer escopo não mudam em nada.
     (`Cls.invoke = f`), roda fora do escopo, e `impose_model = True` não faz nada
     por ele, em silêncio. (Um mixin que delega a `super().invoke(...)` funciona:
     o `super()` cai no entry point embrulhado, que impõe o que roda abaixo.)
+  - Os `invoke`/`ainvoke`/`stream`/`astream` de toda subclasse de `Agent` são
+    funções comuns que embrulham as originais, mesmo com `impose_model = False`
+    (o wrapper lê o atributo a cada chamada e, desligado, só repassa). Chamá-los
+    devolve o mesmo que na 0.1.27, mas
+    `inspect.iscoroutinefunction(agent.ainvoke)`,
+    `inspect.isasyncgenfunction(agent.astream)` e
+    `inspect.isgeneratorfunction(agent.stream)` dão `False`, mesmo quando o
+    original é `async def` ou gerador (davam `True`), e `inspect.unwrap` devolve
+    a função original. Quem escolhe entre sync e async por essa introspecção
+    passa a tratar o método como síncrono:
+    - `RunnableLambda(agent.ainvoke)` devolve a coroutine em vez do `Message`
+      (com `astream`/`stream`, o gerador em vez do `Chunk`);
+    - um nó assíncrono do LangGraph, `add_node(nome, agent.ainvoke)`, falha com
+      `InvalidUpdateError`;
+    - o `BackgroundTasks` do Starlette nunca executa o corpo do `ainvoke`;
+    - `patch.object(Agente, "ainvoke", ...)`, `create_autospec` e
+      `patch(..., autospec=True)` criam um dublê síncrono, e o `await` levanta
+      `TypeError`;
+    - um `agent.ainvoke` cru em `tools=[...]` (ou em `coerce_tools`) é registrado
+      como função síncrona, e a tool devolve a coroutine em vez do resultado;
+    - **Contorno.** Em vez do método cru, passe `agent.as_tool()` (para tools) ou
+      uma `async def` que faz `await agent.ainvoke(...)`; nos dublês, use
+      `new_callable=AsyncMock`. Não use o `__wrapped__`: ele não vem ligado à
+      instância, e chamá-lo pula o escopo do `impose_model`.
   - Threads criadas com `threading.Thread`, `loop.run_in_executor` ou um
     `ThreadPoolExecutor` puro não copiam o contexto: um `LLM` chamado de lá não
     vê o modelo imposto e roda no modelo configurado dele, sem erro — e também
