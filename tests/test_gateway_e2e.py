@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,7 @@ from fastapi.testclient import TestClient
 
 from aixon import ToolAgent
 from aixon.llm import LLM
+from aixon.observability import langfuse_enabled
 from aixon.runtime import user_email_scope
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.server import Server
@@ -137,6 +139,13 @@ def assert_delegation_on_the_wire(wire: FakeGatewayWire, email: str) -> None:
 
 
 # --- every call of the tree goes to the gateway, for the user ---------------
+def test_langfuse_keys_of_the_shell_never_reach_the_suite():
+    # tests/conftest.py clears them: with the keys in the developer's shell,
+    # every request of the Server tests would send a trace to Langfuse
+    assert not langfuse_enabled()
+    assert not {"LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"} & os.environ.keys()
+
+
 def test_e2e_stream_routes_every_call_to_gateway_with_identity(e2e):
     queue_delegation(e2e.wire)
 

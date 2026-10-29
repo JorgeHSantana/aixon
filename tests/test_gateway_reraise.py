@@ -246,6 +246,32 @@ def test_on_tool_end_sees_gateway_error(make_exc, path):
     assert error is exc
 
 
+@pytest.mark.parametrize("make_exc", GATEWAY)
+@pytest.mark.parametrize("path", PATHS)
+def test_shield_reraises_a_verdict_raised_by_on_tool_start(make_exc, path):
+    # A hook that checks the quota before the call and raises the verdict: the
+    # same rule as for the tool itself, on both paths
+    exc = make_exc()
+    ended = []
+
+    def on_tool_start(name, kwargs):
+        raise exc
+
+    tool = raising_tool(
+        "agent-tool",
+        path,
+        AssertionError("the tool ran although on_tool_start raised"),
+        on_tool_start=on_tool_start,
+        on_tool_end=lambda name, kwargs, result, error: ended.append(error),
+    )
+
+    with pytest.raises(type(exc)) as info:
+        call_tool(tool, path)
+
+    assert info.value is exc
+    assert ended == [exc]
+
+
 # ── through the agents ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("entry", ENTRIES)

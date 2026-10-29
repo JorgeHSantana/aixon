@@ -10,6 +10,16 @@ def _reset_registry():
     reset_registry()
 
 
+@pytest.fixture(autouse=True)
+def _no_langfuse_from_the_shell(monkeypatch):
+    """Langfuse turns itself on from LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY:
+    with them in the developer's shell, every request of the Server tests
+    would send a trace. Every test starts without them; the Langfuse tests
+    set their own."""
+    for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def gateway_base_url(monkeypatch) -> str:
     """Set AIXON_GATEWAY_BASE_URL to a fake gateway and return it. The `.test`
