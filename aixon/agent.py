@@ -11,7 +11,7 @@ import inspect
 from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Iterator
 
 from aixon.exceptions import AixonError, NamingError
 from aixon.logging import Logger
@@ -19,6 +19,9 @@ from aixon.message import Chunk, Message
 from aixon.reasoning import current_channel
 from aixon.registry import get_registry
 from aixon.runtime import current_imposed_model, imposed_model_scope
+
+if TYPE_CHECKING:
+    from aixon.llm import LLM
 
 _log = Logger("aixon.agent")
 
@@ -276,7 +279,8 @@ def _wrap_entry_points(cls: type) -> None:
 def _validate_impose_model(cls: type["Agent"]) -> None:
     """Refuse, at class definition and before registration, an ``impose_model``
     that is not a bool, and ``impose_model=True`` on a class with no class-level
-    ``llm`` to impose."""
+    ``llm`` to impose. Warn when that ``llm`` (not ``pinned``) declares
+    settings that will not reach the imposed model in its own calls."""
     value = cls.impose_model
     if not isinstance(value, bool):
         raise AixonError(
@@ -286,12 +290,38 @@ def _validate_impose_model(cls: type["Agent"]) -> None:
         return
     from aixon.llm import LLM  # local: this module imports nothing of the LLM stack at load time
 
-    if not isinstance(getattr(cls, "llm", None), LLM):
+    llm = getattr(cls, "llm", None)
+    if not isinstance(llm, LLM):
         raise AixonError(
             f"'{cls.__name__}' sets impose_model=True, which imposes the model "
             f"of its own `llm` on the whole tree below it, but it declares no "
             f"class-level `llm` of type LLM (e.g. llm = LLM('tier-x', "
-            f"provider='gateway')). Got: {getattr(cls, 'llm', None)!r}."
+            f"provider='gateway')). Got: {llm!r}."
+        )
+    _warn_about_lost_settings(cls, llm)
+
+
+def _warn_about_lost_settings(cls: type["Agent"], llm: "LLM") -> None:
+    """Under its own scope the imposer's ``llm`` is one more LLM of the tree:
+    it gets only the portable generation params, like every other. Name, at
+    class definition, what it declares that will not reach the imposed model."""
+    if llm.pinned:
+        return
+    from aixon.runtime import _PARAM_ALIASES, PORTABLE_PARAMS
+
+    lost = sorted(
+        k for k, v in llm.params.items()
+        if v is not None and _PARAM_ALIASES.get(k, k) not in PORTABLE_PARAMS
+    )
+    if llm.reasoning is not None and llm.reasoning is not False:
+        lost.insert(0, "reasoning")
+    if lost:
+        _log.warning(
+            "'%s' sets impose_model=True: in its own calls its LLM('%s') gets "
+            "only the portable generation params, like every LLM of the tree, "
+            "so %s will not reach the imposed model. Declare that LLM with "
+            "pinned=True to keep its own configuration in its own calls.",
+            cls.__name__, llm.model, ", ".join(repr(k) for k in lost),
         )
 
 

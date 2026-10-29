@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 from abc import abstractmethod
 
 import pytest
@@ -199,6 +200,36 @@ def test_abstract_subtype_leaves_the_llm_to_its_concrete_subclasses():
 
     type("ComLlmAgent", (BaseDeCoordenadorAgent,), {"llm": LLM("tier-x", provider="rec")})
     assert get_registry().resolve("comllmagent").impose_model is True
+
+
+def test_imposer_warns_about_its_own_kwargs_that_do_not_cross(caplog):
+    # Under its own scope the imposer's LLM is one more LLM of the tree: only
+    # the portable params reach the imposed model. Say so where it is declared.
+    with caplog.at_level(logging.WARNING, logger="aixon.agent"):
+        class SementeAgent(LLMAgent):
+            llm = LLM("tier-x", provider="rec", seed=7, timeout=300, temperature=0.2,
+                      max_completion_tokens=64, reasoning={"effort": "high"})
+            impose_model = True
+
+    (record,) = [r for r in caplog.records if "SementeAgent" in r.getMessage()]
+    message = record.getMessage()
+    assert record.levelno == logging.WARNING and record.name == "aixon.agent"
+    for part in ("'reasoning'", "'seed'", "'timeout'", "pinned=True"):
+        assert part in message
+    # portable params (and their aliases) do reach it: not named
+    for portable in ("temperature", "max_completion_tokens"):
+        assert portable not in message
+
+
+@pytest.mark.parametrize("llm", [
+    LLM("tier-x", provider="rec", temperature=0.2, max_tokens=64, stop=["FIM"]),
+    LLM("tier-x", provider="rec", seed=7, reasoning=True, pinned=True),
+], ids=["only-portable", "pinned"])
+def test_imposer_without_lost_kwargs_does_not_warn(caplog, llm):
+    with caplog.at_level(logging.WARNING, logger="aixon.agent"):
+        type("CalmoAgent", (LLMAgent,), {"llm": llm, "impose_model": True})
+
+    assert not [r for r in caplog.records if "CalmoAgent" in r.getMessage()]
 
 
 # ── the scope does not leak through generators ───────────────────────────────
