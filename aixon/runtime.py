@@ -185,7 +185,14 @@ def user_email_scope(email: str | None) -> Iterator[str | None]:
     """Publish (or clear, with None) the end user's e-mail for the block.
 
     The e-mail is stripped and a blank one becomes None, so readers never
-    tell "" from absent. On exit the previous value comes back."""
+    tell "" from absent. On exit the previous value comes back.
+
+    It travels as an HTTP header, so it must be ASCII: an internationalized
+    e-mail address is not supported in this version. Like any ContextVar
+    scope, it is seen only by what runs in this context (asyncio tasks and
+    ``asyncio.to_thread`` copy it; a bare thread does not), and a scope held
+    across a ``yield`` is also seen by the generator's consumer between two
+    items: open it around the call, not around a ``yield``."""
     value = (email or "").strip() or None
     token = _user_email.set(value)
     try:

@@ -359,7 +359,7 @@ generic server error: a chat message on a stream, an HTTP `429` without one.
 | `XAI_API_KEY` | _(required for xAI)_ | API key for the xAI provider (Grok models). `XAI_BASE_URL` overrides the default `https://api.x.ai/v1`. |
 | `AIXON_GATEWAY_BASE_URL` | _(required for the gateway)_ | URL of the OpenAI-compatible gateway, e.g. `http://gateway.example/v1`. |
 | `AIXON_GATEWAY_API_KEY` | _(required for the gateway)_ | API key for the gateway. The gateway provider never falls back to `OPENAI_API_KEY`. |
-| `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Header that carries the end user's e-mail to the gateway. Empty turns the forwarding off. |
+| `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Header that carries the end user's e-mail to the gateway (stripped; it must be a valid HTTP header name). Empty turns the forwarding off. |
 
 ---
 

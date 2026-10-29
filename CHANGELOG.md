@@ -12,11 +12,9 @@ gateway OpenAI-compatível (um gateway como o LiteLLM: o chamador nomeia um
 tier, o gateway escolhe o modelo real e mede o gasto por pessoa) agora declara
 esse gateway como provedor, impõe o modelo de um agente à árvore inteira,
 repassa a identidade de quem pergunta e responde ao estouro de cota com uma
-mensagem legível. Para quem não declara nada, o resultado das chamadas não
-muda: os padrões preservam o comportamento da 0.1.27
-(`Agent.impose_model = False`, `LLM(pinned=False)`,
-`ToolAgent.client_system = "replace"`). A exceção é a introspecção dos entry
-points dos agentes, descrita em Changed.
+mensagem legível. Nada muda para quem não declara nada: os padrões preservam
+o comportamento da 0.1.27 (`Agent.impose_model = False`, `LLM(pinned=False)`,
+`ToolAgent.client_system = "replace"`).
 
 ### Added
 - **Provedor `gateway` (OpenAI-compatível).** `LLM("tier-x", provider="gateway")`
@@ -26,8 +24,11 @@ points dos agentes, descrita em Changed.
   build levanta `AixonError`, e o provedor nunca lê `OPENAI_API_KEY`,
   `OPENAI_BASE_URL` nem `OPENAI_API_BASE`) e `AIXON_GATEWAY_USER_HEADER`
   (opcional; nome do header que leva o e-mail do usuário, padrão
-  `X-OpenWebUI-User-Email`; vazia desliga o repasse). Extra `aixon[gateway]`
-  (`langchain-openai>=0.2`; o `all` já o cobre).
+  `X-OpenWebUI-User-Email`, aparado; vazia desliga o repasse, e um nome que não
+  é header HTTP válido levanta `AixonError` no build). `OPENAI_PROXY`,
+  `OPENAI_ORG_ID`/`OPENAI_ORGANIZATION` e `OPENAI_PROJECT_ID` também não chegam
+  ao cliente do gateway. Extra `aixon[gateway]` (`langchain-openai>=0.2`; o
+  `all` já o cobre).
 - **Modelo imposto à árvore: `Agent.impose_model`, `LLM(pinned=)`,
   `aixon.runtime.imposed_model_scope`/`current_imposed_model` e
   `ImposedModelViolation`.** Um agente com `impose_model = True` publica o
@@ -36,41 +37,59 @@ points dos agentes, descrita em Changed.
   e juiz do `ReflectiveAgent`, nós do `Orchestrator`) constrói esse modelo, só
   com os parâmetros portáveis (`temperature`, `top_p`, `max_tokens`, `stop`,
   `presence_penalty`, `frequency_penalty`; nunca `reasoning`,
-  `reasoning_effort`, `prediction` nem `timeout`/`max_retries`). O escopo de
-  fora vale, e nos streams ele abre por passo, nunca visível a quem consome.
+  `reasoning_effort`, `prediction` nem `timeout`/`max_retries`, que ficam nos
+  padrões do provedor; `max_completion_tokens` e `stop_sequences` contam como
+  `max_tokens` e `stop`). Só a classe com `impose_model = True` (e as
+  subclasses dela) tem os entry points embrulhados, na definição da classe;
+  quem não impõe não muda. O escopo de fora vale, e nos streams ele abre por
+  passo, nunca visível a quem consome.
   Falha fechada: sob o escopo, `LLM.chat_model` levanta `ImposedModelViolation`
   em vez de entregar o modelo configurado; `LLM(..., pinned=True)` mantém o
   modelo próprio (`pinned` passa a ser argumento reservado do `LLM`, não vai
   mais para os `**params` do provedor). Limites em `docs/agents.md`
-  ("Modelo imposto"): o `Embedding` não é coberto, e entry points fora do
-  corpo de uma subclasse de `Agent` ou threads que não copiam o contexto não
-  impõem o modelo.
+  ("Modelo imposto"): o `Embedding` não é coberto; um `impose_model` ou um
+  entry point atribuído à classe depois de criada não impõe nada; os kwargs não
+  portáveis do próprio impositor também não chegam ao modelo imposto; e threads
+  que não copiam o contexto perdem o modelo imposto e o e-mail.
+- **WARNING na definição de um impositor que perde configuração.** Quando o
+  `llm` (não `pinned`) de uma classe com `impose_model = True` declara kwargs
+  fora dos parâmetros portáveis ou `reasoning` ligado, o logger `aixon.agent`
+  avisa na definição da classe, nomeando as chaves que não chegam ao modelo
+  imposto e apontando `pinned=True`. O comportamento das chamadas não muda.
 - **E-mail de quem pergunta: `aixon.runtime.user_email_scope`/
   `current_user_email`.** Publicam o e-mail para a chamada. Só o provedor
   `gateway` lê, e o manda no header configurado, lido na hora do envio, nos
   clientes HTTP sync e async. Os outros provedores nunca o recebem; sem
-  e-mail, nenhum header sai (recusar a request é papel da aplicação).
+  e-mail, nenhum header sai (recusar a request é papel da aplicação). O e-mail
+  tem de ser ASCII (e-mail internacional não é suportado nesta versão).
 - **Erros do gateway: `GatewayBudgetExceeded`, `GatewayRateLimited` e
   `classify_gateway_error`.** `classify_gateway_error(exc)` devolve a classe do
   veredito do gateway, ou `None`: `GatewayBudgetExceeded` para o
   `openai.APIStatusError` 422 com "budget" na mensagem (sem diferenciar
   maiúsculas), `GatewayRateLimited` para o 429, e a própria classe para uma
-  instância de uma das duas (que a aplicação também pode levantar). Percorre
-  `__cause__`, `__context__` e os membros de grupos de exceções. Só conta o
-  `APIStatusError` cuja request foi à `AIXON_GATEWAY_BASE_URL`: um 429 da
-  OpenAI, da xAI ou da z.AI não é erro do gateway. O erro original continua
-  sendo o que se propaga; o shield, o juiz e o `Server` é que o classificam.
+  instância de uma das duas (que uma tool também pode levantar para sinalizar
+  cota). O aixon não levanta as duas classes: o erro do gateway chega como
+  `openai.UnprocessableEntityError`/`openai.RateLimitError`, e é o
+  `classify_gateway_error` que diz qual veredito ele representa. Percorre
+  `__cause__`, `__context__` (menos quando `__suppress_context__` está ligado,
+  como em `raise ... from None`) e os membros de grupos de exceções, e nunca
+  levanta. Só conta o `APIStatusError` cuja request foi à
+  `AIXON_GATEWAY_BASE_URL`: um 429 da OpenAI, da xAI ou da z.AI não é erro do
+  gateway. O erro original continua sendo o que se propaga; o shield, o juiz e
+  o `Server` é que o classificam.
 - **Mensagens do `Server`:** `Server(budget_exceeded_message=...,
   rate_limited_message=...)`. Com o veredito do gateway, a request termina com
   o texto, em vez do erro genérico: no stream, como o último conteúdo de uma
   resposta que fecha normalmente (`finish_reason` e `[DONE]`; no Anthropic,
   `text_delta`, `message_delta` e `message_stop`); sem stream, HTTP 429 com
   `{"error": {"message", "type": "insufficient_quota" | "rate_limit_exceeded",
-  "code": "budget_exceeded" | "rate_limited"}}`. As duas mensagens seguem a
-  regra do singleton: a primeira construção as fixa, e um texto diferente numa
-  construção posterior levanta `AixonError` (use `Server._reset()`). O `Server`
-  também publica o e-mail do header `x-openwebui-user-email` com
-  `user_email_scope`, nos dois caminhos.
+  "code": "budget_exceeded" | "rate_limited"}}` e o header
+  `x-should-retry: false` (sem ele, um cliente com o SDK openai repetiria a
+  request e rodaria a árvore inteira de novo). A recusa é logada como WARNING
+  só com o veredito, o agente, o adapter e o status HTTP, nunca com o texto do
+  gateway (que pode trazer o e-mail e o gasto). O `Server` também publica o
+  e-mail do header `x-openwebui-user-email` com `user_email_scope`, nos dois
+  caminhos.
 - **`ToolAgent.client_system`: `"replace"` (padrão) ou `"append"`.** Define o
   que a mensagem `system`/`developer` inicial do cliente faz com o `prompt`:
   `"replace"` a põe no lugar dele (o comportamento de sempre); `"append"` mantém
@@ -89,33 +108,16 @@ points dos agentes, descrita em Changed.
   mensagem. Só contam os erros cuja request foi à `AIXON_GATEWAY_BASE_URL`; os
   dos outros provedores (um 429 da OpenAI num juiz, por exemplo) seguem como
   antes.
+- **Singleton do `Server` e as mensagens do gateway.** A primeira construção
+  fixa `budget_exceeded_message` e `rate_limited_message`; uma construção
+  posterior que pede um texto diferente do guardado levanta `AixonError` (use
+  `Server._reset()`), em vez de reusar em silêncio o que a primeira guardou. O
+  texto padrão conta como "sem opinião" e mantém o guardado.
 - **Cache de `request_chat_model`:** a chave ganhou o modelo, o provedor e se o
   modelo foi imposto (o mesmo `LLM` usado dentro e fora do escopo nunca recebe o
   modelo do outro), e o cache ganhou uma trava: os agentes rodam em threads, e
   despejar e inserir sem trava podia levantar `KeyError` ou estourar o limite de
   8 entradas.
-- **Os entry points de toda subclasse de `Agent` passam a ser funções comuns que
-  embrulham as originais, mesmo com `impose_model = False`.** O wrapper é o
-  gancho do `impose_model`: lê o atributo a cada chamada e, desligado, só
-  repassa. Chamar `invoke`/`ainvoke`/`stream`/`astream` devolve o mesmo que na
-  0.1.27, mas a introspecção muda: `inspect.iscoroutinefunction(agent.ainvoke)`,
-  `inspect.isasyncgenfunction(agent.astream)` e
-  `inspect.isgeneratorfunction(agent.stream)` passam a dar `False`, mesmo
-  quando o original é `async def` ou gerador (davam `True`), e `inspect.unwrap`
-  devolve a função original. Quem escolhe entre sync e async por essa
-  introspecção passa a tratar o método como síncrono:
-  `RunnableLambda(agent.ainvoke)` devolve a coroutine em vez do `Message` (com
-  `astream`/`stream`, o gerador em vez do `Chunk`); um nó assíncrono do LangGraph
-  (`add_node(nome, agent.ainvoke)`) falha com `InvalidUpdateError`; o
-  `BackgroundTasks` do Starlette nunca executa o corpo do `ainvoke`;
-  `patch.object(Agente, "ainvoke", ...)`, `create_autospec` e
-  `patch(..., autospec=True)` criam um dublê síncrono, e o `await` levanta
-  `TypeError`; um `agent.ainvoke` cru em `tools=[...]` (ou em `coerce_tools`) é
-  registrado como função síncrona, e a tool devolve a coroutine em vez do
-  resultado. Em vez do método cru, passe `agent.as_tool()` (para tools) ou uma
-  `async def` que faz `await agent.ainvoke(...)`; nos dublês,
-  `new_callable=AsyncMock`. Não use o `__wrapped__`: ele não vem ligado à
-  instância, e chamá-lo pula o escopo do `impose_model`.
 
 ## [0.1.27] - 2026-08-06
 

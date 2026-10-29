@@ -129,12 +129,14 @@ to infer it from: it is reached **only** through an explicit
 |---|---|---|
 | `AIXON_GATEWAY_BASE_URL` | _(required)_ | The gateway's OpenAI-compatible URL, e.g. `http://gateway.example/v1`. |
 | `AIXON_GATEWAY_API_KEY` | _(required)_ | The gateway's key. |
-| `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Name of the header that carries the end user's e-mail. Empty turns the forwarding off. |
+| `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Name of the header that carries the end user's e-mail, stripped. Empty (or blank) turns the forwarding off; a value that is not a valid HTTP header name (a space, a line break, a `:`) makes the build raise `AixonError`. |
 
 A missing or blank required variable makes building the model raise
 `AixonError`: the provider never reads `OPENAI_API_KEY`, `OPENAI_BASE_URL` or
 `OPENAI_API_BASE`, so an OpenAI credential is never sent to the gateway by
-accident. Install with `pip install "aixon[gateway]"` (pulls in
+accident. Nor do `OPENAI_PROXY`, `OPENAI_ORG_ID`/`OPENAI_ORGANIZATION` or
+`OPENAI_PROJECT_ID`, which are settings of the OpenAI agents, reach the gateway's
+client. Install with `pip install "aixon[gateway]"` (pulls in
 `langchain-openai`).
 
 *Who is asking.* Spend and limits at the gateway are per person, not per shared
@@ -149,7 +151,20 @@ caches one model, and that model serves many people. The hook is installed on
 client alone would be skipped on the async path with no error, and every user
 would be billed to the shared key. Without an e-mail no header goes out at all
 (refusing a request that arrives without identity is the application's job),
-and no other provider ever receives the e-mail.
+and no other provider ever receives the e-mail. The e-mail must be ASCII (it is
+an HTTP header): an internationalized address is not supported in this version.
+
+*When the gateway says no.* A spent budget (HTTP 422 mentioning "budget") or a
+rate limit (HTTP 429) reaches the caller as the SDK's own error,
+`openai.UnprocessableEntityError` or `openai.RateLimitError`: aixon does **not**
+raise `GatewayBudgetExceeded` or `GatewayRateLimited`. `classify_gateway_error(exc)`
+(in `aixon.exceptions`) says which of the two an error stands for, walking its
+`__cause__`/`__context__` chain (a `raise ... from None` cuts the context), or
+returns `None`; it never raises. Only an error from a request to
+`AIXON_GATEWAY_BASE_URL` counts. A tool may raise either class itself to signal a
+quota, and it is treated as the gateway's verdict. The `ToolAgent` shield, the
+`ReflectiveAgent` and the `Server` use this classification (see
+[server.md](server.md#errors)).
 
 **`pinned`.** `LLM(..., pinned=True)` keeps this `LLM`'s own model and provider
 even while a model is imposed on the call (see [Modelo imposto](#modelo-imposto-impose_model)
@@ -319,14 +334,23 @@ num `ContextVar` (`aixon.runtime.imposed_model_scope` /
 `current_imposed_model`). Todo `LLM` que não seja `pinned` e rode ali — as tools,
 os subagentes via `as_tool()`, o worker e o juiz de um `ReflectiveAgent`, os nós
 de um `Orchestrator` — constrói esse modelo pelo provedor imposto, no lugar do
-que declarou. Os padrões preservam o resultado das chamadas de antes: com
-`impose_model = False`, ou com um `LLM` fora de qualquer escopo, nenhuma chamada
-devolve outra coisa. A diferença está na introspecção dos entry points (veja os
-limites).
+que declarou. Os padrões preservam o comportamento de antes: `impose_model =
+False` e um `LLM` fora de qualquer escopo não mudam em nada.
 
 - **Validação.** `impose_model` tem de ser `bool`, e `True` exige um `llm` de
   classe do tipo `LLM` (aquele de onde sai o modelo imposto). As duas coisas são
   checadas na definição da classe e levantam `AixonError` antes do registro.
+- **Só quem impõe é embrulhado.** Na definição da classe, uma classe com
+  `impose_model = True` (declarado nela ou herdado, também numa subclasse
+  abstrata) troca os `invoke`/`ainvoke`/`stream`/`astream` que tem — escritos
+  no corpo, herdados de um tipo do aixon ou de um mixin — por wrappers que abrem
+  o escopo; as subclasses dela herdam os wrappers e embrulham os entry points
+  que reescrevem. Uma classe que não impõe fica exatamente como na 0.1.27: os
+  entry points dela continuam sendo as `async def` e os geradores do corpo, e
+  quem decide por introspecção (`unittest.mock`, `RunnableLambda`, um nó do
+  LangGraph, `coerce_tools`) não vê diferença. Por isso `impose_model` vale só
+  se estiver na classe quando ela é criada: `Cls.impose_model = True` atribuído
+  depois não embrulha nada e não impõe nada, em silêncio.
 - **O escopo de fora vale.** Se já há um modelo imposto quando o agente começa a
   rodar — por um agente mais externo, ou pela aplicação, com
   `imposed_model_scope(modelo, provedor)` — o agente não abre o escopo dele: o
@@ -340,7 +364,23 @@ limites).
   `reasoning` da classe, o `reasoning_effort` da request, o `prediction` e todo
   outro kwarg da classe (`timeout`, `max_retries`, `seed`, `model_kwargs`...):
   são ajustes para o modelo para o qual o agente foi escrito, e o ajuste do tier
-  é do gateway. `LLM(cache=True)` também segue o provedor que de fato responde.
+  é do gateway. Os nomes alternativos `max_completion_tokens` e `stop_sequences`
+  contam como `max_tokens` e `stop`, na classe e na request.
+  `LLM(cache=True)` também segue o provedor que de fato responde.
+- **O próprio impositor também.** Sob o próprio escopo, o `llm` de quem impõe é
+  mais um `LLM` da árvore: os kwargs não portáveis dele (`timeout`,
+  `max_retries`, `seed`, `reasoning`...) também não chegam ao modelo imposto. Na
+  definição da classe, o `aixon.agent` loga um WARNING com as chaves que ficam
+  de fora. Para manter a configuração do impositor nas chamadas dele, declare o
+  `llm` dele com `LLM(..., pinned=True)` (o modelo dele continua sendo o
+  imposto à árvore).
+- **Timeout e retries sob imposição.** Como nenhum `timeout`/`max_retries` de
+  classe passa, todo `LLM` da árvore roda com os padrões do provedor (120 s e 2
+  retries). Um 429 cujo `Retry-After` passa do `max_execution_time` de um
+  especialista vira `TOOL ERROR … tempo limite` para o coordenador, que segue
+  sem ele, em vez da mensagem de limite: um limite conhecido, anterior a esta
+  versão (na 0.1.27 todo 429 de especialista virava `TOOL ERROR`). O 422 de
+  orçamento nunca é repetido pelo SDK.
 - **Falha fechada.** Sob o escopo, `llm.chat_model` — o modelo com que o `LLM` foi
   CONFIGURADO — levanta `ImposedModelViolation` (um `AixonError`) em vez de
   entregá-lo: rodar a chamada no modelo errado sem avisar seria pior que parar.
@@ -365,42 +405,24 @@ limites).
     caminho do `Server`), roda numa thread de worker sem `copy_context` (#32).
     A descoberta só faz `tools/list`, sem LLM, então não é afetada, mas nada que
     dependa do escopo funciona ali.
-  - Só os entry points escritos no corpo de uma subclasse de `Agent` são
-    embrulhados. Um `invoke`/`ainvoke`/`stream`/`astream` que vem de um mixin
-    que não é `Agent`, ou que é atribuído à classe depois de criada
-    (`Cls.invoke = f`), roda fora do escopo, e `impose_model = True` não faz nada
-    por ele, em silêncio. (Um mixin que delega a `super().invoke(...)` funciona:
-    o `super()` cai no entry point embrulhado, que impõe o que roda abaixo.)
-  - Os `invoke`/`ainvoke`/`stream`/`astream` de toda subclasse de `Agent` são
-    funções comuns que embrulham as originais, mesmo com `impose_model = False`
-    (o wrapper lê o atributo a cada chamada e, desligado, só repassa). Chamá-los
-    devolve o mesmo que na 0.1.27, mas
-    `inspect.iscoroutinefunction(agent.ainvoke)`,
+  - Um entry point atribuído à classe depois de criada (`Cls.invoke = f`), como
+    um `impose_model` atribuído depois, não é embrulhado: roda fora do escopo, e
+    `impose_model = True` não faz nada por ele, em silêncio.
+  - Os entry points de uma classe que impõe são funções comuns que embrulham as
+    originais: nela, `inspect.iscoroutinefunction(agent.ainvoke)`,
     `inspect.isasyncgenfunction(agent.astream)` e
-    `inspect.isgeneratorfunction(agent.stream)` dão `False`, mesmo quando o
-    original é `async def` ou gerador (davam `True`), e `inspect.unwrap` devolve
-    a função original. Quem escolhe entre sync e async por essa introspecção
-    passa a tratar o método como síncrono:
-    - `RunnableLambda(agent.ainvoke)` devolve a coroutine em vez do `Message`
-      (com `astream`/`stream`, o gerador em vez do `Chunk`);
-    - um nó assíncrono do LangGraph, `add_node(nome, agent.ainvoke)`, falha com
-      `InvalidUpdateError`;
-    - o `BackgroundTasks` do Starlette nunca executa o corpo do `ainvoke`;
-    - `patch.object(Agente, "ainvoke", ...)`, `create_autospec` e
-      `patch(..., autospec=True)` criam um dublê síncrono, e o `await` levanta
-      `TypeError`;
-    - um `agent.ainvoke` cru em `tools=[...]` (ou em `coerce_tools`) é registrado
-      como função síncrona, e a tool devolve a coroutine em vez do resultado;
-    - **Contorno.** Em vez do método cru, passe `agent.as_tool()` (para tools) ou
-      uma `async def` que faz `await agent.ainvoke(...)`; nos dublês, use
-      `new_callable=AsyncMock`. Não use o `__wrapped__`: ele não vem ligado à
-      instância, e chamá-lo pula o escopo do `impose_model`.
-  - Threads criadas com `threading.Thread`, `loop.run_in_executor` ou um
-    `ThreadPoolExecutor` puro não copiam o contexto: um `LLM` chamado de lá não
-    vê o modelo imposto e roda no modelo configurado dele, sem erro — e também
-    não vê o e-mail de `user_email_scope`. `asyncio.to_thread`, as tasks do
-    asyncio e os executors do LangChain e do LangGraph copiam, e as pontes
-    sync/async do próprio aixon também.
+    `inspect.isgeneratorfunction(agent.stream)` dão `False`. Para usar um
+    impositor como tool ou nó, passe `agent.as_tool()` ou uma `async def` que faz
+    `await agent.ainvoke(...)`, e nos dublês use `new_callable=AsyncMock`. Não use
+    o `__wrapped__`: chamá-lo pula o escopo.
+  - Um salto de thread sem cópia de contexto perde o modelo imposto E o e-mail.
+    Threads criadas com `threading.Thread`, `loop.run_in_executor` ou
+    `ThreadPoolExecutor.submit` não copiam o contexto: um `LLM` chamado de lá
+    não vê o modelo imposto e roda no modelo configurado dele, sem erro, e
+    também não vê o e-mail de `user_email_scope`, e a chamada ao gateway sai sem
+    o header. `asyncio.to_thread`, as tasks do asyncio e os executors do
+    LangChain e do LangGraph copiam, e as pontes sync/async do próprio aixon
+    também.
 
 ---
 

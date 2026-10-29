@@ -475,12 +475,16 @@ traceback) with the matching HTTP status:
 |---|---|---|
 | `400` | Request body isn't a JSON object, or `adapter.parse_request` raises (e.g. a malformed `messages` entry). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
 | `404` | `model` doesn't resolve to a registered agent (`AgentNotFoundError`). | `{"error": {"message": ..., "type": "model_not_found"}}` |
-| `429` | The gateway refused the call (non-streaming): its budget is spent (an HTTP 422 mentioning "budget") or it is rate limiting the caller (an HTTP 429). The `message` is `budget_exceeded_message` or `rate_limited_message`. **Only an error from a request to `AIXON_GATEWAY_BASE_URL` counts**: a 429 from any other provider is not the gateway's and stays a `500`. | `{"error": {"message": ..., "type": "insufficient_quota" \| "rate_limit_exceeded", "code": "budget_exceeded" \| "rate_limited"}}` |
+| `429` | The gateway refused the call (non-streaming): its budget is spent (an HTTP 422 mentioning "budget") or it is rate limiting the caller (an HTTP 429). The `message` is `budget_exceeded_message` or `rate_limited_message`. **Only an error from a request to `AIXON_GATEWAY_BASE_URL` counts**: a 429 from any other provider is not the gateway's and stays a `500`. The response carries `x-should-retry: false`, so a client on the `openai` SDK does not retry it (each retry would run the whole agent tree again against the same refusal). | `{"error": {"message": ..., "type": "insufficient_quota" \| "rate_limit_exceeded", "code": "budget_exceeded" \| "rate_limited"}}` |
 | `500` | The agent raised while running (non-streaming), anything but a gateway refusal. The real exception is logged server-side only; the client gets a generic message. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
 
 The gateway error is found in the exception that reached the Server or in its
 `__cause__`/`__context__` chain, so a refusal wrapped by another exception on
-the way still gets its `429`. It is logged as a `warning`, not an `error`.
+the way still gets its `429`. It is logged as a `warning`, not an `error`, and
+the log line carries only the verdict (`GatewayBudgetExceeded` or
+`GatewayRateLimited`), the agent, the adapter and the HTTP status of the answer:
+never the gateway's own text, which (in LiteLLM, for one) names the end user and
+the spend.
 
 **Mid-stream failures** cannot use an HTTP status — the `200`/
 `text/event-stream` headers already went out. Instead, once streaming has
@@ -509,8 +513,10 @@ stream that ends as usual:
 - Anthropic: a `text_delta` block with the message, then `message_delta` and
   `message_stop`, with no `event: error`.
 
-A chat UI shows it as the assistant's reply instead of a generic error. Only a
-gateway refusal is treated this way: any other exception, a 429 from another
+A chat UI shows it as the assistant's reply instead of a generic error. The
+refusal is logged the same way as without streaming (a `warning` with the
+verdict only, never the gateway's text). Only a gateway refusal is treated this
+way: any other exception, a 429 from another
 provider included, keeps the generic error event above.
 
 ---
@@ -593,6 +599,25 @@ user-id: a Langfuse trace falls back to the user-id when there is no e-mail (see
 [tracing.md](tracing.md)), but the gateway never sees it. A request without the
 header runs with no e-mail, and the gateway then gets no header at all; refusing
 such a request is the application's job, not the Server's.
+
+What this identity is worth:
+
+- **ASCII only.** The e-mail travels as an HTTP header, so it must be ASCII; an
+  internationalized e-mail address is not supported in this version.
+- **One header name.** The Server reads only `x-openwebui-user-email`. If Open
+  WebUI is configured to rename it (`FORWARD_USER_INFO_HEADER_USER_EMAIL`) or to
+  send a signed JWT instead (`FORWARD_USER_INFO_HEADER_JWT_SECRET`), the Server
+  publishes no e-mail (`None`), and it is up to the application to refuse the
+  request.
+- **Trust boundary.** The header is taken as is from whoever passes
+  `AUTH_API_KEY` (or from anyone, without it): any caller holding a key can
+  claim any e-mail. Per-person quotas at the gateway are only as good as that
+  boundary, so keep the Server behind Open WebUI and the key secret.
+- **Context, not threads.** The e-mail is a `ContextVar`: code run on a thread
+  that does not copy the context (`threading.Thread`,
+  `ThreadPoolExecutor.submit`, `loop.run_in_executor`) sees no e-mail, and its
+  gateway calls go out without the header. A `user_email_scope` held across a
+  `yield` is also seen by the generator's consumer: open it around the call.
 
 ---
 
