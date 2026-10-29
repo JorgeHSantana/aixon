@@ -128,6 +128,9 @@ def test_non_stream_gateway_error_is_429(exc, body):
     r = _client().post("/v1/chat/completions", json=_body("falha", stream=False))
     assert r.status_code == 429
     assert r.json() == body
+    # the openai SDK retries a 429 (twice, by default) unless told not to, and
+    # each retry would run the whole tree again against the same refusal
+    assert r.headers["x-should-retry"] == "false"
 
 
 @pytest.mark.parametrize(
@@ -235,6 +238,26 @@ def test_gateway_error_is_logged_as_warning(caplog, stream):
     levels = {r.levelname for r in caplog.records if r.name == "aixon.server"}
     assert "WARNING" in levels
     assert "ERROR" not in levels  # the gateway said no; the server did not fail
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "invoke"])
+def test_gateway_refusal_log_carries_the_verdict_not_the_gateway_text(caplog, stream):
+    # The gateway's text names the end user and the spend (LiteLLM: "End
+    # User=<e-mail> ... Spend=... Budget=..."): the log keeps only the verdict.
+    make_failing("falha", status_error(422, BUDGET))
+    with caplog.at_level(logging.INFO, logger="aixon.server"):
+        _client().post("/v1/chat/completions", json=_body("falha", stream=stream))
+
+    for record in caplog.records:
+        for secret in ("End User=", "ana@example.com", "Spend=", "Budget="):
+            assert secret not in record.getMessage()
+    (warning,) = [
+        r for r in caplog.records if r.name == "aixon.server" and r.levelno == logging.WARNING
+    ]
+    message = warning.getMessage()
+    # the verdict, the agent, the adapter and the HTTP status the client gets
+    for part in ("GatewayBudgetExceeded", "'falha'", "openai", "HTTP 200" if stream else "HTTP 429"):
+        assert part in message
 
 
 # --- the messages of the singleton ------------------------------------------

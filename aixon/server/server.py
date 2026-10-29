@@ -403,9 +403,12 @@ class Server:
                             # the failed run left open, then the finish chunk
                             # and [DONE] follow — so a chat UI shows it instead
                             # of a generic error event.
+                            # The verdict only: the gateway's own text may name
+                            # the end user and the spend.
                             _log.warning(
                                 f"{adapter.name}: stream via agent '{agent.name}' "
-                                f"refused by the gateway ({verdict.__name__}): {exc}"
+                                f"refused by the gateway ({verdict.__name__}); "
+                                f"answered in the stream (HTTP 200)"
                             )
                             try:
                                 text = self._gateway_refusal(verdict)[0]
@@ -456,14 +459,19 @@ class Server:
                 if verdict is not None:
                     # The gateway said no: tell the client so with a 429 it can
                     # act on (the type/code pair is what tells the two apart).
+                    # The verdict only in the log: the gateway's own text may
+                    # name the end user and the spend.
                     _log.warning(
                         f"{adapter.name}: agent '{agent.name}' refused by the "
-                        f"gateway ({verdict.__name__}): {exc}"
+                        f"gateway ({verdict.__name__}); answered HTTP 429"
                     )
                     text, err_type, err_code = self._gateway_refusal(verdict)
                     return JSONResponse(
                         {"error": {"message": text, "type": err_type, "code": err_code}},
                         status_code=429,
+                        # The openai SDK retries a 429 unless told not to, and
+                        # each retry would run the whole tree again.
+                        headers={"x-should-retry": "false"},
                     )
                 _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")
                 return JSONResponse(
