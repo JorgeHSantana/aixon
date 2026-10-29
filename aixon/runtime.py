@@ -29,6 +29,15 @@ GENERATION_PARAMS = frozenset(
     }
 )
 
+# The part of GENERATION_PARAMS that means the same thing to ANY model: the
+# sampling and length knobs. Only these cross over to an imposed model (see
+# imposed_model_scope). Everything else is a setting for the model the agent
+# was written against, and is dropped: the class's `reasoning`, the request's
+# `reasoning_effort`, `timeout`, `seed`, `prediction`, any vendor kwarg.
+PORTABLE_PARAMS = frozenset(
+    {"temperature", "top_p", "max_tokens", "stop", "presence_penalty", "frequency_penalty"}
+)
+
 # Provider-dialect spellings normalized to the canonical key above so downstream
 # models always receive kwargs every LangChain chat model understands. The
 # canonical key wins when both are present.
@@ -153,3 +162,83 @@ def prediction_scope(text: str | None) -> Iterator[str | None]:
         yield text or None
     finally:
         _prediction.reset(token)
+
+
+# The e-mail of the end user the current call acts for, published around the
+# agent call by whoever serves the request. ONLY the `gateway` provider reads
+# it, via current_user_email(), to tell the gateway whom the call is for (spend
+# and limits are then per person, not per shared key). No other provider looks
+# at it, so the e-mail never leaves the process towards OpenAI, xAI, z.AI,
+# Anthropic or Google.
+_user_email: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "aixon_user_email", default=None
+)
+
+
+def current_user_email() -> str | None:
+    """The end user's e-mail active for this context, or None."""
+    return _user_email.get()
+
+
+@contextmanager
+def user_email_scope(email: str | None) -> Iterator[str | None]:
+    """Publish (or clear, with None) the end user's e-mail for the block.
+
+    The e-mail is stripped and a blank one becomes None, so readers never
+    tell "" from absent. On exit the previous value comes back.
+
+    It travels as an HTTP header, so it must be ASCII: an internationalized
+    e-mail address is not supported in this version. Like any ContextVar
+    scope, it is seen only by what runs in this context (asyncio tasks and
+    ``asyncio.to_thread`` copy it; a bare thread does not), and a scope held
+    across a ``yield`` is also seen by the generator's consumer between two
+    items: open it around the call, not around a ``yield``."""
+    value = (email or "").strip() or None
+    token = _user_email.set(value)
+    try:
+        yield value
+    finally:
+        try:
+            _user_email.reset(token)
+        except ValueError:
+            # (#21) Same as reasoning_channel(): reset() raises ValueError when
+            # cleanup runs in a different Context (GC-driven finalization of
+            # an abandoned async generator). The var dies with that context.
+            pass
+
+
+# The model imposed on the current call, as a (model, provider) pair, published
+# by whoever runs the agent tree. While it is set, every LLM that is not
+# `pinned` builds THAT model instead of the one it was declared with, handing it
+# only the PORTABLE_PARAMS, and refuses to give out its configured chat_model
+# (a silent fallback would run the call on the wrong model).
+_imposed_model: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "aixon_imposed_model", default=None
+)
+
+
+def current_imposed_model() -> tuple[str, str] | None:
+    """The ``(model, provider)`` imposed on this context, or None."""
+    return _imposed_model.get()
+
+
+@contextmanager
+def imposed_model_scope(model: str, provider: str) -> Iterator[tuple[str, str]]:
+    """Impose ``model`` of ``provider`` on the LLM calls made in the block.
+
+    Always activates the pair it is given, and on exit the previous value comes
+    back. Which scope wins when they nest is not decided here: an agent that
+    finds one already active chooses whether to open its own.
+    """
+    value = (model, provider)
+    token = _imposed_model.set(value)
+    try:
+        yield value
+    finally:
+        try:
+            _imposed_model.reset(token)
+        except ValueError:
+            # (#21) Same as reasoning_channel(): reset() raises ValueError when
+            # cleanup runs in a different Context (GC-driven finalization of
+            # an abandoned async generator). The var dies with that context.
+            pass

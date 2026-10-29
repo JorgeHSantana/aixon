@@ -7,9 +7,14 @@ Usage on an agent class body:
 The LLM handle is lazy: it does not build the underlying LangChain model
 until the first access to .chat_model (or .complete / .stream). Declaring an
 LLM therefore needs neither an API key nor an installed vendor SDK.
+
+Imposed model (0.1.28): while ``aixon.runtime.imposed_model_scope(model,
+provider)`` is active, an LLM that is not ``pinned`` answers with THAT model,
+whatever it was declared with, and never falls back to its configured one.
 """
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 from aixon._interop.messages import (
@@ -18,11 +23,14 @@ from aixon._interop.messages import (
     reasoning_from_chunk,
     to_langchain,
 )
+from aixon.exceptions import ImposedModelViolation
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
+
+    from aixon.providers.base import Provider
 
 _log = Logger("aixon.llm")
 
@@ -31,6 +39,12 @@ _log = Logger("aixon.llm")
 # unbounded across arbitrarily many distinct param combinations. Eviction is
 # oldest-inserted-first (a plain dict preserves insertion order).
 _REQUEST_MODEL_CACHE_MAX = 8
+
+# Guards every read and write of LLM._request_model_cache (lookup, eviction,
+# insertion). Agents run on worker threads, so one LLM serves several requests
+# at once; an unguarded evict-then-insert can raise KeyError, or let the cache
+# outgrow its bound. Held only for a few dict operations, never across a build.
+_REQUEST_MODEL_CACHE_LOCK = threading.Lock()
 
 
 def _drain_chunk(lc_chunk: Any, agg: Any, *, tools: list[dict] | None) -> tuple[list[Chunk], Any]:
@@ -73,6 +87,7 @@ class LLM:
         provider: str | None = None,
         reasoning: bool | dict[str, Any] | None = None,
         cache: bool = False,
+        pinned: bool = False,
         **params: Any,
     ):
         self.model = model
@@ -85,6 +100,11 @@ class LLM:
         # becomes round N+1's cached prefix). Providers without the flag
         # ignore it (OpenAI caches long prefixes automatically).
         self.cache = cache
+        # Opt-out of the imposed model: a pinned LLM keeps its OWN model and
+        # provider (prompt cache and prediction included) even while
+        # imposed_model_scope() is active — for the call that must run on this
+        # exact model whatever the scope says.
+        self.pinned = pinned
         self._provider_name = provider          # None → inferred from model name
         self._chat_model: "BaseChatModel | None" = None  # lazy
         self._request_model_cache: dict[tuple, "BaseChatModel"] = {}
@@ -98,6 +118,27 @@ class LLM:
         if self._provider_name is not None:
             return get_provider(self._provider_name)
         return resolve_provider_for_model(self.model)
+
+    def _imposed(self) -> tuple[str, str] | None:
+        """The ``(model, provider)`` imposed on this call, or None when none is
+        in scope or this LLM is ``pinned``."""
+        if self.pinned:
+            return None
+        from aixon.runtime import current_imposed_model
+
+        return current_imposed_model()
+
+    def _effective_provider(self) -> "Provider":
+        """The provider that really answers this call: the imposed one when a
+        model is imposed on it, else this LLM's own. Everything that depends on
+        what the provider can do (prompt cache, prediction) asks this one, so
+        a pinned LLM keeps its own provider's abilities under a scope."""
+        from aixon.providers.base import get_provider
+
+        imposed = self._imposed()
+        if imposed is not None:
+            return get_provider(imposed[1])
+        return self._provider()
 
     def _build(self, provider: Any, **params: Any) -> "BaseChatModel":
         """Call ``provider.build`` with the reasoning knob applied safely.
@@ -144,7 +185,23 @@ class LLM:
         model rather than this bare cached one. The provider must already be
         registered (via importing its module or a custom register_provider()
         call).
+
+        Under an imposed model this is the one thing it must not do: it is the
+        model the LLM was CONFIGURED with, and handing it out would silently
+        run the call on the wrong model. It raises ``ImposedModelViolation``
+        instead. The ways out: ``request_chat_model()``, which honors the
+        imposed model, or ``LLM(..., pinned=True)``.
         """
+        imposed = self._imposed()
+        if imposed is not None:
+            raise ImposedModelViolation(
+                f"LLM('{self.model}').chat_model is the model this LLM was "
+                f"configured with, but the model '{imposed[0]}' of provider "
+                f"'{imposed[1]}' is imposed on this call: handing it out would "
+                f"silently run the call on the configured model instead. Use "
+                f"request_chat_model(), which honors the imposed model, or "
+                f"declare the LLM with pinned=True to keep its own."
+            )
         if self._chat_model is None:
             self._chat_model = self._build(self._provider(), **self.params)
         return self._chat_model
@@ -163,27 +220,69 @@ class LLM:
         rebuild). Otherwise, models are cached by the exact param combination
         (bounded, oldest-evicted-first) so repeated requests with the SAME
         params reuse one provider model (and its HTTP connection pool)
-        instead of rebuilding a fresh SDK client every time."""
-        from aixon.runtime import current_generation_params
+        instead of rebuilding a fresh SDK client every time.
 
+        Under an imposed model (``imposed_model_scope``) it builds THAT model
+        instead, even with no params at all: the imposed provider builds the
+        imposed model name, handed only the PORTABLE_PARAMS (from the class and
+        from the request) — the class's ``reasoning`` and every other kwarg
+        stay behind. The cache key carries the model, the provider and whether
+        it was imposed, so one LLM used inside and outside a scope never gets
+        the other's model. A ``pinned`` LLM ignores the scope."""
+        from aixon.runtime import _PARAM_ALIASES, PORTABLE_PARAMS, current_generation_params
+
+        imposed = self._imposed()
         params = current_generation_params()
-        if not params:
+        if imposed is None and not params:
             return self.chat_model
+
+        provider = self._effective_provider()
+        if imposed is None:
+            model_name, build_params = self.model, params
+        else:
+            model_name = imposed[0]
+            # The class's dialect spellings get the normalization the request's
+            # already got in generation_params(): the canonical key wins.
+            class_params = dict(self.params)
+            for alias, canonical in _PARAM_ALIASES.items():
+                if class_params.get(alias) is not None and class_params.get(canonical) is None:
+                    class_params[canonical] = class_params[alias]
+            build_params = {
+                k: v for k, v in {**class_params, **params}.items()
+                if k in PORTABLE_PARAMS and v is not None
+            }
 
         # `stop` arrives as a list (unhashable) — normalize to a tuple so the
         # cache key is hashable. Other generation params are already scalars.
-        key = tuple(sorted(
-            (k, tuple(v) if isinstance(v, list) else v) for k, v in params.items()
-        ))
-        cached = self._request_model_cache.get(key)
+        key = (
+            model_name, provider.name, imposed is not None,
+            tuple(sorted(
+                (k, tuple(v) if isinstance(v, list) else v)
+                for k, v in build_params.items()
+            )),
+        )
+        with _REQUEST_MODEL_CACHE_LOCK:
+            cached = self._request_model_cache.get(key)
         if cached is not None:
             return cached
 
-        model = self._build(self._provider(), **{**self.params, **params})
-        if len(self._request_model_cache) >= _REQUEST_MODEL_CACHE_MAX:
-            oldest_key = next(iter(self._request_model_cache))
-            del self._request_model_cache[oldest_key]
-        self._request_model_cache[key] = model
+        # Built outside the lock: it constructs a whole SDK client.
+        if imposed is None:
+            model = self._build(provider, **{**self.params, **params})
+        else:
+            # Straight to the provider: `_build` would add this LLM's `reasoning`.
+            model = provider.build(model_name, **build_params)
+
+        with _REQUEST_MODEL_CACHE_LOCK:
+            # Another thread may have built and stored the same key meanwhile:
+            # keep ITS model, so every caller shares one (and one HTTP pool).
+            cached = self._request_model_cache.get(key)
+            if cached is not None:
+                return cached
+            if len(self._request_model_cache) >= _REQUEST_MODEL_CACHE_MAX:
+                oldest_key = next(iter(self._request_model_cache))
+                del self._request_model_cache[oldest_key]
+            self._request_model_cache[key] = model
         return model
 
     def _bound_model(self) -> "BaseChatModel":
@@ -217,7 +316,7 @@ class LLM:
         lc_messages = to_langchain(messages)
         if not self.cache or not lc_messages:
             return lc_messages
-        if not getattr(self._provider(), "supports_prompt_cache", False):
+        if not getattr(self._effective_provider(), "supports_prompt_cache", False):
             return lc_messages
 
         def mark(lc_message) -> None:
@@ -267,9 +366,15 @@ class LLM:
         predicted output is active (ReflectiveAgent retry) AND the provider
         declares ``supports_prediction`` (OpenAI's Predicted Outputs), attach
         it; any other provider gets nothing — silent no-op, same precedent as
-        the ``reasoning`` knob."""
+        the ``reasoning`` knob.
+
+        Never under an imposed model, even when the imposed provider declares
+        ``supports_prediction``: which model answers is not this LLM's call,
+        and the contract forbids ``prediction`` there."""
         from aixon.runtime import current_prediction
 
+        if self._imposed() is not None:
+            return {}
         prediction = current_prediction()
         if prediction and getattr(self._provider(), "supports_prediction", False):
             return {"prediction": {"type": "content", "content": prediction}}

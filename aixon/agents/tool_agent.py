@@ -15,7 +15,7 @@ never requires it."""
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, AsyncIterator, Iterator
+from typing import TYPE_CHECKING, AsyncIterator, Iterator, Literal
 
 from aixon.agent import Agent
 from aixon.exceptions import AixonError
@@ -95,10 +95,13 @@ class ToolAgent(Agent, abstract=True):
         "resposta. Tente restringir o pedido (período menor, menos fontes) "
         "ou repetir em partes."
     )
-    # Error shield (#9): True (default) converts ANY exception raised by a tool
+    # Error shield (#9): True (default) converts any exception raised by a tool
     # into a readable error result handed back to the model, so one failing
-    # tool/service reports instead of killing the whole run/stream. Set False
-    # for a strict policy where tool exceptions propagate (pre-#9 behavior).
+    # tool/service reports instead of killing the whole run/stream. The one
+    # exception is a verdict of the gateway (budget spent, rate limited:
+    # classify_gateway_error): it ends the request, so it is re-raised. Set
+    # False for a strict policy where tool exceptions propagate (pre-#9
+    # behavior).
     shield_tool_errors: bool = True
     tool_call_label: str = "Calling {name}..."  # reasoning label per tool call; {name} = tool name
     # Context pruning (#16): with an int N, tool results OLDER than the last N
@@ -120,6 +123,15 @@ class ToolAgent(Agent, abstract=True):
     # "client" (internal tool dropped).
     client_tools_conflict: str = "error"
 
+    # Client system (0.1.28): what a leading system (or developer) message
+    # sent by the CLIENT does to ``prompt``. "replace" (default; the only
+    # behavior before 0.1.28): it takes the prompt's place. "append": the
+    # prompt stays first and the client's text follows it after a blank line,
+    # as context — for a chat UI that sends a system message of its own (a
+    # model's or a user's) to an agent whose prompt must keep governing the
+    # answer.
+    client_system: Literal["replace", "append"] = "replace"
+
     def _timeout_chunk(self) -> Chunk:
         """The pass-through timeout-content chunk (#19 sweep #3): built once so
         ``stream``/``astream`` emit byte-identical text, and so a wrapper
@@ -135,14 +147,17 @@ class ToolAgent(Agent, abstract=True):
 
     # Tool-call hooks (#17): override for deterministic guardrails/telemetry.
     # on_tool_start may return a dict to REWRITE the call's kwargs; raising in
-    # it is treated as the tool failing (shield applies). on_tool_end is
-    # observation-only — its exceptions are logged and swallowed.
+    # it is treated as the tool failing (shield applies, a gateway verdict
+    # excepted). on_tool_end is observation-only — its exceptions are logged
+    # and swallowed.
     def on_tool_start(self, name: str, args: dict):  # noqa: D401
         """Called before a tool executes. Return a dict to rewrite ``args``
         (the memo cache lookup runs on the rewritten kwargs); return None to
         keep them unchanged. Raising here is treated as the tool call itself
         failing — the error shield (#9) converts it to a TOOL ERROR result
-        and the run continues. Default: no-op."""
+        and the run continues. The exception is a verdict of the gateway
+        (budget spent, rate limited): the shield re-raises it, as it does for
+        a tool. Default: no-op."""
         return None
 
     def on_tool_end(self, name: str, args: dict, result, error) -> None:
@@ -193,6 +208,14 @@ class ToolAgent(Agent, abstract=True):
                 f"'{cls.__name__}' has client_tools_conflict={conflict!r}; "
                 f"use 'error', 'internal' or 'client'."
             )
+        # 0.1.28: client_system is a declarative enum too — a typo fails at
+        # registration instead of silently behaving as "replace".
+        client_system = getattr(cls, "client_system", "replace")
+        if client_system not in ("replace", "append"):
+            raise AixonError(
+                f"'{cls.__name__}' has client_system={client_system!r}; "
+                f"use 'replace' or 'append'."
+            )
 
     # ---- internal: build the langgraph agent + neutral message prep -------
 
@@ -228,7 +251,13 @@ class ToolAgent(Agent, abstract=True):
     def _build_agent(self, messages: list[Message]):
         """Return (compiled_agent, lc_messages, config, client_tool_names).
         A leading neutral system (or developer — OpenAI's system-role alias)
-        message overrides self.prompt.
+        message is the CLIENT's system: it is consumed here (never sent as a
+        message of its own) and combined with self.prompt per
+        ``client_system``. "replace" (default) lets it override self.prompt
+        (an empty one falls back to the prompt). "append" makes the system
+        prompt self.prompt, a blank line, then the client's text (an empty
+        side drops out; two empty ones leave no system prompt at all). A
+        request without a leading system always runs with self.prompt.
 
         ``client_tool_names`` (#18c) is the set of CLIENT tool names proxied
         into this build (empty when ``client_tools="ignore"`` or the request
@@ -247,7 +276,12 @@ class ToolAgent(Agent, abstract=True):
 
         system_prompt = self.prompt or None
         if messages and messages[0].role in ("system", "developer"):
-            system_prompt = messages[0].content or system_prompt
+            client_text = messages[0].content
+            if self.client_system == "append":
+                parts = [p for p in (system_prompt, client_text) if p]
+                system_prompt = "\n\n".join(parts) or None
+            else:
+                system_prompt = client_text or system_prompt
             messages = messages[1:]
 
         # Pass each hook to coerce_tools only when THAT hook is individually
@@ -731,7 +765,7 @@ class ToolAgent(Agent, abstract=True):
                 if next_task is not None and not next_task.done():
                     next_task.cancel()
                     with contextlib.suppress(BaseException):
-                        await next_task
+                        await asyncio.wait({next_task})
                 elif next_task is not None and not next_task.cancelled():
                     # Sweep #1: the task already completed (this tick) but the
                     # generator is being abandoned (GeneratorExit from a

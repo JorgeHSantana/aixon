@@ -145,6 +145,21 @@ ProtocolAdapter.format_stream_chunk / format_stream_done
 HTTP response (streaming)
 ```
 
+Around the agent call, request-scoped context travels in `ContextVar`s
+(`aixon.runtime`), so no agent signature changes. Two arrived in 0.1.28. **The
+user's e-mail** (`user_email_scope` / `current_user_email`) is published by the
+Server from the `x-openwebui-user-email` header; only the `gateway` provider
+reads it, to tell the gateway whom the call is for, and no other provider ever
+sees it. **The imposed model** (`imposed_model_scope` / `current_imposed_model`)
+is published by an agent with `impose_model = True` around its entry points (or
+by the application): every `LLM` beneath it that is not `pinned` builds that
+model instead of the one it declared. A `ContextVar` follows asyncio tasks and
+the context-copying executors that LangChain and LangGraph use, so the whole
+tree sees both; it does not follow a thread started with `threading.Thread` or
+`run_in_executor`, which sees neither (see
+[agents.md](agents.md#modelo-imposto-impose_model)). The neutral boundary does
+not change: agents still speak only `Message` and `Chunk`.
+
 ---
 
 ## Auto-registration

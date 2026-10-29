@@ -18,6 +18,7 @@ from aixon.providers import google as _google  # noqa: E402,F401
 from aixon.providers import openai as _openai  # noqa: E402,F401
 from aixon.providers import zai as _zai  # noqa: E402,F401
 from aixon.providers import xai as _xai  # noqa: E402,F401
+from aixon.providers import gateway as _gateway  # noqa: E402,F401
 
 __all__ = [
     "Provider",

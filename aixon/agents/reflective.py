@@ -14,7 +14,17 @@ precept covers the judge itself (#24): any exception raised by
 ``judge_llm.complete``/``acomplete`` — in any round, including retries — is
 logged as a warning and swallowed; the current worker answer is delivered
 unreviewed, with ``judge_unavailable_label`` emitted on the reasoning
-channel. A judge outage must not crash a run that produced an answer either."""
+channel. A judge outage must not crash a run that produced an answer either.
+
+One thing is never degraded, in the judge or in the worker: a verdict of the
+gateway (``classify_gateway_error``: budget spent, rate limited). It is neither
+a quality shortfall nor an outage but the end of the request, and an unreviewed
+answer, or a worker failure delivered as content, would hide it from whoever
+has to answer it. The 8 handlers of the loop (the judge's, in ``_invoke``,
+``_stream``, ``_ainvoke`` and ``_astream``; the worker's #19 ones, in the two
+streams and in their patch rounds) re-raise it, the same object, before any
+log, label or run line. What is not a verdict of the gateway degrades as above:
+a 429 of another API (a judge running straight on OpenAI) included."""
 
 from __future__ import annotations
 
@@ -23,7 +33,7 @@ import re
 from typing import Any, AsyncIterator, Iterator
 
 from aixon.agent import Agent
-from aixon.exceptions import AixonError
+from aixon.exceptions import AixonError, classify_gateway_error
 from aixon.llm import LLM
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
@@ -136,7 +146,8 @@ class ReflectiveAgent(Agent, abstract=True):
     )
     # #24: judge_llm.complete/acomplete raised (any round, including a retry
     # round) — the current worker answer is delivered unreviewed instead of
-    # crashing the run. See _judge_verdict_sync/_judge_verdict_async.
+    # crashing the run (a gateway verdict excepted: it is re-raised, see the
+    # module docstring). See _judge_unavailable.
     judge_unavailable_label: str = (
         "Revisão indisponível — entregando sem conferência."
     )
@@ -421,6 +432,8 @@ class ReflectiveAgent(Agent, abstract=True):
                 verdict_msg = self.judge_llm.complete(
                     self._judge_messages(messages, answer))
             except Exception as exc:
+                if classify_gateway_error(exc) is not None:
+                    raise  # gateway verdict: re-raised, never degraded (module docstring)
                 # #24: the judge itself is unavailable (any round, including
                 # a retry round) — deliver the current worker answer
                 # unreviewed rather than crash a run that produced one.
@@ -511,6 +524,8 @@ class ReflectiveAgent(Agent, abstract=True):
                             if chunk.tool_calls:
                                 worker_tool_calls = chunk.tool_calls
                 except AixonError as exc:
+                    if classify_gateway_error(exc) is not None:
+                        raise  # gateway verdict: re-raised, never degraded (module docstring)
                     # (#19/#22-sweep) the worker blew ITS OWN deadline again
                     # (or hit its recursion limit) on a retry round — `answer`
                     # here still holds the previous round's (rejected)
@@ -545,6 +560,8 @@ class ReflectiveAgent(Agent, abstract=True):
                     self._judge_messages(messages, answer)
                 ).content
             except Exception as exc:
+                if classify_gateway_error(exc) is not None:
+                    raise  # gateway verdict: re-raised, never degraded (module docstring)
                 # #24: see _invoke() — same outage, deliver unreviewed.
                 self._judge_unavailable(exc)
                 yield Chunk(reasoning=self.judge_unavailable_label + "\n")
@@ -571,6 +588,8 @@ class ReflectiveAgent(Agent, abstract=True):
                 try:
                     pmsgs, applied_msg, _ = self._patch_round_sync(msgs, answer, verdict)
                 except AixonError as exc:
+                    if classify_gateway_error(exc) is not None:
+                        raise  # gateway verdict: re-raised, never degraded (module docstring)
                     # (#19/#22-sweep) the patch-mode retry calls the worker
                     # via invoke() — a branch that was previously unreachable
                     # from a timed-out worker only because the timeout answer
@@ -626,6 +645,8 @@ class ReflectiveAgent(Agent, abstract=True):
                     self._judge_messages(messages, answer)
                 )
             except Exception as exc:
+                if classify_gateway_error(exc) is not None:
+                    raise  # gateway verdict: re-raised, never degraded (module docstring)
                 # #24: see _invoke() — same outage, deliver unreviewed.
                 self._judge_unavailable(exc)
                 emit_reasoning(self.judge_unavailable_label)
@@ -700,6 +721,8 @@ class ReflectiveAgent(Agent, abstract=True):
                             if chunk.tool_calls:
                                 worker_tool_calls = chunk.tool_calls
                 except AixonError as exc:
+                    if classify_gateway_error(exc) is not None:
+                        raise  # gateway verdict: re-raised, never degraded (module docstring)
                     # See _stream(): the worker blew its own deadline again
                     # (or hit its recursion limit) on a retry round; on round
                     # 1 the helper derives an honest message from exc.
@@ -730,6 +753,8 @@ class ReflectiveAgent(Agent, abstract=True):
                         self._judge_messages(messages, answer))
                 ).content
             except Exception as exc:
+                if classify_gateway_error(exc) is not None:
+                    raise  # gateway verdict: re-raised, never degraded (module docstring)
                 # #24: see _invoke() — same outage, deliver unreviewed.
                 self._judge_unavailable(exc)
                 yield Chunk(reasoning=self.judge_unavailable_label + "\n")
@@ -755,6 +780,8 @@ class ReflectiveAgent(Agent, abstract=True):
                     pmsgs, applied_msg, _ = await self._patch_round_async(
                         msgs, answer, verdict)
                 except AixonError as exc:
+                    if classify_gateway_error(exc) is not None:
+                        raise  # gateway verdict: re-raised, never degraded (module docstring)
                     # See _stream(): patch-mode retry's worker.ainvoke() can
                     # raise on the 2nd overrun (or the recursion limit).
                     for c in self._timeout_exhausted_chunks(answer, exc):

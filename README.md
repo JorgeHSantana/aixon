@@ -62,6 +62,7 @@ pip install "aixon[anthropic]"         # Anthropic provider binding
 pip install "aixon[google]"            # Google provider binding
 pip install "aixon[zai]"               # z.AI provider binding (GLM via langchain-openai)
 pip install "aixon[xai]"               # xAI provider binding (Grok via langchain-openai)
+pip install "aixon[gateway]"           # gateway provider binding (an OpenAI-compatible gateway, via langchain-openai)
 pip install "aixon[retrieval]"         # httpx — Connector / HttpToolConnector
 pip install "aixon[mcp]"               # mcp SDK — MCPConnector (MCP servers)
 pip install "aixon[openai-embedding]"  # langchain-openai — OpenAIEmbedding
@@ -246,6 +247,9 @@ blocks instead of a full rewrite — output-cost saver for long answers, with
 automatic fallback to full regeneration when a patch doesn't apply. Tool
 exceptions never kill a run: they come back to the model as readable
 `TOOL ERROR` results (strict mode: `shield_tool_errors = False` on the agent).
+The one exception is a verdict of the `gateway` provider (budget spent, rate
+limited): it ends the request, so the shield and the judge re-raise it for the
+`Server` to answer.
 
 ---
 
@@ -333,6 +337,13 @@ response = client.chat.completions.create(
 
 See [docs/server.md](docs/server.md) for Anthropic adapter, auth, and SSE streaming.
 
+Behind an OpenAI-compatible gateway (the `gateway` provider, see
+[docs/agents.md](docs/agents.md#llm--declaring-a-language-model)), a spent
+budget or a rate limit reaches the user as a readable message instead of a
+generic server error: a chat message on a stream, an HTTP `429` without one.
+`Server(budget_exceeded_message=..., rate_limited_message=...)` sets the texts
+(see [Errors](docs/server.md#errors)).
+
 ---
 
 ## Environment variables
@@ -346,6 +357,9 @@ See [docs/server.md](docs/server.md) for Anthropic adapter, auth, and SSE stream
 | `GOOGLE_API_KEY` | _(required for Google)_ | API key for the Google provider. |
 | `ZAI_API_KEY` | _(required for z.AI)_ | API key for the z.AI provider (GLM models). `ZAI_BASE_URL` overrides the default `https://api.z.ai/api/paas/v4`. |
 | `XAI_API_KEY` | _(required for xAI)_ | API key for the xAI provider (Grok models). `XAI_BASE_URL` overrides the default `https://api.x.ai/v1`. |
+| `AIXON_GATEWAY_BASE_URL` | _(required for the gateway)_ | URL of the OpenAI-compatible gateway, e.g. `http://gateway.example/v1`. |
+| `AIXON_GATEWAY_API_KEY` | _(required for the gateway)_ | API key for the gateway. The gateway provider never falls back to `OPENAI_API_KEY`. |
+| `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Header that carries the end user's e-mail to the gateway (stripped; it must be a valid HTTP header name). Empty turns the forwarding off. |
 
 ---
 
@@ -414,7 +428,7 @@ click                 >= 8.0    (core — the `aixon` command)
 fastapi / uvicorn / pydantic    (server extra)
 httpx                 >= 0.27   (server / retrieval extra)
 openai                >= 1.0    (cli extra — remote `aixon chat --url`)
-langchain-openai      >= 0.2    (openai / openai-embedding / zai / xai extra)
+langchain-openai      >= 0.2    (openai / openai-embedding / zai / xai / gateway extra)
 langchain-anthropic   >= 0.2    (anthropic extra)
 langchain-google-genai >= 2.0   (google extra)
 weaviate-client / langchain-weaviate  (weaviate extra)
