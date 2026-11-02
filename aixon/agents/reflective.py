@@ -282,12 +282,15 @@ class ReflectiveAgent(Agent, abstract=True):
         )
 
     def _retry_messages(self, messages: list[Message], answer: Message,
-                        critique: str) -> list[Message]:
+                        critique: str,
+                        template: str = _RETRY_TEMPLATE) -> list[Message]:
+        """Conversa da nova tentativa; o modo patch passa
+        ``_PATCH_RETRY_TEMPLATE``."""
         # New list — never mutate the caller's (same precept as _with_prompt).
         return [
             *messages,
             Message(role="assistant", content=answer.content),
-            Message(role="user", content=_RETRY_TEMPLATE.format(critique=critique)),
+            Message(role="user", content=template.format(critique=critique)),
         ]
 
     # ----- run stats (#12) --------------------------------------------------
@@ -308,15 +311,6 @@ class ReflectiveAgent(Agent, abstract=True):
         )
 
     # ----- patch revision mode (#7) ----------------------------------------
-
-    def _patch_retry_messages(self, messages: list[Message], answer: Message,
-                              critique: str) -> list[Message]:
-        return [
-            *messages,
-            Message(role="assistant", content=answer.content),
-            Message(role="user",
-                    content=_PATCH_RETRY_TEMPLATE.format(critique=critique)),
-        ]
 
     @staticmethod
     def _parse_patches(text: str) -> list[tuple[str, str]]:
@@ -356,7 +350,8 @@ class ReflectiveAgent(Agent, abstract=True):
     ) -> tuple[list[Message], Message | None, Any]:
         """One patch-mode retry attempt (sync worker call). Returns
         (patch_retry_msgs, applied_answer_or_None, raw_usage)."""
-        pmsgs = self._patch_retry_messages(msgs, answer, verdict)
+        pmsgs = self._retry_messages(msgs, answer, verdict,
+                                    template=_PATCH_RETRY_TEMPLATE)
         raw = self._worker.invoke(pmsgs)
         return pmsgs, self._apply_patch_reply(answer, raw), raw.usage
 
@@ -364,7 +359,8 @@ class ReflectiveAgent(Agent, abstract=True):
         self, msgs: list[Message], answer: Message, verdict: str,
     ) -> tuple[list[Message], Message | None, Any]:
         """Async twin of ``_patch_round_sync``."""
-        pmsgs = self._patch_retry_messages(msgs, answer, verdict)
+        pmsgs = self._retry_messages(msgs, answer, verdict,
+                                    template=_PATCH_RETRY_TEMPLATE)
         raw = await self._worker.ainvoke(pmsgs)
         return pmsgs, self._apply_patch_reply(answer, raw), raw.usage
 
