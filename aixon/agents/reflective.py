@@ -541,7 +541,7 @@ class ReflectiveAgent(Agent, abstract=True):
                         if chunk.content:
                             parts.append(chunk.content)
                         if chunk.tool_calls:
-                            worker_tool_calls = chunk.tool_calls
+                            worker_tool_calls = (worker_tool_calls or []) + chunk.tool_calls
                 except AixonError as exc:
                     if classify_gateway_error(exc) is not None:
                         raise  # gateway verdict: re-raised, never degraded (module docstring)
@@ -714,7 +714,7 @@ class ReflectiveAgent(Agent, abstract=True):
                         if chunk.content:
                             parts.append(chunk.content)
                         if chunk.tool_calls:
-                            worker_tool_calls = chunk.tool_calls
+                            worker_tool_calls = (worker_tool_calls or []) + chunk.tool_calls
                 except AixonError as exc:
                     if classify_gateway_error(exc) is not None:
                         raise  # gateway verdict: re-raised, never degraded (module docstring)
