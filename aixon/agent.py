@@ -465,6 +465,42 @@ class Agent(ABC):
             stop.set()
             await fut
 
+    # ----- guarda de ciclo de composição (walk único, Orchestrator e Reflective) -----
+
+    @classmethod
+    def _referenced_agent_classes(cls) -> list[type]:
+        """Classes de Agent que esta classe compõe. Base: nenhuma; cada subtipo
+        que compõe (Orchestrator, ReflectiveAgent) define só isto."""
+        return []
+
+    @classmethod
+    def _check_composition_cycle(cls) -> None:
+        """Busca em profundidade pelas ``_referenced_agent_classes``; uma classe
+        que reaparece no caminho atual fecha um ciclo → ``CompositionCycleError``."""
+        from aixon.exceptions import CompositionCycleError
+
+        path: list[type] = []
+
+        def walk(node_cls: type) -> None:
+            if node_cls in path:
+                chain = " -> ".join(c.__name__ for c in path + [node_cls])
+                raise CompositionCycleError(
+                    f"Composition cycle detected: {chain}. An agent cannot "
+                    f"(transitively) include itself as a worker/node/tool. "
+                    f"Break the cycle by removing one of the references."
+                )
+            path.append(node_cls)
+            neighbors = getattr(node_cls, "_referenced_agent_classes", None)
+            if callable(neighbors):
+                # Chama o `neighbors` já buscado e conferido: `node_cls` é um
+                # `type` qualquer aqui (qualquer classe pode ser nó/tool), e o
+                # acesso direto ao atributo não passaria no type-check.
+                for nxt in neighbors():
+                    walk(nxt)
+            path.pop()
+
+        walk(cls)
+
     def timeout_texts(self) -> set[str]:
         """Textos que significam "este agente desistiu pelo SEU próprio prazo",
         não uma resposta (o conteúdo de passagem do #19). Base: nenhum.

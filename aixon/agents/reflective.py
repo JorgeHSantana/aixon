@@ -189,9 +189,7 @@ class ReflectiveAgent(Agent, abstract=True):
             )
         cls._check_composition_cycle()
 
-    # ----- composition-cycle guard (same walk shape as Orchestrator's) -----
-    # NOTE: small duplication of Orchestrator._check_composition_cycle; a
-    # future refactor may hoist the walk into aixon.agent.
+    # ----- guarda de ciclo: o walk é o de Agent; aqui só os vizinhos -----
 
     @classmethod
     def _referenced_agent_classes(cls) -> list[type]:
@@ -200,33 +198,6 @@ class ReflectiveAgent(Agent, abstract=True):
             return []
         klass = agent if isinstance(agent, type) else type(agent)
         return [klass] if issubclass(klass, Agent) else []
-
-    @classmethod
-    def _check_composition_cycle(cls) -> None:
-        from aixon.exceptions import CompositionCycleError
-
-        path: list[type] = []
-
-        def walk(node_cls: type) -> None:
-            if node_cls in path:
-                chain = " -> ".join(c.__name__ for c in path + [node_cls])
-                raise CompositionCycleError(
-                    f"Composition cycle detected: {chain}. An agent cannot "
-                    f"(transitively) include itself as a worker/node/tool."
-                )
-            path.append(node_cls)
-            neighbors = getattr(node_cls, "_referenced_agent_classes", None)
-            if callable(neighbors):
-                # Call the already-fetched (and callable-checked) `neighbors`,
-                # not `node_cls._referenced_agent_classes()` again — `node_cls`
-                # is typed as plain `type` here (any class may be a node/tool),
-                # so a direct attribute access on it doesn't type-check even
-                # though we just proved the attribute exists and is callable.
-                for nxt in neighbors():
-                    walk(nxt)
-            path.pop()
-
-        walk(cls)
 
     # ----- worker resolution ------------------------------------------------
 

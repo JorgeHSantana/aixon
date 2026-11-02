@@ -18,7 +18,7 @@ from typing import Any, AsyncIterator, Iterator
 from langgraph.graph import StateGraph
 
 from aixon.agent import Agent, instantiate
-from aixon.exceptions import AixonError, CompositionCycleError
+from aixon.exceptions import AixonError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.state import END, GraphState
@@ -116,32 +116,6 @@ class Orchestrator(Agent, abstract=True):
         for entry in getattr(cls, "tools", []) or []:
             add(entry)
         return refs
-
-    @classmethod
-    def _check_composition_cycle(cls) -> None:
-        path: list[type] = []
-
-        def walk(node_cls: type) -> None:
-            if node_cls in path:
-                chain = " -> ".join(c.__name__ for c in path + [node_cls])
-                raise CompositionCycleError(
-                    f"Composition cycle detected: {chain}. An agent cannot "
-                    f"(transitively) include itself as a worker/node/tool. "
-                    f"Break the cycle by removing one of the references."
-                )
-            path.append(node_cls)
-            neighbors = getattr(node_cls, "_referenced_agent_classes", None)
-            if callable(neighbors):
-                # Call the already-fetched (and callable-checked) `neighbors`,
-                # not `node_cls._referenced_agent_classes()` again — `node_cls`
-                # is typed as plain `type` here (any class may be a node/tool),
-                # so a direct attribute access on it doesn't type-check even
-                # though we just proved the attribute exists and is callable.
-                for nxt in neighbors():
-                    walk(nxt)
-            path.pop()
-
-        walk(cls)
 
     # ----- Tier-1 validation -------------------------------------------------
 
