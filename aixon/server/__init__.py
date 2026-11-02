@@ -6,10 +6,21 @@ deps; the concrete adapters and Server require the ``server`` extra
 (``pip install aixon[server]``)."""
 
 from aixon.server.context import (
+    HeaderIdentityHook,
+    Identity,
     RequestContext,
     RequestDecision,
     RequestHook,
+    RequestHookLike,
     make_context,
 )
 
-__all__ = ["RequestContext", "RequestDecision", "RequestHook", "make_context"]
+__all__ = [
+    "HeaderIdentityHook",
+    "Identity",
+    "RequestContext",
+    "RequestDecision",
+    "RequestHook",
+    "RequestHookLike",
+    "make_context",
+]

@@ -47,7 +47,7 @@ from aixon.toolcache import tool_call_cache
 from aixon.usage import usage_for
 from aixon.server.adapters.openai import OpenAIAdapter
 from aixon.server.compat import open_webui_request_hook
-from aixon.server.context import RequestDecision, RequestHook, make_context
+from aixon.server.context import RequestDecision, RequestHookLike, make_context
 from aixon.server.protocol import ParsedRequest, ProtocolAdapter
 
 if TYPE_CHECKING:
@@ -163,7 +163,7 @@ class Server:
     # above the line that assigns them on the first construction.
     budget_exceeded_message: str
     rate_limited_message: str
-    request_hook: RequestHook
+    request_hook: RequestHookLike
 
     # Trava de classe (server-10): a primeira construção (__new__/__init__) e
     # o build lazy do app acontecem uma vez só, mesmo com threads concorrentes.
@@ -175,7 +175,7 @@ class Server:
         cls,
         adapters: list[ProtocolAdapter] | None = None,
         *,
-        request_hook: RequestHook | None = None,
+        request_hook: RequestHookLike | None = None,
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
@@ -189,7 +189,7 @@ class Server:
         self,
         adapters: list[ProtocolAdapter] | None = None,
         *,
-        request_hook: RequestHook | None = None,
+        request_hook: RequestHookLike | None = None,
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
@@ -205,7 +205,7 @@ class Server:
         self,
         adapters: list[ProtocolAdapter] | None,
         *,
-        request_hook: RequestHook | None,
+        request_hook: RequestHookLike | None,
         budget_exceeded_message: str,
         rate_limited_message: str,
     ) -> None:
