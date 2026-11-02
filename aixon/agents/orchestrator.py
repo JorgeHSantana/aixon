@@ -65,13 +65,13 @@ class Orchestrator(Agent, abstract=True):
         # hook"). The base calls this hook only for concrete subclasses, so no
         # abstract=True guard is needed here.
         cls._tier = cls._detect_tier()
-        # Composition-cycle guard (A) — always on (full impl in Task 7).
+        # Composition-cycle guard (A) — always on.
         cls._check_composition_cycle()
         # Tier-1 structural validation: a worker named "supervisor" collides
         # with the internal supervisor node LangGraph builds for this tier.
         if cls._tier == 1:
             cls._validate_tier1()
-        # Tier-2 structural validation (full impl in Task 5).
+        # Tier-2 structural validation.
         if cls._tier == 2:
             cls._validate_tier2()
 
@@ -268,7 +268,7 @@ class Orchestrator(Agent, abstract=True):
         Parsing requires the reply to name exactly ONE worker (whole-word
         match; exact reply wins; DONE always wins). A reply naming zero or
         several workers gets one strict retry; if that also fails, ``""`` is
-        returned and ``_route``'s safety net decides. Requires
+        returned and ``_route_supervisor``'s safety net decides. Requires
         ``self.supervisor`` to expose ``complete(list[Message]) -> Message``."""
         roster = "\n".join(
             f"- {name}: {inst.description or 'no description'}"
@@ -297,7 +297,7 @@ class Orchestrator(Agent, abstract=True):
             return choice
         # One strict retry for a reply that names zero or several workers:
         # cheaper than mis-routing, and a supervisor that still can't comply
-        # falls through to _route's safety net ("" -> DONE / first worker).
+        # falls through to _route_supervisor's safety net ("" -> DONE / first worker).
         strict = Message(
             role="system",
             content=(
@@ -427,7 +427,7 @@ class Orchestrator(Agent, abstract=True):
                 graph.add_edge(name, END)  # terminal node -> END
         return graph.compile()
 
-    # ----- run config (guard B; recursion error wrapping added in Task 8) -
+    # ----- run config (guard B; recursion error wrapping) ----------------
 
     def _run_config(self) -> dict:
         config: dict[str, Any] = {}
@@ -465,6 +465,10 @@ class Orchestrator(Agent, abstract=True):
     # ----- neutral interface ----------------------------------------------
 
     def invoke(self, messages: list[Message]) -> Message:
+        """Execução síncrona do grafo. O ``timeout`` aqui é só verificação a
+        posteriori: o run vai até o fim e, se passou do prazo, levanta
+        AixonError depois. Não limita a duração; para um prazo real use
+        ``ainvoke`` (cancela entre supersteps)."""
         from langgraph.errors import GraphRecursionError
 
         graph = self._compiled()

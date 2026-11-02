@@ -36,8 +36,7 @@ def _client_proxy_tools(defs: list[dict]) -> list:
     """One ``return_direct`` ``StructuredTool`` per client tool def (#18c).
 
     The proxy body is a stub returning a sentinel — the LangGraph loop never
-    actually "does" the client's tool. ``return_direct`` (the OnlyOffice
-    native-bridge precedent) ends the graph right after the call when ALL of
+    actually "does" the client's tool. ``return_direct`` ends the graph right after the call when ALL of
     the turn's calls are proxies; on a MIXED turn (internal + client call in
     the same AI message) LangChain keeps looping, so the post-run detection
     (``_surface_client_calls``) does not rely on the graph ending — it scans
@@ -370,8 +369,8 @@ class ToolAgent(Agent, abstract=True):
 
     def _emit_tool_call_labels(self, message) -> None:
         """If an AI message carries tool calls, emit one reasoning label per
-        call into the active ReasoningChannel (the langgraph-native equivalent
-        of olympus' on_agent_action callback). The label text comes from
+        call into the active ReasoningChannel, à medida que o loop do LangGraph
+        produz cada chamada. The label text comes from
         ``self.tool_call_label``, a ``{name}``-templated string subclasses may
         override (e.g. for a friendlier phrase or i18n).
 

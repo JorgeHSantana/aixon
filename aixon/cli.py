@@ -5,7 +5,7 @@ Commands
 list    List registered agents.
 chat    Interactive chat with an agent (in-process or remote).
 new     Scaffold a consumer project.
-serve   Start the aixon server (delegates to Plan 5 Server).
+serve   Start the aixon server (OpenAI dialect at /v1; --anthropic adds /anthropic).
 """
 from __future__ import annotations
 

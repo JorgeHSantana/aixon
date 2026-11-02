@@ -81,8 +81,8 @@ def _default_render_input(kwargs: dict) -> str:
 
 @dataclass
 class AgentTool:
-    """Neutral descriptor of an Agent exposed as a callable tool. Later plans
-    adapt this to a LangChain StructuredTool for tool-calling agents."""
+    """Neutral descriptor of an Agent exposed as a callable tool.
+    ``aixon.tools.coerce_tools`` adapta isto a um StructuredTool."""
 
     name: str
     description: str
@@ -440,7 +440,14 @@ class Agent(ABC):
         completion. ``stream()``'s contract is ``Iterator[Chunk]``, not
         ``Generator``, so plain iterators (no ``close()``) are accepted too;
         the done sentinel is always enqueued, even if ``close()`` raises or
-        ``stream()`` itself raises before returning."""
+        ``stream()`` itself raises before returning.
+
+        Limite do cancelamento: a ponte não cancela o produtor. Ao parar,
+        ``aclose()`` espera (``await fut``) o produtor chegar ao PRÓXIMO chunk;
+        se ``stream()`` está bloqueado numa chamada longa (tool/LLM), o
+        consumidor fica preso pelo mesmo tempo. Os agentes embutidos (LLMAgent,
+        ToolAgent, Orchestrator, ReflectiveAgent) sobrescrevem este método; só
+        Agents puramente síncronos caem aqui."""
         import asyncio
         import contextvars
         import threading

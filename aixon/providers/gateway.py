@@ -28,6 +28,11 @@ is SENT, from the caller's context, not when the model is built: the LLM caches
 one model, and that model serves many users. Without an e-mail no header goes
 out at all; refusing such a request is the application's job, not this one's.
 
+Este é o ÚNICO provedor que lê ``current_user_email()``; nenhum outro o
+consulta, então o e-mail nunca sai do processo rumo a OpenAI, xAI, z.AI,
+Anthropic ou Google. Como viaja num header HTTP, precisa ser ASCII: e-mail
+internacionalizado não é suportado nesta versão.
+
 Both ``http_client`` and ``http_async_client`` get the hook, on purpose.
 ChatOpenAI keeps one SDK client per path (sync for invoke/stream, async for
 ainvoke/astream) and a lone ``http_client`` is ignored, with no error, on the

@@ -205,11 +205,10 @@ class LLM:
     def chat_model(self) -> "BaseChatModel":
         """Lazily build and cache the LangChain model.
 
-        Used directly when no per-request generation params are active
-        (LLMAgent's ``_bound_model``, and ``request_chat_model`` itself as its
-        no-params fast path). ToolAgent goes through ``request_chat_model()``
-        instead, which applies per-request params via a fresh/cached provider
-        model rather than this bare cached one. The provider must already be
+        Usado apenas por ``request_chat_model()``, como fast path quando não
+        há params por requisição nem modelo imposto; LLMAgent (via
+        ``_bound_model``) e ToolAgent passam sempre por
+        ``request_chat_model()``. The provider must already be
         registered (via importing its module or a custom register_provider()
         call).
 

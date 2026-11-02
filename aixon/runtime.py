@@ -193,11 +193,8 @@ def prediction_scope(text: str | None) -> Iterator[str | None]:
 
 
 # The e-mail of the end user the current call acts for, published around the
-# agent call by whoever serves the request. ONLY the `gateway` provider reads
-# it, via current_user_email(), to tell the gateway whom the call is for (spend
-# and limits are then per person, not per shared key). No other provider looks
-# at it, so the e-mail never leaves the process towards OpenAI, xAI, z.AI,
-# Anthropic or Google.
+# agent call by whoever serves the request. Quem o lê e como ele sai do
+# processo é assunto de quem lê (ver aixon.providers.gateway).
 _user_email: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "aixon_user_email", default=None
 )
@@ -215,8 +212,7 @@ def user_email_scope(email: str | None) -> Iterator[str | None]:
     The e-mail is stripped and a blank one becomes None, so readers never
     tell "" from absent. On exit the previous value comes back.
 
-    It travels as an HTTP header, so it must be ASCII: an internationalized
-    e-mail address is not supported in this version. Like any ContextVar
+    Like any ContextVar
     scope, it is seen only by what runs in this context (asyncio tasks and
     ``asyncio.to_thread`` copy it; a bare thread does not), and a scope held
     across a ``yield`` is also seen by the generator's consumer between two
