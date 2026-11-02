@@ -58,3 +58,15 @@ def classify_gateway_error(exc: BaseException) -> type[AixonError] | None:
     from aixon.providers.gateway_errors import classify_gateway_error as _classify
 
     return _classify(exc)
+
+
+class RequestRejected(AixonError):
+    """O ``request_hook`` recusou a request; o Server responde com ``status``
+    e ``code`` no envelope de erro do protocolo."""
+
+    def __init__(
+        self, message: str, *, status: int = 403, code: str = "request_rejected"
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
