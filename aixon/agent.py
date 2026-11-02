@@ -158,12 +158,18 @@ async def _ainvoke_imposing(fn: Callable[..., Any], agent: "Agent", args: tuple,
         return await fn(agent, *args, **kwargs)
 
 
-def _stream_imposing(
-    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
-) -> Iterator[Chunk]:
-    scope = _step_scope(agent)
+StepScope = Callable[[], AbstractContextManager[Any]]
+
+
+def _stream_in_steps(make: Callable[[], Any],
+                     resolve: Callable[[], StepScope]) -> Iterator[Chunk]:
+    """Itera ``make()`` abrindo o escopo de ``resolve()`` em volta de cada passo
+    (criação, cada ``next`` e o ``close``), nunca em volta de um ``yield``: o
+    consumidor nunca vê o escopo, nem se abandonar o gerador sem fechá-lo.
+    ``resolve`` roda no primeiro passo, no contexto em que o run executa."""
+    scope = resolve()
     with scope():  # creating the iterator may already run code (not a generator function)
-        inner = iter(fn(agent, *args, **kwargs))
+        inner = iter(make())
     try:
         while True:
             with scope():
@@ -179,12 +185,12 @@ def _stream_imposing(
                 close()
 
 
-async def _astream_imposing(
-    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
-) -> AsyncIterator[Chunk]:
-    scope = _step_scope(agent)
+async def _astream_in_steps(make: Callable[[], Any],
+                            resolve: Callable[[], StepScope]) -> AsyncIterator[Chunk]:
+    """Gêmeo async de ``_stream_in_steps``."""
+    scope = resolve()
     with scope():
-        inner = fn(agent, *args, **kwargs).__aiter__()
+        inner = make().__aiter__()
     try:
         while True:
             with scope():
@@ -198,6 +204,20 @@ async def _astream_imposing(
         if aclose is not None:
             with scope():
                 await aclose()
+
+
+def _stream_imposing(
+    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
+) -> Iterator[Chunk]:
+    return _stream_in_steps(lambda: fn(agent, *args, **kwargs),
+                            lambda: _step_scope(agent))
+
+
+def _astream_imposing(
+    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
+) -> AsyncIterator[Chunk]:
+    return _astream_in_steps(lambda: fn(agent, *args, **kwargs),
+                             lambda: _step_scope(agent))
 
 
 _IMPOSING_RUNNERS: dict[str, Callable[..., Any]] = {

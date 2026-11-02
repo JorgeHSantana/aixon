@@ -75,3 +75,14 @@ def tool_call_cache() -> Iterator[ToolCallCache]:
         yield cache
     finally:
         _current.reset(token)
+
+
+@contextmanager
+def use_tool_cache(cache: ToolCallCache) -> Iterator[ToolCallCache]:
+    """Ativa ESTE cache no bloco (sem a regra de reuso do ``tool_call_cache``):
+    para quem reabre o mesmo cache a cada passo de um stream."""
+    token = _current.set(cache)
+    try:
+        yield cache
+    finally:
+        _current.reset(token)

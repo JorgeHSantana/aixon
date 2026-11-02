@@ -32,14 +32,16 @@ import dataclasses
 import re
 from typing import Any, AsyncIterator, Iterator
 
-from aixon.agent import Agent, instantiate
+from aixon.agent import Agent, _astream_in_steps, _stream_in_steps, instantiate
 from aixon.exceptions import AixonError, classify_gateway_error
 from aixon.llm import LLM
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
 from aixon.reasoning import emit_reasoning
 from aixon.runtime import prediction_scope
-from aixon.toolcache import tool_call_cache
+from aixon.toolcache import (
+    ToolCallCache, current_tool_cache, tool_call_cache, use_tool_cache,
+)
 from aixon.usage import merge_usage
 
 _log = Logger("aixon.reflective")
@@ -495,9 +497,23 @@ class ReflectiveAgent(Agent, abstract=True):
         the whole loop. Candidate CONTENT is buffered — an answer must never
         reach the user before the judge approves it — and only the approved
         (or last, on exhaustion) answer is emitted as content."""
-        # See invoke(): one tool-call cache for all rounds of this run (#5).
-        with tool_call_cache():
-            yield from self._stream(messages)
+        # See invoke(): one tool-call cache for all rounds of this run (#5),
+        # aberto por passo, nunca em volta de um yield (ver _run_cache_scope).
+        yield from _stream_in_steps(lambda: self._stream(messages),
+                                    self._run_cache_scope)
+
+    @staticmethod
+    def _run_cache_scope() -> Any:
+        """Escopo por passo do cache de tool calls do run (#5): o cache externo
+        ativo, ou um novo, escolhido no primeiro passo e reativado em cada
+        passo seguinte — o consumidor que abandona o stream não herda o cache."""
+        cache = current_tool_cache() or ToolCallCache()
+        return lambda: use_tool_cache(cache)
+
+    @staticmethod
+    def _prediction_step(text: str | None) -> Any:
+        """Escopo por passo do predicted output (#6) do stream do worker."""
+        return lambda: (lambda: prediction_scope(text))
 
     def _stream(self, messages: list[Message]) -> Iterator[Chunk]:
         msgs = list(messages)
@@ -516,14 +532,16 @@ class ReflectiveAgent(Agent, abstract=True):
                 try:
                     # See _invoke(): round 1 has no previous answer (no-op);
                     # retry rounds publish it as the predicted output (#6).
-                    with prediction_scope(answer.content or None):
-                        for chunk in self._worker.stream(msgs):
-                            if chunk.reasoning:
-                                yield Chunk(reasoning=chunk.reasoning)
-                            if chunk.content:
-                                parts.append(chunk.content)
-                            if chunk.tool_calls:
-                                worker_tool_calls = chunk.tool_calls
+                    # Por passo do worker, nunca em volta do yield abaixo.
+                    for chunk in _stream_in_steps(
+                            lambda: self._worker.stream(msgs),
+                            self._prediction_step(answer.content or None)):
+                        if chunk.reasoning:
+                            yield Chunk(reasoning=chunk.reasoning)
+                        if chunk.content:
+                            parts.append(chunk.content)
+                        if chunk.tool_calls:
+                            worker_tool_calls = chunk.tool_calls
                 except AixonError as exc:
                     if classify_gateway_error(exc) is not None:
                         raise  # gateway verdict: re-raised, never degraded (module docstring)
@@ -668,10 +686,10 @@ class ReflectiveAgent(Agent, abstract=True):
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
         """Async mirror of ``stream`` — same live pass-through/buffering."""
-        # See invoke(): one tool-call cache for all rounds of this run (#5).
-        with tool_call_cache():
-            async for chunk in self._astream(messages):
-                yield chunk
+        # See stream(): cache do run aberto por passo (#5).
+        async for chunk in _astream_in_steps(lambda: self._astream(messages),
+                                             self._run_cache_scope):
+            yield chunk
 
     async def _astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
         msgs = list(messages)
@@ -688,14 +706,15 @@ class ReflectiveAgent(Agent, abstract=True):
                 worker_tool_calls: list[dict] | None = None
                 try:
                     # See _invoke(): predicted output for retry rounds (#6).
-                    with prediction_scope(answer.content or None):
-                        async for chunk in self._worker.astream(msgs):
-                            if chunk.reasoning:
-                                yield Chunk(reasoning=chunk.reasoning)
-                            if chunk.content:
-                                parts.append(chunk.content)
-                            if chunk.tool_calls:
-                                worker_tool_calls = chunk.tool_calls
+                    async for chunk in _astream_in_steps(
+                            lambda: self._worker.astream(msgs),
+                            self._prediction_step(answer.content or None)):
+                        if chunk.reasoning:
+                            yield Chunk(reasoning=chunk.reasoning)
+                        if chunk.content:
+                            parts.append(chunk.content)
+                        if chunk.tool_calls:
+                            worker_tool_calls = chunk.tool_calls
                 except AixonError as exc:
                     if classify_gateway_error(exc) is not None:
                         raise  # gateway verdict: re-raised, never degraded (module docstring)
