@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
@@ -54,6 +55,11 @@ _handler_var: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
 _hook_registered = False
 _handler: Any = None
 _disabled = False  # sticky after an import/creation failure
+# Protege a inicialização lazy de _handler/_disabled/_hook_registered entre
+# threads (primeiras requests concorrentes num threadpool).
+_init_lock = threading.Lock()
+# Trava própria do registro: _register_hook roda também sob _init_lock.
+_hook_lock = threading.Lock()
 
 
 def langfuse_enabled() -> bool:
@@ -67,27 +73,42 @@ def _ensure_handler() -> Any:
     Returns None (and warns ONCE) when the env pair is absent, the optional
     dependency is not installed, or client creation fails — the sticky
     ``_disabled`` latch keeps the failure path at zero cost afterwards."""
-    global _hook_registered, _handler, _disabled
+    global _handler, _disabled
     if _disabled or not langfuse_enabled():
         return None
     if _handler is not None:
         return _handler
-    try:
-        from langchain_core.tracers.context import register_configure_hook
-        from langfuse.langchain import CallbackHandler
+    with _init_lock:  # double-checked: só uma thread cria o handler
+        if _disabled:
+            return None
+        if _handler is not None:
+            return _handler
+        try:
+            from langfuse.langchain import CallbackHandler
 
+            _register_hook()
+            _handler = CallbackHandler()
+        except Exception as exc:
+            _disabled = True
+            _log.warning(
+                "Langfuse desabilitado (falha ao criar o handler — instale "
+                f"aixon[langfuse] e confira as envs LANGFUSE_*): {exc}"
+            )
+            return None
+        return _handler
+
+
+def _register_hook() -> None:
+    """Registra ``_handler_var`` no configure hook do langchain-core, uma vez."""
+    global _hook_registered
+    if _hook_registered:
+        return
+    with _hook_lock:
         if not _hook_registered:
+            from langchain_core.tracers.context import register_configure_hook
+
             register_configure_hook(_handler_var, inheritable=True)
             _hook_registered = True
-        _handler = CallbackHandler()
-    except Exception as exc:
-        _disabled = True
-        _log.warning(
-            "Langfuse desabilitado (falha ao criar o handler — instale "
-            f"aixon[langfuse] e confira as envs LANGFUSE_*): {exc}"
-        )
-        return None
-    return _handler
 
 
 def request_identity(headers: Any) -> dict:
@@ -106,12 +127,7 @@ def _handler_scope(handler: Any) -> Iterator[None]:
     """Publish ``handler`` to langchain-core's configure hook for the block.
     Split from ``observe_request`` so tests can drive the propagation with a
     dummy handler and no langfuse installed."""
-    global _hook_registered
-    if not _hook_registered:
-        from langchain_core.tracers.context import register_configure_hook
-
-        register_configure_hook(_handler_var, inheritable=True)
-        _hook_registered = True
+    _register_hook()
     token = _handler_var.set(handler)
     try:
         yield
@@ -137,6 +153,7 @@ def observe_request(agent_name: str, *, user_id: str | None = None,
         yield False
         return
     stack = ExitStack()
+    opened = True
     try:
         from langfuse import get_client, propagate_attributes
 
@@ -154,6 +171,10 @@ def observe_request(agent_name: str, *, user_id: str | None = None,
         except Exception:
             pass
         _log.warning(f"Langfuse: falha ao abrir o trace (request segue sem): {exc}")
+        opened = False
+    if not opened:
+        # Fora do except: senão a exceção do agente herdaria a do Langfuse
+        # como __context__ ("During handling of the above exception...").
         yield False
         return
     try:
