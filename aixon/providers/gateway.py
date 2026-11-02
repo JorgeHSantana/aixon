@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError
 from aixon.providers.base import OpenAICompatProvider, register_provider
+from aixon.providers.gateway_errors import gateway_base_url, required_env_error
 from aixon.runtime import current_user_email
 
 if TYPE_CHECKING:
@@ -62,15 +63,9 @@ def _transports() -> tuple[httpx.BaseTransport | None, httpx.AsyncBaseTransport 
 
 
 def _required_env(name: str) -> str:
-    # Stripped like classify_gateway_error() strips the URL, so the two read
-    # AIXON_GATEWAY_BASE_URL the same way.
     value = os.getenv(name, "").strip()
     if not value:
-        raise AixonError(
-            f"{name} is missing or empty. Refusing to build the gateway model — "
-            f"this provider never falls back to OPENAI_API_KEY, OPENAI_BASE_URL "
-            f"or OPENAI_API_BASE."
-        )
+        raise required_env_error(name)
     return value
 
 
@@ -122,7 +117,8 @@ class GatewayProvider(OpenAICompatProvider):
     # here the gateway, not the caller, picks the model that answers.
 
     def base_url(self) -> str:
-        return _required_env("AIXON_GATEWAY_BASE_URL")
+        # A mesma leitura que classify_gateway_error usa (gateway_errors).
+        return gateway_base_url(required=True)
 
     def api_key(self) -> str:
         return _required_env(self.env_key)
