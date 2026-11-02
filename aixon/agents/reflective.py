@@ -32,7 +32,7 @@ import dataclasses
 import re
 from typing import Any, AsyncIterator, Iterator
 
-from aixon.agent import Agent
+from aixon.agent import Agent, instantiate
 from aixon.exceptions import AixonError, classify_gateway_error
 from aixon.llm import LLM
 from aixon.logging import Logger
@@ -232,9 +232,7 @@ class ReflectiveAgent(Agent, abstract=True):
 
     def __init__(self) -> None:
         super().__init__()
-        from aixon.agents.orchestrator import _instantiate
-
-        self._worker: Agent = _instantiate(type(self).agent)
+        self._worker: Agent = instantiate(type(self).agent)
 
     # ----- judge ------------------------------------------------------------
 

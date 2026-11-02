@@ -669,3 +669,19 @@ class Agent(ABC):
             memoize=memoize,
             args_schema=args_schema,
         )
+
+
+def instantiate(agent: Any) -> Agent:
+    """Aceita uma subclasse OU uma instância de Agent e devolve a instância.
+
+    Uma classe resolve para o singleton registrado; se ela não estiver no
+    registry, constrói uma nova. Qualquer outro erro do registry sobe."""
+    if isinstance(agent, type):
+        from aixon.exceptions import AgentNotFoundError
+
+        name = getattr(agent, "name", "") or agent.__name__.lower()
+        try:
+            return get_registry().resolve(name)
+        except AgentNotFoundError:
+            return agent()
+    return agent

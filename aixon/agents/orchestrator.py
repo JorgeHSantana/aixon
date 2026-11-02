@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import threading
 import time
 from collections.abc import Hashable
 from typing import Any, AsyncIterator, Iterator
 
 from langgraph.graph import StateGraph
 
-from aixon.agent import Agent
+from aixon.agent import Agent, instantiate
 from aixon.exceptions import AixonError, CompositionCycleError
 from aixon.logging import Logger
 from aixon.message import Chunk, Message
@@ -28,22 +29,10 @@ _log = Logger("aixon.orchestrator")
 # Sentinel marking the supervisor node in Tier 1 graphs.
 _SUPERVISOR = "supervisor"
 
-
-def _instantiate(agent: Any) -> Agent:
-    """Accept an Agent subclass OR instance and return a usable instance.
-
-    Concrete Agent subclasses auto-instantiate at definition (Plan 1), so the
-    canonical instance is already in the registry. We resolve a class to its
-    registered singleton; instances pass through."""
-    if isinstance(agent, type):
-        from aixon.registry import get_registry
-
-        name = getattr(agent, "name", "") or agent.__name__.lower()
-        try:
-            return get_registry().resolve(name)
-        except Exception:
-            return agent()  # fallback: construct a fresh one
-    return agent
+# Trava da compilação lazy: o singleton do registry é compartilhado entre
+# requests, e duas na primeira chamada não podem compilar dois grafos.
+# Reentrante porque _acompiled chama _compiled no Tier 3.
+_COMPILE_LOCK = threading.RLock()
 
 
 class Orchestrator(Agent, abstract=True):
@@ -172,7 +161,7 @@ class Orchestrator(Agent, abstract=True):
         anything — it only inspects the declarative ``nodes``/``edges``
         dicts and ``route_<node>`` method names on the class."""
         for raw in cls.agents:
-            inst = _instantiate(raw)
+            inst = instantiate(raw)
             if inst.name == _SUPERVISOR:
                 raise AixonError(
                     f"Tier-1 worker name 'supervisor' collides with the "
@@ -226,8 +215,11 @@ class Orchestrator(Agent, abstract=True):
     def _compiled(self):
         cached = getattr(self, "_compiled_graph", None)
         if cached is None:
-            cached = self.build_graph()
-            self._compiled_graph = cached
+            with _COMPILE_LOCK:
+                cached = getattr(self, "_compiled_graph", None)
+                if cached is None:
+                    cached = self.build_graph()
+                    self._compiled_graph = cached
         return cached
 
     def _acompiled(self):
@@ -236,14 +228,19 @@ class Orchestrator(Agent, abstract=True):
         Tier 3 reuses the user's compiled graph (it already exposes ``ainvoke``)."""
         cached = getattr(self, "_compiled_agraph", None)
         if cached is None:
-            if self._tier == 3 or "build_graph" in type(self).__dict__:
-                cached = self._compiled()
-            elif self._tier == 1:
-                cached = self._build_supervisor_graph(node_factory=self._make_aworker_node)
-            else:
-                cached = self._build_explicit_graph(node_factory=self._make_aworker_node)
-            self._compiled_agraph = cached
+            with _COMPILE_LOCK:
+                cached = getattr(self, "_compiled_agraph", None)
+                if cached is None:
+                    cached = self._build_async_graph()
+                    self._compiled_agraph = cached
         return cached
+
+    def _build_async_graph(self):
+        if self._tier == 3 or "build_graph" in type(self).__dict__:
+            return self._compiled()
+        if self._tier == 1:
+            return self._build_supervisor_graph(node_factory=self._make_aworker_node)
+        return self._build_explicit_graph(node_factory=self._make_aworker_node)
 
     def build_graph(self):
         """Build & compile the LangGraph graph for this orchestrator's tier.
@@ -262,11 +259,13 @@ class Orchestrator(Agent, abstract=True):
     def _worker_instances(self) -> dict[str, Agent]:
         out: dict[str, Agent] = {}
         for raw in self.agents:
-            inst = _instantiate(raw)
+            inst = instantiate(raw)
             out[inst.name] = inst
         return out
 
-    def _route_supervisor(self, state: GraphState) -> str:
+    def _route_supervisor(
+        self, state: GraphState, workers: dict[str, Agent] | None = None
+    ) -> str:
         """Ask the supervisor LLM which worker should act next, or END.
 
         The supervisor sees the full conversation (including any worker answers
@@ -274,8 +273,12 @@ class Orchestrator(Agent, abstract=True):
         name or DONE. Termination is the LLM's decision, backstopped by
         ``recursion_limit``. Safety net: we never END on an *unanswered* user
         turn — if the LLM declines to route while the last message is still the
-        user's, dispatch to the first worker so the turn is always handled."""
-        workers = self._worker_instances()
+        user's, dispatch to the first worker so the turn is always handled.
+
+        ``workers`` vem do build (resolvidos uma vez ao compilar); sem ele,
+        resolve na hora."""
+        if workers is None:
+            workers = self._worker_instances()
         messages = list(state.get("messages", []))
         choice = self._supervisor_choose(messages, workers)
         if choice in workers:
@@ -387,7 +390,9 @@ class Orchestrator(Agent, abstract=True):
         # without an explicit Hashable-keyed annotation.
         path_map: dict[Hashable, str] = {name: name for name in workers}
         path_map[END] = END
-        graph.add_conditional_edges(_SUPERVISOR, self._route_supervisor, path_map)
+        graph.add_conditional_edges(
+            _SUPERVISOR, lambda state: self._route_supervisor(state, workers), path_map
+        )
         return graph.compile()
 
     def _make_worker_node(self, agent: Agent):
@@ -414,7 +419,7 @@ class Orchestrator(Agent, abstract=True):
     # ----- Tier 2: explicit graph (nodes/entry/edges + route_<node>) ------
 
     def _node_instances(self) -> dict[str, Agent]:
-        return {name: _instantiate(raw) for name, raw in self.nodes.items()}
+        return {name: instantiate(raw) for name, raw in self.nodes.items()}
 
     def _wrap_router(self, node_name: str):
         method = getattr(self, f"route_{node_name}")
@@ -459,6 +464,30 @@ class Orchestrator(Agent, abstract=True):
     def _initial_state(self, messages: list[Message]) -> dict:
         return {"messages": list(messages), "reasoning": []}
 
+    # ----- caudas comuns de invoke/ainvoke ---------------------------------
+
+    def _recursion_error(self, exc: Exception) -> AixonError:
+        """O AixonError do limite de recursão, igual nos caminhos sync e async."""
+        return AixonError(
+            f"Orchestrator '{type(self).__name__}' hit its recursion limit "
+            f"({self.recursion_limit}). The graph looped without reaching "
+            f"END. Raise `recursion_limit`, fix the routing, or set a "
+            f"terminal edge. (LangGraph: {exc})"
+        )
+
+    @staticmethod
+    def _final_message(result: dict, usage_acc: Any) -> Message:
+        """A última mensagem ``assistant`` do estado, com o total da run.
+
+        Devolve uma CÓPIA com o uso de todos os turnos, como o contrato de
+        ToolAgent._sum_usage. Cópia, não ``m.usage = ...``: o worker é dono
+        dessa Message (pode estar em cache, ou ser de um Orchestrator aninhado
+        que já carimbou o próprio total), e a fronteira neutra não a altera."""
+        for m in reversed(result.get("messages", [])):
+            if m.role == "assistant":
+                return dataclasses.replace(m, usage=usage_acc.total)
+        return Message(role="assistant", content="", usage=usage_acc.total)
+
     # ----- neutral interface ----------------------------------------------
 
     def invoke(self, messages: list[Message]) -> Message:
@@ -475,28 +504,13 @@ class Orchestrator(Agent, abstract=True):
                     self._initial_state(messages), config=self._run_config()
                 )
             except GraphRecursionError as exc:
-                raise AixonError(
-                    f"Orchestrator '{type(self).__name__}' hit its recursion limit "
-                    f"({self.recursion_limit}). The graph looped without reaching "
-                    f"END. Raise `recursion_limit`, fix the routing, or set a "
-                    f"terminal edge. (LangGraph: {exc})"
-                ) from exc
+                raise self._recursion_error(exc) from exc
         if deadline is not None and time.monotonic() > deadline:
             raise AixonError(
                 f"Orchestrator '{type(self).__name__}' exceeded timeout="
                 f"{self.timeout}s."
             )
-        out_messages = result.get("messages", [])
-        for m in reversed(out_messages):
-            if m.role == "assistant":
-                # Return a COPY carrying the run's total (every turn), not just
-                # this worker's own turn — mirroring ToolAgent._sum_usage's
-                # contract. A copy, not `m.usage = ...`: the worker owns that
-                # Message (it may be cached/shared, or belong to a nested
-                # Orchestrator that already stamped its own total on it), so
-                # the neutral boundary must not mutate it in place.
-                return dataclasses.replace(m, usage=usage_acc.total)
-        return Message(role="assistant", content="", usage=usage_acc.total)
+        return self._final_message(result, usage_acc)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
         from aixon.reasoning import reasoning_channel
@@ -505,18 +519,7 @@ class Orchestrator(Agent, abstract=True):
             final = self.invoke(messages)
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
-        if final.reasoning:
-            yield Chunk(reasoning=final.reasoning)
-        # A worker that surfaced client tool_calls (#18c) is not a final text
-        # answer — repassing it as Chunk(content=final.content) would drop the
-        # calls silently (final.content is "" for that Message). Surface them
-        # instead and end the stream here.
-        if final.tool_calls:
-            yield Chunk(tool_calls=final.tool_calls)
-            yield Chunk(done=True)
-            return
-        yield Chunk(content=final.content)
-        yield Chunk(done=True)
+        yield from _final_chunks(final)
 
     # ----- async neutral interface ----------------------------------------
 
@@ -547,19 +550,8 @@ class Orchestrator(Agent, abstract=True):
                     f"{self.timeout}s; the run was cancelled."
                 )
             except GraphRecursionError as exc:
-                raise AixonError(
-                    f"Orchestrator '{type(self).__name__}' hit its recursion limit "
-                    f"({self.recursion_limit}). The graph looped without reaching "
-                    f"END. Raise `recursion_limit`, fix the routing, or set a "
-                    f"terminal edge. (LangGraph: {exc})"
-                ) from exc
-        out_messages = result.get("messages", [])
-        for m in reversed(out_messages):
-            if m.role == "assistant":
-                # See invoke(): a COPY carrying the run's total — never mutate
-                # the worker's own Message in place.
-                return dataclasses.replace(m, usage=usage_acc.total)
-        return Message(role="assistant", content="", usage=usage_acc.total)
+                raise self._recursion_error(exc) from exc
+        return self._final_message(result, usage_acc)
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
         from aixon.reasoning import reasoning_channel
@@ -568,13 +560,23 @@ class Orchestrator(Agent, abstract=True):
             final = await self.ainvoke(messages)
             for line in channel.drain():
                 yield Chunk(reasoning=line + "\n")
-        if final.reasoning:
-            yield Chunk(reasoning=final.reasoning)
-        # See stream(): a worker's surfaced client tool_calls must not be
-        # silently dropped as an empty content chunk.
-        if final.tool_calls:
-            yield Chunk(tool_calls=final.tool_calls)
-            yield Chunk(done=True)
-            return
-        yield Chunk(content=final.content)
+        for chunk in _final_chunks(final):
+            yield chunk
+
+
+def _final_chunks(final: Message) -> Iterator[Chunk]:
+    """Cauda comum de stream/astream: reasoning final, depois tool_calls ou
+    content, e o done.
+
+    Um worker que devolveu tool_calls de cliente (#18c) não é resposta final
+    em texto: repassá-lo como Chunk(content=final.content) perderia as
+    chamadas em silêncio (content é "" nessa Message). Elas saem num chunk
+    próprio e o stream termina ali."""
+    if final.reasoning:
+        yield Chunk(reasoning=final.reasoning)
+    if final.tool_calls:
+        yield Chunk(tool_calls=final.tool_calls)
         yield Chunk(done=True)
+        return
+    yield Chunk(content=final.content)
+    yield Chunk(done=True)
