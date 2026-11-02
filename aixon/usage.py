@@ -26,6 +26,8 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
+from aixon.runtime import _reset_quietly
+
 _KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
 
@@ -106,7 +108,7 @@ def usage_scope() -> Iterator[UsageAccumulator]:
     try:
         yield acc
     finally:
-        _current.reset(token)
+        _reset_quietly(_current, token)
 
 
 def usage_for(model: str, messages, message) -> dict:

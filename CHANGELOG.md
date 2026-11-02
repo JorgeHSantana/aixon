@@ -5,13 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Não lançado]
+## [0.1.29] - 2026-11-02
 
-Varredura da 0.1.29 (plano 1 de 2): repetição, acoplamento e bugs encontrados
-por leitura de cada módulo, corrigidos sem mudar o comportamento observável
-da 0.1.28. O plano 2 (contexto por request no `Server`) fecha a versão.
+Contexto por request no `Server`. A aplicação passa um `request_hook` e decide,
+uma vez por request, o modelo imposto à árvore do agente, a identidade (e-mail
+do gateway e trace) e a recusa — a partir dos headers, sem conhecimento de
+produto no aixon. Sem hook, o comportamento é o da 0.1.28 (hook padrão Open
+WebUI, agora depreciado). A versão também traz a varredura de repetição,
+acoplamento e bugs dos módulos, sem mudar o comportamento observável.
 
 ### Added
+- **`Server(request_hook=...)`**: o hook é chamado uma vez por request, depois
+  de resolver o agente e antes de qualquer escopo; o `Server` abre
+  `imposed_model_scope(*decision.impose, by="server")`, `user_email_scope` e a
+  identidade do trace a partir da decisão, nos caminhos stream e não stream.
+  O singleton fixa o hook na primeira construção; `request_hook=None` é "sem
+  opinião". Exemplo em `examples/request_hook/`.
+- **`aixon.server.context`**: `RequestContext`, `RequestDecision`,
+  `RequestHook` e `make_context` (tipos puros, sem fastapi).
+- **`aixon.exceptions.RequestRejected(message, *, status=403, code="request_rejected")`**:
+  levantada pelo hook, recusa a request antes de qualquer LLM (HTTP `status`
+  sem stream; última mensagem no stream).
+- **`aixon.server.compat.open_webui_request_hook`**: o que o aixon fazia até a
+  0.1.28 (headers `x-openwebui-*`); é o padrão sem `request_hook`.
+- **`imposed_model_scope(..., by=)`** e **`aixon.runtime.current_imposed_by()`**:
+  quem abriu o escopo imposto (`"agent"` ou `"server"`).
+- **`LLM.request_chat_model`**: sob modelo imposto pelo servidor, loga WARNING
+  uma vez por (LLM, modelo imposto) com os kwargs não portáveis descartados.
 - **`OpenAICompatProvider`** em `aixon/providers/base.py`: base dos provedores
   que falam Chat Completions via `langchain_openai.ChatOpenAI` (`openai`,
   `xai`, `zai`, `gateway`), com os ganchos `api_key()`, `base_url()`,
@@ -60,6 +80,12 @@ da 0.1.28. O plano 2 (contexto por request no `Server`) fecha a versão.
 - **Docstrings**: sem referências a "Task N"/"Plan N", sem nomes de produto
   (OnlyOffice, olympus) e sem descrições de caminhos que já não existem.
 
+### Deprecated
+- **`aixon.observability.request_identity`**: a identidade do trace vem da
+  `RequestDecision`.
+- **Hook padrão Open WebUI** (`open_webui_request_hook` quando nenhum
+  `request_hook` é passado): vira opt-in na 0.2.
+
 ### Fixed
 - **`ReflectiveAgent.stream`/`astream`**: `tool_call_cache()` e
   `prediction_scope()` eram abertos em volta de `yield`; um consumidor que
@@ -74,7 +100,8 @@ da 0.1.28. O plano 2 (contexto por request no `Server`) fecha a versão.
   o que cancela os nós em voo, e relançado); falha do `aclose()` é logada em
   WARNING em vez de sumir.
 - **`aixon.runtime`**: todos os escopos (`generation_params`,
-  `client_tools_scope`, `tool_choice_scope`, `prediction_scope`) toleram o
+  `client_tools_scope`, `tool_choice_scope`, `prediction_scope`) e
+  `aixon.usage.usage_scope` toleram o
   `reset()` em outro Context (#21), como `user_email_scope` e
   `imposed_model_scope` já faziam; `generation_params` e
   `client_tools_scope` entregam uma cópia ao bloco `with`.
@@ -109,9 +136,6 @@ bump maior:
   `LLM._build` para a fronteira `Provider.build`.
 - `Agent.astream` (ponte sync→async): `aclose()` deixa de esperar o próximo
   chunk do produtor bloqueado.
-- Os headers `x-openwebui-*` lidos pelo `Server` e por
-  `observability.request_identity` saem para um módulo de compatibilidade
-  (plano 2 desta versão).
 
 ## [0.1.28] - 2026-10-28
 

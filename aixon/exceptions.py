@@ -52,7 +52,7 @@ class ImposedModelViolation(AixonError):
 def classify_gateway_error(exc: BaseException) -> type[AixonError] | None:
     """Compatibilidade: a classificação mora em
     ``aixon.providers.gateway_errors.classify_gateway_error`` (contrato do
-    gateway LiteLLM); este nome continua aqui e em ``aixon`` para quem já o
+    gateway; o do LiteLLM, por exemplo); este nome continua aqui e em ``aixon`` para quem já o
     importa. Import preguiçoso: exceptions nunca importa providers no topo,
     o que criaria ciclo (gateway_errors importa este módulo)."""
     from aixon.providers.gateway_errors import classify_gateway_error as _classify

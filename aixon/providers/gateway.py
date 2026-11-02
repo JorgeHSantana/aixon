@@ -1,7 +1,7 @@
 """Gateway provider — an OpenAI-compatible gateway that imposes the model.
 
 Some deployments send every LLM call through one gateway (a LiteLLM proxy, for
-instance): the caller names a tier, the gateway picks the real model and meters
+example — the provider assumes no particular product): the caller names a tier, the gateway picks the real model and meters
 the spend per end user. It speaks the OpenAI Chat Completions contract, so this
 provider reuses langchain_openai.ChatOpenAI pointed at it. Self-registers as
 'gateway' at import time. There is no model-name inference rule: it is reached
@@ -14,8 +14,9 @@ Environment:
     AIXON_GATEWAY_BASE_URL     the gateway's OpenAI-compatible URL (required)
     AIXON_GATEWAY_API_KEY      its key (required)
     AIXON_GATEWAY_USER_HEADER  name of the header that carries the end user's
-                               e-mail (default X-OpenWebUI-User-Email); empty
-                               turns the forwarding off
+                               e-mail (default X-OpenWebUI-User-Email, kept for
+                               compatibility: Open WebUI is only an
+                               example); empty turns the forwarding off
 
 It NEVER reads OPENAI_API_KEY, OPENAI_BASE_URL or OPENAI_API_BASE: it hands
 ChatOpenAI its own key and URL, so the SDK has nothing to fill in from those.

@@ -1,9 +1,9 @@
-"""Classificação dos erros do gateway LiteLLM (provedor ``gateway``).
+"""Classificação dos erros do gateway (provedor ``gateway``).
 
 Único ponto que lê e normaliza ``AIXON_GATEWAY_BASE_URL``; o provedor
 (``aixon.providers.gateway``) e o classificador usam ``gateway_base_url``.
-O contrato de cota/limite é o do proxy LiteLLM: 429 é limite de taxa, 422
-com "budget" na mensagem ou no corpo é cota esgotada. Importa só
+Contrato de cota/limite (o do proxy LiteLLM, por exemplo): 429 é limite de
+taxa, 422 com "budget" na mensagem ou no corpo é cota esgotada. Importa só
 ``aixon.exceptions`` (nunca o contrário no topo, para não criar ciclo)."""
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from aixon.exceptions import AixonError, GatewayBudgetExceeded, GatewayRateLimit
 
 GATEWAY_BASE_URL_ENV = "AIXON_GATEWAY_BASE_URL"
 
-# Contrato do LiteLLM: status e substring (sem caixa) que marcam cota esgotada.
+# Contrato do gateway (o do LiteLLM, por exemplo): status e substring (sem caixa) que marcam cota esgotada.
 BUDGET_STATUS = 422
 BUDGET_MARKER = "budget"
-# Contrato do LiteLLM: status de limite de taxa.
+# Contrato do gateway: status de limite de taxa.
 RATE_LIMIT_STATUS = 429
 
 
@@ -95,7 +95,8 @@ def classify_gateway_error(exc: BaseException) -> type[AixonError] | None:
       (``AIXON_GATEWAY_BASE_URL``): ``RATE_LIMIT_STATUS`` (429) is
       ``GatewayRateLimited``; ``BUDGET_STATUS`` (422) with ``BUDGET_MARKER``
       ("budget") in the message or body (any case) is
-      ``GatewayBudgetExceeded``. That is the LiteLLM proxy's contract.
+      ``GatewayBudgetExceeded``. That is the gateway contract (the LiteLLM
+      proxy's, for example).
 
     Errors from any other API never match, so a 429 from OpenAI itself keeps
     behaving as it always did. Safe to call from an error handler: it never

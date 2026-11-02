@@ -25,6 +25,17 @@ def test_toolcache_exit_in_other_context_does_not_raise(factory):
     assert current_tool_cache() is None
 
 
+def test_usage_scope_exit_in_other_context_does_not_raise():
+    from aixon.usage import usage_scope
+
+    def body():
+        scope = usage_scope()
+        scope.__enter__()
+        contextvars.copy_context().run(scope.__exit__, None, None, None)  # sem ValueError
+
+    contextvars.copy_context().run(body)
+
+
 # ── item 7: a coroutine não nasce antes do ramo que a aguarda ───────────────
 
 def test_mcp_discover_executor_failure_leaves_no_unawaited_coroutine(monkeypatch):
