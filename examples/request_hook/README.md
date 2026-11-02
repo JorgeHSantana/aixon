@@ -6,7 +6,9 @@ mexer nas classes dos agentes.
 
 ## O que o hook decide
 
-`tier_hook(ctx)` recebe um `RequestContext` e devolve um `RequestDecision`:
+`TierHook` herda de `HeaderIdentityHook(email_header="x-user")` e sobrescreve
+duas fases: `check` (recusa) e `imposition` (modelo). A base roda
+`check` → `identity` → `imposition` e monta o `RequestDecision`:
 
 | Cabeçalho | Efeito |
 |---|---|
@@ -22,8 +24,8 @@ mexer nas classes dos agentes.
 parse → resolve (agente) → hook → escopos → agente
 ```
 
-O Server interpreta o corpo, resolve o agente pelo `model`, chama o hook uma
-vez, abre os escopos da decisão (modelo imposto, e-mail, identidade do trace)
+O Server interpreta o corpo, resolve o agente pelo `model`, chama o hook
+(`TierHook()`) uma vez, abre os escopos da decisão (modelo imposto, e-mail, identidade do trace)
 e só então roda o agente.
 
 ## Como rodar

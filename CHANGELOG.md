@@ -5,6 +5,47 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.30] - 2026-11-02
+
+O `request_hook` ganha forma de classe. A aplicação herda de `RequestHook` e
+sobrescreve só as fases que interessam (`check` → `identity` → `imposition`),
+reaproveita a identidade por headers (`HeaderIdentityHook`) e compõe hooks
+(`ChainRequestHook`). Função solta continua aceita; o comportamento sem hook é
+o da 0.1.29.
+
+### Added
+- **`aixon.server.RequestHook`**: classe base em fases. `__call__` roda
+  `check(ctx) -> None`, `identity(ctx) -> Identity` e
+  `imposition(ctx) -> tuple[str, str] | None`, nessa ordem, e monta a
+  `RequestDecision`; a recusa em `check` impede as demais.
+- **`aixon.server.Identity`**: dataclass congelada com `user_email`,
+  `trace_user_id` e `trace_session_id` (todos `None` = "não mexer").
+- **`aixon.server.HeaderIdentityHook(*, email_header, user_id_header=None, session_header=None)`**:
+  identidade lida de headers configuráveis; o `trace_user_id` cai no
+  `user_id_header` quando o e-mail vem vazio. `email_header` vazio levanta
+  `AixonError`.
+- **`aixon.server.compat.OpenWebUIRequestHook`**: o hook padrão como classe
+  (`HeaderIdentityHook` com os headers `x-openwebui-*`);
+  `open_webui_request_hook` passa a ser uma instância dela e continua o padrão
+  (depreciado, opt-in na 0.2).
+- **`aixon.server.ChainRequestHook(hooks)`**: compõe hooks em ordem; um
+  `RequestRejected` para a cadeia e as decisões se mesclam campo a campo (o
+  primeiro valor não-`None` vence).
+- O exemplo `examples/request_hook/` passa a usar
+  `class TierHook(HeaderIdentityHook)`.
+
+### Changed
+- **`RequestHook` agora é a classe base; o alias chamável virou
+  `RequestHookLike`** (`Callable[[RequestContext], RequestDecision | None]`),
+  que é o que `Server(request_hook=...)` aceita. Código que anotava uma função
+  solta como `RequestHook` continua rodando, mas deve trocar a anotação para
+  `RequestHookLike`.
+- **`build_usage` e `count_tokens` moram em `aixon.usage`** (núcleo, sem
+  dependência do servidor); `aixon.server.usage` mantém o reexport.
+- **Aviso duplicado**: o `LLM` de uma classe com `impose_model=True`, que já
+  avisou na definição dos kwargs perdidos, não repete o WARNING quando o
+  servidor impõe o modelo.
+
 ## [0.1.29] - 2026-11-02
 
 Contexto por request no `Server`. A aplicação passa um `request_hook` e decide,

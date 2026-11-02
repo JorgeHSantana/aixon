@@ -253,8 +253,9 @@ class LLM:
     def _warn_lost_under_server_imposition(self, imposed_model: str, imposed_provider: str) -> None:
         """Avisa, uma vez por chave, dos kwargs não portáveis que ficam para trás
         quando o SERVIDOR impõe o modelo. Uma classe com ``impose_model=True`` já
-        avisou na definição (``Agent._warn_about_lost_settings``): o escopo dela
-        é ``by="agent"`` e não passa por aqui. A chave inclui as chaves perdidas:
+        avisou na definição (``Agent._warn_about_lost_settings``); quando é o
+        SERVIDOR que impõe, o LLM dela passa por aqui, mas sai cedo porque
+        ``_warned_at_definition`` está marcado. A chave inclui as chaves perdidas:
         dois LLM do mesmo modelo com kwargs diferentes avisam cada um."""
         if self._warned_at_definition:
             return

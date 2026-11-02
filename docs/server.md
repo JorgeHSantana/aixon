@@ -60,7 +60,7 @@ class Server:
         self,
         adapters: list[ProtocolAdapter] | None = None,
         *,
-        request_hook: RequestHook | None = None,
+        request_hook: RequestHookLike | None = None,
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
@@ -635,7 +635,8 @@ What this identity is worth:
 
 The application decides, once per request, **which model the agent's whole tree
 runs on**, **who the user is** and **whether the request gets in** — from the
-headers, without touching the agent classes. Pass a function to
+headers, without touching the agent classes. Pass a function, or an instance of
+a `RequestHook` subclass (see [Hook as a class](#hook-as-a-class-0130)), to
 `Server(request_hook=...)`:
 
 ```python
@@ -664,7 +665,7 @@ class RequestDecision:
     trace_session_id: str | None = None
 
 
-RequestHook = Callable[[RequestContext], "RequestDecision | None"]
+RequestHookLike = Callable[[RequestContext], "RequestDecision | None"]
 
 # aixon/exceptions.py
 class RequestRejected(AixonError):
@@ -747,6 +748,84 @@ on agents that never declared `impose_model`. Under the imposed scope,
 `timeout`, `max_retries`...) are dropped as under any imposition, and
 `LLM.request_chat_model` logs a WARNING once per (LLM, imposed model) naming
 them.
+
+### Hook as a class (0.1.30)
+
+`RequestHookLike` is still what the Server accepts: any callable. `RequestHook`
+is a base class that organises one into phases. Its `__call__` runs `check` →
+`identity` → `imposition`, in that order, and assembles the `RequestDecision`.
+Any phase may raise `RequestRejected`; a refusal in `check` skips the others.
+Override only the phases you need. All of these are exported from
+`aixon.server` (`OpenWebUIRequestHook` from `aixon.server.compat`).
+
+```python
+# aixon/server/context.py
+@dataclass(frozen=True)
+class Identity:
+    user_email: str | None = None
+    trace_user_id: str | None = None
+    trace_session_id: str | None = None
+
+
+class RequestHook:
+    def check(self, ctx: RequestContext) -> None: ...            # base: accepts
+    def identity(self, ctx: RequestContext) -> Identity: ...     # base: Identity()
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None: ...  # base: None
+    def __call__(self, ctx: RequestContext) -> RequestDecision: ...
+
+
+class HeaderIdentityHook(RequestHook):
+    def __init__(
+        self,
+        *,
+        email_header: str,
+        user_id_header: str | None = None,
+        session_header: str | None = None,
+    ) -> None: ...
+
+
+class ChainRequestHook(RequestHook):
+    def __init__(self, hooks: Sequence[RequestHookLike]) -> None: ...
+
+# aixon/server/compat.py
+class OpenWebUIRequestHook(HeaderIdentityHook):
+    def __init__(self) -> None: ...   # x-openwebui-user-email / -user-id / -chat-id
+
+open_webui_request_hook = OpenWebUIRequestHook()
+```
+
+- `HeaderIdentityHook`: `user_email` is the raw value of `email_header`;
+  `trace_user_id` is the e-mail or, when empty/absent, `user_id_header` (if
+  configured); `trace_session_id` comes from `session_header` (if configured).
+  Header names are lower-cased. An empty `email_header` raises `AixonError`.
+- `OpenWebUIRequestHook`: the default hook as a class. Subclass it to add
+  `check` or `imposition` while keeping the Open WebUI identity.
+- `ChainRequestHook`: runs the hooks in order; a `RequestRejected` from any of
+  them stops the chain. Decisions merge field by field: the first non-`None`
+  value wins; a hook returning `None` counts as `RequestDecision()`.
+
+The tier hook above, as a subclass:
+
+```python
+from aixon.exceptions import RequestRejected
+from aixon.server import HeaderIdentityHook, RequestContext
+from aixon.server.server import Server
+
+TIERS = {"fast": ("gpt-5.4-mini", "openai"), "deep": ("gpt-5.4", "openai")}
+
+class TierHook(HeaderIdentityHook):
+    def __init__(self) -> None:
+        super().__init__(email_header="x-user")
+
+    def check(self, ctx: RequestContext) -> None:
+        if not ctx.headers.get("x-user", "").strip():
+            raise RequestRejected("x-user header is required", status=401, code="no_user")
+
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None:
+        return TIERS.get(ctx.headers.get("x-tier", ""))
+
+server = Server(request_hook=TierHook())
+```
 
 Example: [examples/request_hook](../examples/request_hook) — two agents, an
 `x-tier` header choosing the model and an `x-user` header that is required.

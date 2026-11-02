@@ -144,7 +144,8 @@ Everything below is importable directly from `aixon`, for example `from aixon im
 | Retrieval / connectors / embeddings | `Connector`, `HttpToolConnector`, `MCPConnector`, `Embedding`, `OpenAIEmbedding`, `Retriever`, `TypeAccess`, `TavilyRetriever`, `RagieRetriever`, `WeaviateRetriever` |
 | Server (requires `aixon[server]`) | `Server`, `ProtocolAdapter`, `OpenAIAdapter`, `AnthropicAdapter`, `ParsedRequest` |
 | Usage tracking (in `aixon.usage`, not re-exported from top-level `aixon`) | `merge_usage`, `UsageAccumulator`, `usage_scope`, `add_usage`, `current_usage_accumulator`, `usage_for` (0.1.29) |
-| Request context (0.1.29; module paths, not re-exported from top-level `aixon`) | `aixon.exceptions.RequestRejected`; `aixon.server.context.RequestContext`, `RequestDecision`, `RequestHook`, `make_context` (pure types, no fastapi); `aixon.server.compat.open_webui_request_hook` (the deprecated default hook). Section 18.10 |
+| Request context (0.1.29; module paths, not re-exported from top-level `aixon`) | `aixon.exceptions.RequestRejected`; `aixon.server.context.RequestContext`, `RequestDecision`, `RequestHookLike` (the callable alias; named `RequestHook` in 0.1.29), `make_context` (pure types, no fastapi); `aixon.server.compat.open_webui_request_hook` (the deprecated default hook). Section 18.10 |
+| Request hook classes (0.1.30; exported from `aixon.server`, not from top-level `aixon`) | `RequestHook` (base class), `Identity`, `HeaderIdentityHook`, `ChainRequestHook`, `RequestHookLike`; `aixon.server.compat.OpenWebUIRequestHook` (the default hook as a class). `build_usage`/`count_tokens` now live in `aixon.usage` (re-exported by `aixon.server.usage`). Section 18.10 |
 | Provider internals (0.1.29; module paths) | `aixon.providers.base.OpenAICompatProvider` (section 8.5); `aixon.providers.gateway_errors`: `gateway_base_url()`, `BUDGET_STATUS`, `BUDGET_MARKER`, `RATE_LIMIT_STATUS`, `classify_gateway_error` |
 | Agent and runtime helpers (0.1.29; module paths) | `aixon.agent.instantiate(agent)`, `Agent.timeout_texts()`, `aixon.runtime.normalize_param_aliases(params)`, `aixon.runtime.current_imposed_by()`, `aixon.toolcache.use_tool_cache(cache)`, `aixon.discovery.NotAPackageError`, `LLM.provider_name`, `LLM.imposition()`, `LLM.settings_lost_under_imposition()` |
 
@@ -1772,7 +1773,7 @@ class RequestDecision:
     trace_session_id: str | None = None
 
 
-RequestHook = Callable[[RequestContext], "RequestDecision | None"]
+RequestHookLike = Callable[[RequestContext], "RequestDecision | None"]   # "RequestHook" in 0.1.29
 
 def make_context(*, model: str, agent_name: str, raw_headers: Iterable[tuple[str, str]],
                  params: Mapping[str, Any], adapter: str, stream: bool) -> RequestContext: ...
@@ -1841,6 +1842,69 @@ if __name__ == "__main__":
 ```
 
 > Explanation: without `x-user` the non-streaming request gets HTTP `401` with `"code": "no_user"`; with `x-tier: deep` every `LLM` beneath the resolved agent (not declared `pinned=True`) runs on `gpt-5.4` through `openai`; with no or an unknown `x-tier`, `impose` is `None` and the agents run on their own models.
+
+**Hook as a class (0.1.30).** The Server still accepts any `RequestHookLike` callable; `RequestHook` is a base class that splits one into phases. `RequestHook.__call__` runs `check` -> `identity` -> `imposition`, in that order, and builds the `RequestDecision`; any phase may raise `RequestRejected`, and a refusal in `check` skips the rest. The base has no opinion (empty decision): override only the phases you need. Since 0.1.30 the example's `main.py` is written this way (`class TierHook(HeaderIdentityHook)`).
+
+```python
+# aixon/server/context.py
+@dataclass(frozen=True)
+class Identity:
+    user_email: str | None = None
+    trace_user_id: str | None = None
+    trace_session_id: str | None = None
+
+
+class RequestHook:
+    def check(self, ctx: RequestContext) -> None: ...            # base: accepts
+    def identity(self, ctx: RequestContext) -> Identity: ...     # base: Identity()
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None: ...  # base: None
+    def __call__(self, ctx: RequestContext) -> RequestDecision: ...
+
+
+class HeaderIdentityHook(RequestHook):
+    def __init__(
+        self,
+        *,
+        email_header: str,
+        user_id_header: str | None = None,
+        session_header: str | None = None,
+    ) -> None: ...
+
+
+class ChainRequestHook(RequestHook):
+    def __init__(self, hooks: Sequence[RequestHookLike]) -> None: ...
+
+# aixon/server/compat.py
+class OpenWebUIRequestHook(HeaderIdentityHook):
+    def __init__(self) -> None: ...   # x-openwebui-user-email / -user-id / -chat-id
+
+open_webui_request_hook = OpenWebUIRequestHook()
+```
+
+- **`HeaderIdentityHook`**: `user_email` is the raw value of `email_header`; `trace_user_id` is the e-mail or, when empty/absent, `user_id_header` (if configured); `trace_session_id` comes from `session_header` (if configured). Header names are lower-cased; an empty `email_header` raises `AixonError`.
+- **Compat preset, `OpenWebUIRequestHook`**: `HeaderIdentityHook` with `x-openwebui-user-email`, `x-openwebui-user-id`, `x-openwebui-chat-id`. The instance `open_webui_request_hook = OpenWebUIRequestHook()` is still the Server default (deprecated, opt-in in 0.2). Subclass it to add `check` or `imposition` while keeping the Open WebUI identity.
+- **`ChainRequestHook(hooks)`**: runs the hooks in order; a `RequestRejected` from any of them stops the chain. The decisions merge field by field, the first non-`None` value winning; a hook returning `None` counts as `RequestDecision()`. Example: `ChainRequestHook([open_webui_request_hook, my_tier_hook])` keeps the Open WebUI identity and adds an imposition.
+
+```python
+from aixon.exceptions import RequestRejected
+from aixon.server import HeaderIdentityHook, RequestContext
+from aixon.server.server import Server
+
+TIERS = {"fast": ("gpt-5.4-mini", "openai"), "deep": ("gpt-5.4", "openai")}
+
+class TierHook(HeaderIdentityHook):
+    def __init__(self) -> None:
+        super().__init__(email_header="x-user")
+
+    def check(self, ctx: RequestContext) -> None:
+        if not ctx.headers.get("x-user", "").strip():
+            raise RequestRejected("x-user header is required", status=401, code="no_user")
+
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None:
+        return TIERS.get(ctx.headers.get("x-tier", ""))
+
+server = Server(request_hook=TierHook())
+```
 
 ### 18.11 0.1.29 internal changes a user may notice
 

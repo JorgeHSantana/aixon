@@ -1,5 +1,7 @@
-"""request_hook (0.1.29) — a aplicação decide, por request, o modelo imposto,
-a identidade e a recusa, a partir dos cabeçalhos.
+"""request_hook (0.1.30) — a aplicação decide, por request, o modelo imposto,
+a identidade e a recusa, a partir dos cabeçalhos. O hook é uma classe:
+``HeaderIdentityHook`` lê a identidade; ``check`` recusa; ``imposition`` escolhe
+o modelo.
 
 Ciclo de cada request: parse → resolve (agente) → hook → escopos → agente.
 
@@ -11,7 +13,7 @@ from __future__ import annotations
 
 from aixon import LLM, LLMAgent
 from aixon.exceptions import RequestRejected
-from aixon.server.context import RequestContext, RequestDecision
+from aixon.server.context import HeaderIdentityHook, RequestContext
 from aixon.server.server import Server
 
 # x-tier → (modelo, provedor) imposto à árvore inteira do agente.
@@ -37,20 +39,23 @@ class AnalystAgent(LLMAgent):
     prompt = "You are a careful analyst."
 
 
-def tier_hook(ctx: RequestContext) -> RequestDecision:
-    """Sem ``x-user`` a request é recusada com 401; ``x-tier`` escolhe o
-    modelo imposto (ausente ou desconhecido: vale o modelo da classe)."""
-    user = ctx.headers.get("x-user")
-    if not user:
-        raise RequestRejected("x-user header is required", status=401, code="no_user")
-    return RequestDecision(
-        impose=TIERS.get(ctx.headers.get("x-tier", "")),
-        user_email=user,
-        trace_user_id=user,
-    )
+class TierHook(HeaderIdentityHook):
+    """``x-user`` é a identidade (e-mail e usuário do trace); sem ele a request
+    é recusada com 401. ``x-tier`` escolhe o modelo imposto (ausente ou
+    desconhecido: vale o modelo da classe)."""
+
+    def __init__(self) -> None:
+        super().__init__(email_header="x-user")
+
+    def check(self, ctx: RequestContext) -> None:
+        if not ctx.headers.get("x-user", "").strip():
+            raise RequestRejected("x-user header is required", status=401, code="no_user")
+
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None:
+        return TIERS.get(ctx.headers.get("x-tier", ""))
 
 
-server = Server(request_hook=tier_hook)
+server = Server(request_hook=TierHook())
 
 if __name__ == "__main__":
     server.serve()

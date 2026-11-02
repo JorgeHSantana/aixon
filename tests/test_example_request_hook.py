@@ -1,4 +1,4 @@
-"""0.1.29 — o exemplo ``examples/request_hook`` roda contra um provedor fake:
+"""0.1.29/0.1.30 — o exemplo ``examples/request_hook`` roda contra um provedor fake:
 os três ``curl`` do README viram chamadas do TestClient."""
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ def client(rec_openai):
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    assert isinstance(module.server.request_hook, module.TierHook)
     yield TestClient(module.server.app)
     Server._reset()
 
@@ -76,3 +77,9 @@ def test_client_manda_fast_e_deep(client, rec_openai, capsys):
     out = capsys.readouterr().out
     assert "x-tier: fast" in out and "x-tier: deep" in out
     assert [m for m, _ in rec_openai.builds] == ["gpt-5.4-mini", "gpt-5.4"]
+
+
+def test_usuario_em_branco_e_401(client, rec_openai):
+    r = _post(client, {"x-user": "   ", "x-tier": "fast"})
+    assert r.status_code == 401
+    assert rec_openai.builds == []
