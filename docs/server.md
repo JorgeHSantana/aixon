@@ -578,7 +578,7 @@ ASGI
   -> adapter.parse_request        # wire body -> ParsedRequest (neutral)
   -> get_registry().resolve(model) # name / alias lookup
   -> request_hook(ctx)            # once: RequestDecision | None, or RequestRejected
-  -> request scopes               # imposed model, generation params, user e-mail, trace identity, client tools / tool_choice, tool-call cache
+  -> request scopes               # in order: observe_request (trace identity) -> generation_params -> user_email_scope -> imposed_model_scope (only with impose) -> client_tools_scope -> tool_choice_scope -> tool_call_cache
   -> agent.invoke | agent.stream  # neutral Message[] / Chunk only
   -> gateway refusal?             # budget / rate limit -> the quota message (see Errors)
   -> adapter.format_*             # neutral -> wire HTTP / SSE
@@ -698,8 +698,8 @@ server = Server(request_hook=tier_hook)
 
 **Lifecycle.** `parse → resolve → hook → scopes → agent`. The adapter parses the
 body, the registry resolves the agent, and only then the Server calls the hook,
-**once**, before any scope opens. `ctx.headers` has lower-case keys and is read
-only; `ctx.params` is a read-only copy of the generation params the adapter
+**once**, before any scope opens. `ctx.headers` has lower-case keys (on a duplicate
+header the first value wins, like `starlette.Headers.get`) and is read only; `ctx.params` is a read-only copy of the generation params the adapter
 extracted. The Server then opens the scopes of the decision around the agent
 call, on the streaming and the non-streaming path alike:
 
@@ -708,6 +708,10 @@ call, on the streaming and the non-streaming path alike:
 | `impose=(model, provider)` | `imposed_model_scope(model, provider, by="server")` — `current_imposed_by()` returns `"server"` |
 | `user_email` | `user_email_scope(email)` (the gateway header, see below) |
 | `trace_user_id` / `trace_session_id` | the Langfuse trace identity; `trace_user_id=None` with a `user_email` falls back to the e-mail |
+
+The scopes open in this order: `observe_request` (trace identity) →
+`generation_params` → `user_email_scope` → `imposed_model_scope` (only with
+`impose`) → `client_tools_scope` → `tool_choice_scope` → `tool_call_cache`.
 
 `None` from the hook is the same as `RequestDecision()`: nothing imposed, no
 identity. Since the outermost imposed scope wins, an agent with
