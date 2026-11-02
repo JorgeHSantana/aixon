@@ -5,8 +5,8 @@ escrever e testar seu hook sem o extra ``server`` instalado."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any
 
@@ -112,6 +112,24 @@ class HeaderIdentityHook(RequestHook):
         return Identity(
             user_email=email, trace_user_id=user_id, trace_session_id=session
         )
+
+
+class ChainRequestHook(RequestHook):
+    """Compõe hooks em ordem. Um ``RequestRejected`` de qualquer um para a
+    cadeia. As decisões se mesclam campo a campo: o primeiro valor não-``None``
+    vence. Hook que devolve ``None`` conta como ``RequestDecision()``."""
+
+    def __init__(self, hooks: Sequence[RequestHookLike]) -> None:
+        self.hooks = tuple(hooks)
+
+    def __call__(self, ctx: RequestContext) -> RequestDecision:
+        merged: dict[str, Any] = {}
+        for hook in self.hooks:
+            decision = hook(ctx) or RequestDecision()
+            for f in fields(decision):
+                if merged.get(f.name) is None:
+                    merged[f.name] = getattr(decision, f.name)
+        return RequestDecision(**merged)
 
 
 def make_context(

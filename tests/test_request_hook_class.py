@@ -146,3 +146,55 @@ def test_exports():
         RequestHook,
         RequestHookLike,
     )
+
+
+# --- ChainRequestHook ---
+
+
+def test_chain_vazio_sem_opiniao():
+    from aixon.server.context import ChainRequestHook
+
+    assert ChainRequestHook([])(_ctx()) == RequestDecision()
+
+
+def test_chain_primeiro_nao_none_vence():
+    from aixon.server.context import ChainRequestHook
+
+    a = lambda ctx: RequestDecision(user_email="a", impose=None)  # noqa: E731
+    b = lambda ctx: RequestDecision(user_email="b", impose=("m", "p"))  # noqa: E731
+    d = ChainRequestHook([a, b])(_ctx())
+    assert d.user_email == "a"
+    assert d.impose == ("m", "p")
+
+
+def test_chain_recusa_para_a_cadeia():
+    from aixon.server.context import ChainRequestHook
+
+    flag = {"chamado": False}
+
+    def h1(ctx):
+        raise RequestRejected("não")
+
+    def h2(ctx):
+        flag["chamado"] = True
+
+    with pytest.raises(RequestRejected):
+        ChainRequestHook([h1, h2])(_ctx())
+    assert flag["chamado"] is False
+
+
+def test_chain_aceita_funcao_e_classe():
+    from aixon.server.context import ChainRequestHook
+
+    def fn(ctx):
+        return None
+
+    def sess(ctx):
+        return RequestDecision(trace_session_id="s0", impose=("m", "p"))
+
+    chain = ChainRequestHook([fn, HeaderIdentityHook(email_header="x-e"), sess])
+    d = chain(_ctx([("x-e", "a@b.c")]))
+    assert d == RequestDecision(
+        impose=("m", "p"), user_email="a@b.c", trace_user_id="a@b.c",
+        trace_session_id="s0",
+    )
