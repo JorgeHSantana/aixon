@@ -305,6 +305,7 @@ def _warn_about_lost_settings(cls: type["Agent"], llm: "LLM") -> None:
     class definition, what it declares that will not reach the imposed model."""
     lost = llm.settings_lost_under_imposition()
     if lost:
+        llm._warned_at_definition = True
         _log.warning(
             "'%s' sets impose_model=True: in its own calls its LLM('%s') gets "
             "only the portable generation params, like every LLM of the tree, "

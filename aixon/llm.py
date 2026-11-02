@@ -111,6 +111,9 @@ class LLM:
         # exact model whatever the scope says.
         self.pinned = pinned
         self._provider_name = provider          # None → inferred from model name
+        # Ligado por Agent._warn_about_lost_settings quando já avisou na definição
+        # da classe impositora: o aviso sob o servidor não se repete.
+        self._warned_at_definition: bool = False
         self._chat_model: "BaseChatModel | None" = None  # lazy
         self._request_model_cache: dict[tuple, "BaseChatModel"] = {}
 
@@ -253,6 +256,8 @@ class LLM:
         avisou na definição (``Agent._warn_about_lost_settings``): o escopo dela
         é ``by="agent"`` e não passa por aqui. A chave inclui as chaves perdidas:
         dois LLM do mesmo modelo com kwargs diferentes avisam cada um."""
+        if self._warned_at_definition:
+            return
         lost = self.settings_lost_under_imposition()
         if not lost:
             return

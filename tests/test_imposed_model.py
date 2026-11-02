@@ -461,6 +461,31 @@ def test_sem_aviso_quando_a_classe_impoe(rec, caplog, sem_avisos_previos):
     assert _avisos(caplog) == []
 
 
+def test_impositor_nao_avisa_de_novo_sob_servidor(rec, caplog, sem_avisos_previos):
+    # A classe impositora já avisou na definição; sob o servidor, o mesmo LLM
+    # não repete o aviso.
+    from aixon import LLMAgent
+
+    with caplog.at_level(logging.WARNING, logger="aixon.agent"):
+        class ImpAgent(LLMAgent):
+            llm = LLM("fake-1", provider="fake", seed=7)
+            impose_model = True
+    assert [r for r in caplog.records if "ImpAgent" in r.getMessage()]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            ImpAgent.llm.request_chat_model()
+    assert _avisos(caplog) == []
+
+
+def test_llm_nao_impositor_ainda_avisa(rec, caplog, sem_avisos_previos):
+    llm = LLM("fake-1", provider="fake", seed=7)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            llm.request_chat_model()
+    assert len(_avisos(caplog)) == 1
+
+
 def test_sem_aviso_sem_kwargs_nao_portaveis(rec, caplog, sem_avisos_previos):
     llm = LLM("fake-1", provider="fake", temperature=0.2, max_tokens=64)
     with caplog.at_level(logging.WARNING, logger="aixon.llm"):
