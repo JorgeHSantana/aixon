@@ -1,8 +1,8 @@
 # aixon Framework - RAG Knowledge Base
 
 > **What this file is.** A self-contained, retrieval-ready knowledge base about the **aixon** framework. It is meant to be ingested into a vector store and consumed by an AI agent operating with RAG (Retrieval-Augmented Generation) contexts: when the agent is asked about aixon, it retrieves the relevant sections below and grounds its answer in them. Every section is written to be self-contained, so it survives chunking and retrieves well on its own.
-> **How an agent should use it.** Treat every section as authoritative reference for aixon version 0.1.21. Quote APIs, class names, attributes, and code exactly as written here; do not invent behavior that is not described. Map the question to a topic (agents, LLM, reasoning, tools, orchestrator, retrieval, server, usage, CLI, async, errors), retrieve that section, and answer from it. For "how do I..." questions, the FAQ (section 27) and the complete worked example (section 28) are the best starting points.
-> **Framework version documented:** 0.1.21
+> **How an agent should use it.** Treat every section as authoritative reference for aixon version 0.1.29. Quote APIs, class names, attributes, and code exactly as written here; do not invent behavior that is not described. Map the question to a topic (agents, LLM, reasoning, tools, orchestrator, retrieval, server, usage, CLI, async, errors), retrieve that section, and answer from it. For "how do I..." questions, the FAQ (section 27) and the complete worked example (section 28) are the best starting points.
+> **Framework version documented:** 0.1.29
 > **Code and API identifiers are always in English.** Python required: 3.11 or newer. PyPI package: `aixon` (`pip install aixon`). License: MIT.
 
 ---
@@ -137,15 +137,28 @@ Everything below is importable directly from `aixon`, for example `from aixon im
 | Group | Names |
 |---|---|
 | Foundation | `Agent`, `AgentTool`, `autodiscover`, `Message`, `Chunk`, `Role`, `Registry`, `get_registry`, `reset_registry`, `Logger` |
-| Errors | `AixonError`, `AgentNotFoundError`, `CompositionCycleError`, `NamingError`, `RegistrationError`, `GatewayBudgetExceeded`, `GatewayRateLimited`, `ImposedModelViolation`, `classify_gateway_error` (a function, not an error; the last four are new in 0.1.28, section 8.6) |
+| Errors | `AixonError`, `AgentNotFoundError`, `CompositionCycleError`, `NamingError`, `RegistrationError`, `GatewayBudgetExceeded`, `GatewayRateLimited`, `ImposedModelViolation`, `classify_gateway_error` (a function, not an error; the last four are new in 0.1.28, section 8.6). `classify_gateway_error` is still exported from `aixon` and `aixon.exceptions` in 0.1.29 for compatibility; its implementation lives in `aixon.providers.gateway_errors` |
 | LLM and providers | `LLM`, `LLMAgent`, `Provider`, `get_provider`, `register_provider` |
 | Reasoning and tools | `emit_reasoning`, `reasoning_channel`, `ToolAgent` |
 | Orchestration | `Orchestrator`, `ReflectiveAgent`, `GraphState`, `END` (last two also in `aixon.state`) |
 | Retrieval / connectors / embeddings | `Connector`, `HttpToolConnector`, `MCPConnector`, `Embedding`, `OpenAIEmbedding`, `Retriever`, `TypeAccess`, `TavilyRetriever`, `RagieRetriever`, `WeaviateRetriever` |
 | Server (requires `aixon[server]`) | `Server`, `ProtocolAdapter`, `OpenAIAdapter`, `AnthropicAdapter`, `ParsedRequest` |
-| Usage tracking (in `aixon.usage`, not re-exported from top-level `aixon`) | `merge_usage`, `UsageAccumulator`, `usage_scope`, `add_usage`, `current_usage_accumulator` |
+| Usage tracking (in `aixon.usage`, not re-exported from top-level `aixon`) | `merge_usage`, `UsageAccumulator`, `usage_scope`, `add_usage`, `current_usage_accumulator`, `usage_for` (0.1.29) |
+| Request context (0.1.29; module paths, not re-exported from top-level `aixon`) | `aixon.exceptions.RequestRejected`; `aixon.server.context.RequestContext`, `RequestDecision`, `RequestHook`, `make_context` (pure types, no fastapi); `aixon.server.compat.open_webui_request_hook` (the deprecated default hook). Section 18.10 |
+| Provider internals (0.1.29; module paths) | `aixon.providers.base.OpenAICompatProvider` (section 8.5); `aixon.providers.gateway_errors`: `gateway_base_url()`, `BUDGET_STATUS`, `BUDGET_MARKER`, `RATE_LIMIT_STATUS`, `classify_gateway_error` |
+| Agent and runtime helpers (0.1.29; module paths) | `aixon.agent.instantiate(agent)`, `Agent.timeout_texts()`, `aixon.runtime.normalize_param_aliases(params)`, `aixon.runtime.current_imposed_by()`, `aixon.toolcache.use_tool_cache(cache)`, `aixon.discovery.NotAPackageError`, `LLM.provider_name`, `LLM.imposition()`, `LLM.settings_lost_under_imposition()` |
 
 `Message.usage` and `Chunk.tool_calls` are additional fields on the neutral types (section 5). `LLM(model, reasoning=...)` is a new keyword-only constructor argument on the existing `LLM` class, not a new export (section 8).
+
+**The 0.1.29 helpers, one line each:**
+
+- `aixon.agent.instantiate(agent: Any) -> Agent`: accepts an `Agent` subclass OR an instance and returns the instance. A class resolves to its registered singleton; if it is not in the registry, a new one is built. Only `AgentNotFoundError` is caught; any other registry error propagates. (Moved from `aixon.agents.orchestrator._instantiate` to the base.)
+- `Agent.timeout_texts(self) -> set[str]`: the texts that mean "this agent gave up on ITS OWN deadline", not an answer. Base: empty set, unless the agent declares both `timeout_message` and `max_execution_time` (the `ToolAgent` contract), in which case it returns the formatted message; `ReflectiveAgent` delegates to its worker. `as_tool` uses it to turn that content into an `AixonError`.
+- `aixon.usage.usage_for(model: str, messages, message) -> dict`: the `usage` of a non-streaming answer: `message.usage` (the provider's real usage) when present, otherwise the `tiktoken` estimate (`build_usage`). Replaces the Server's inline fallback.
+- `aixon.runtime.normalize_param_aliases(params: dict) -> dict`: a copy of `params` with dialect spellings replaced by the canonical key (`max_completion_tokens` -> `max_tokens`, `stop_sequences` -> `stop`). The canonical key wins when both are set; a `None` alias is dropped; the input is not mutated. The single rule used by `generation_params`, `LLM.request_chat_model` and `LLM.settings_lost_under_imposition`.
+- `aixon.discovery.NotAPackageError(ValueError)`: the name imports, but it is a module, not a package (no `__path__`). It is the only error the `aixon` CLI silences during autodiscover; a `ValueError` raised inside the user's own module now surfaces as a warning instead of a silent "No agents registered.".
+- `aixon.toolcache.use_tool_cache(cache)`: reactivates an existing `ToolCallCache` for a block (no reuse rule), for scopes reopened at every stream step.
+- `LLM.provider_name` (the provider this `LLM` resolves, explicit or inferred), `LLM.imposition() -> tuple[str, str]` (the `(model, provider)` pair it imposes as the `llm` of an `impose_model=True` agent) and `LLM.settings_lost_under_imposition() -> list[str]` (what it declares that does not reach an imposed model: `reasoning` first, the rest alphabetical; empty when `pinned`).
 
 ---
 
@@ -240,7 +253,7 @@ for chunk in ResearchAgent().stream([Message(role="user", content="Latest on LLM
 | `aliases` | `list[str]` | `[]` | Alternate registry names (resolvable like `name`). |
 | `hidden` | `bool` | `False` | Exclude from `get_registry().public()` and the `aixon chat` menu (still callable). |
 | `owned_by` | `str` | `"aixon"` | Shown in the `/v1/models` response. |
-| `impose_model` | `bool` | `False` | `True` imposes the model of the agent's own `llm` on every LLM beneath it while it runs (0.1.28). Needs a class-level `llm`. See section 8.6. |
+| `impose_model` | `bool` | `False` | `True` imposes the model of the agent's own `llm` on every LLM beneath it while it runs (0.1.28). Needs a class-level `llm`. Since 0.1.29 the Server can also impose per request (`request_hook`, section 18.10); the outer scope wins, so a server-imposed model beats the class. See section 8.6. |
 
 ---
 
@@ -436,15 +449,65 @@ register_provider(DemoProvider())
 
 > Explanation: `DemoChatModel` is a real LangChain chat model that returns a fixed answer. `DemoProvider.build` returns it. Because `env_key` is empty, no API key is needed. This pattern lets a whole agent system run offline (the complete example in section 28 uses exactly this technique). A provider that wants to support the reasoning knob (section 8.2) sets `supports_reasoning = True` on the class; otherwise a `reasoning=` argument is safely ignored with a warning rather than reaching `build()`.
 
+**OpenAI-compatible providers: `OpenAICompatProvider` (0.1.29).** A backend that speaks OpenAI Chat Completions does not need its own `build()`. Subclass `aixon.providers.base.OpenAICompatProvider`: its `build` runs one flow for every such provider (base URL, API key, resilience defaults, reasoning, `SecretStr`, `langchain_openai.ChatOpenAI(...)`), and the subclass only declares attributes and, when needed, overrides hooks. The built-in `openai`, `xai`, `zai` and `gateway` providers are subclasses of it in 0.1.29; the kwargs that reach `ChatOpenAI` are the same as in 0.1.28.
+
+```python
+# aixon/providers/base.py
+class OpenAICompatProvider(Provider):
+    supports_reasoning = True
+    base_url_env: str | None = None      # e.g. "XAI_BASE_URL"; None = no base_url env
+    default_base_url: str | None = None  # used when base_url_env is unset
+    require_key: bool = True             # False only for openai (the SDK reads the env)
+    require_key_message: str = ""        # text of the AixonError for a missing key
+
+    def api_key(self) -> str | None: ...           # reads env_key; empty raises AixonError if require_key
+    def base_url(self) -> str | None: ...          # os.getenv(base_url_env, default_base_url)
+    def apply_reasoning(self, params: dict[str, Any], spec: dict[str, Any]) -> None: ...
+                                                   # default: params["reasoning_effort"] = spec["effort"]
+    def extra_kwargs(self) -> dict[str, Any]: ...  # extra ChatOpenAI kwargs; default {}
+    def finish(self, chat: "BaseChatModel") -> "BaseChatModel": ...  # post-build hook; default identity
+    def build(self, model: str, **params: Any) -> "BaseChatModel": ...
+```
+
+A new OpenAI-compatible provider in about ten lines (needs `langchain-openai`, for example `aixon[openai]`):
+
+```python
+from aixon.providers.base import OpenAICompatProvider, register_provider
+
+class AcmeProvider(OpenAICompatProvider):
+    name = "acme"
+    env_key = "ACME_API_KEY"                 # required: missing -> AixonError at build
+    base_url_env = "ACME_BASE_URL"           # optional override from the environment
+    default_base_url = "https://api.acme.example/v1"
+    require_key_message = "ACME_API_KEY is not set."
+
+register_provider(AcmeProvider())
+# then: LLM("acme-large", provider="acme")
+```
+
+> Explanation: override `apply_reasoning` when the vendor spells the reasoning knob differently (the `zai` provider does), `extra_kwargs` to add constructor kwargs, and `finish` to wrap the built model (the `gateway` provider uses its hooks to attach the user e-mail header). With `require_key = True` (the default) the key is passed beside the params, so a caller's own `api_key` param raises `TypeError`; only the `openai` provider (`require_key = False`) lets the environment key overwrite a caller's `api_key` (restored in 0.1.29 after the extraction had turned it into a `TypeError`).
+
 ### 8.6 The gateway provider and the imposed model (0.1.28)
 
 **Gateway provider.** `LLM("tier-x", provider="gateway")` reuses `langchain_openai.ChatOpenAI` pointed at an OpenAI-compatible gateway (a gateway like LiteLLM: the caller names a tier, the gateway picks the real model and meters spend per end user). It is reached only through an explicit `provider="gateway"`; there is no inference rule. Environment: `AIXON_GATEWAY_BASE_URL` (required, for example `http://gateway.example/v1`), `AIXON_GATEWAY_API_KEY` (required) and `AIXON_GATEWAY_USER_HEADER` (optional: the header that carries the end user's e-mail; default `X-OpenWebUI-User-Email`; empty turns the forwarding off). A missing required variable makes the build raise `AixonError`; the provider never reads `OPENAI_API_KEY`, `OPENAI_BASE_URL` or `OPENAI_API_BASE`. Install with `pip install "aixon[gateway]"`. The `reasoning` knob (section 8.2) is forwarded as `reasoning_effort`, as is.
 
-**Identity.** While `aixon.runtime.user_email_scope(email)` is active (the `Server` opens it from the `x-openwebui-user-email` request header, section 18.9), every HTTP request the gateway provider sends carries that e-mail in the header above. It is read when the request is SENT, on both the sync and the async HTTP clients, because one cached model serves many people. Without an e-mail no header goes out at all. No other provider ever receives the e-mail, and the Open WebUI user-id is never forwarded.
+**Identity.** While `aixon.runtime.user_email_scope(email)` is active (the `Server` opens it from `RequestDecision.user_email`, which the default hook `aixon.server.compat.open_webui_request_hook` fills from the `x-openwebui-user-email` request header; sections 18.9 and 18.10), every HTTP request the gateway provider sends carries that e-mail in the header above. It is read when the request is SENT, on both the sync and the async HTTP clients, because one cached model serves many people. Without an e-mail no header goes out at all. No other provider ever receives the e-mail, and the Open WebUI user-id is never forwarded.
 
 **Imposed model (`Agent.impose_model`).** `impose_model = True` (default `False`; the class needs a class-level `llm`, both checked at class definition) publishes the model and provider of the agent's own `llm` around `invoke`/`ainvoke`/`stream`/`astream` (`aixon.runtime.imposed_model_scope` / `current_imposed_model`). Every `LLM` beneath it that is not declared `LLM(..., pinned=True)` (its tools, sub-agents via `as_tool()`, a `ReflectiveAgent`'s worker and judge, `Orchestrator` nodes) builds that model through that provider instead of the one it declared. If a model is already imposed when the agent starts, that one wins: the outermost imposer decides. Only the portable generation params reach the build: `temperature`, `top_p`, `max_tokens`, `stop`, `presence_penalty` and `frequency_penalty`, from the class and from the request; never `reasoning`, `reasoning_effort`, `prediction`, `timeout`, `max_retries` or any other kwarg. It fails closed: under an imposed model `llm.chat_model` (the model the LLM was configured with) raises `ImposedModelViolation`, an `AixonError`, instead of silently running the call on the wrong model; use `request_chat_model()` (which honors the scope) or `pinned=True`. In `stream`/`astream` the scope is opened per step and closed before every chunk is handed over, so the consumer never sees it. Limits: `Embedding` is not covered; `MCPToolset._discover` runs without `copy_context` (#32); only a class with `impose_model = True` (declared or inherited) has its entry points wrapped, at class definition, so an `impose_model` or an entry point assigned to the class later is not wrapped and imposes nothing (a class that does not impose keeps its entry points exactly as in 0.1.27); the imposer's own `llm` also gets only the portable params under its own scope (a WARNING at class definition names what is dropped; `pinned=True` keeps it); and threads started with `threading.Thread`, `run_in_executor` or a plain `ThreadPoolExecutor` do not copy the context, so an `LLM` called from them runs on its configured model and sees no e-mail.
 
-**Gateway errors.** aixon does not raise `GatewayBudgetExceeded` or `GatewayRateLimited`: a refusal reaches the caller as the SDK's `openai.UnprocessableEntityError` / `openai.RateLimitError`, and `classify_gateway_error(exc)`, which never raises, returns `GatewayBudgetExceeded` for an `openai.APIStatusError` 422 whose message mentions "budget" (any case), `GatewayRateLimited` for a 429, or `None`; it walks `__cause__`, `__context__` (not when `__suppress_context__` is set, as `raise ... from None` does) and exception groups, and an instance of either class (which a tool may raise to signal a quota) counts too. Only an `APIStatusError` raised by a request to `AIXON_GATEWAY_BASE_URL` counts: a 429 from OpenAI, xAI or z.AI is not the gateway's, and keeps behaving as before. These verdicts end the request instead of being absorbed: the `ToolAgent` error shield (section 9.5) and the `ReflectiveAgent` judge and worker handlers re-raise them, in place of a `TOOL ERROR` or an unreviewed answer, and the `Server` answers them with its quota messages (section 18.9).
+**Who decides: the class or the server (0.1.29).** There are two imposers. The **class** decides with `impose_model = True`: the model is that of its own `llm`, for every request. The **server** decides per request: the `Server`'s `request_hook` returns `RequestDecision(impose=(model, provider))` (section 18.10), so the model depends on who asks and the agent declares nothing. Both publish the same scope; `aixon.runtime.current_imposed_by()` returns who opened it (`"agent"` or `"server"`, recorded by `imposed_model_scope(model, provider, *, by="agent")`; the Server passes `by="server"`). Because the outer scope wins, the server beats the class: an agent with `impose_model = True` under a server-imposed model does not open its own. Under a server-imposed model the `LLM` of an agent that never asked for imposition loses its non-portable kwargs, and `LLM.request_chat_model` logs a WARNING once per (LLM, imposed model) naming them; under an agent-imposed model that WARNING is not logged (the class-definition WARNING covers it).
+
+```python
+# aixon/runtime.py
+def current_imposed_by() -> Literal["agent", "server"] | None: ...
+
+@contextmanager
+def imposed_model_scope(
+    model: str, provider: str, *, by: Literal["agent", "server"] = "agent"
+) -> Iterator[tuple[str, str]]: ...
+```
+
+**Gateway errors.** aixon does not raise `GatewayBudgetExceeded` or `GatewayRateLimited`: a refusal reaches the caller as the SDK's `openai.UnprocessableEntityError` / `openai.RateLimitError`, and `classify_gateway_error(exc)` (implemented in `aixon.providers.gateway_errors` since 0.1.29, together with `gateway_base_url()` and the gateway contract constants `BUDGET_STATUS = 422`, `BUDGET_MARKER = "budget"` and `RATE_LIMIT_STATUS = 429`; still exported from `aixon` and `aixon.exceptions`), which never raises, returns `GatewayBudgetExceeded` for an `openai.APIStatusError` 422 whose message mentions "budget" (any case), `GatewayRateLimited` for a 429, or `None`; it walks `__cause__`, `__context__` (not when `__suppress_context__` is set, as `raise ... from None` does) and exception groups, and an instance of either class (which a tool may raise to signal a quota) counts too. Only an `APIStatusError` raised by a request to `AIXON_GATEWAY_BASE_URL` counts: a 429 from OpenAI, xAI or z.AI is not the gateway's, and keeps behaving as before. These verdicts end the request instead of being absorbed: the `ToolAgent` error shield (section 9.5) and the `ReflectiveAgent` judge and worker handlers re-raise them, in place of a `TOOL ERROR` or an unreviewed answer, and the `Server` answers them with its quota messages (section 18.9).
 
 ---
 
@@ -1650,7 +1713,8 @@ Every chat route returns a dialect-appropriate JSON error body (never a raw trac
 | `400` | Request body isn't a JSON object, `adapter.parse_request` raises (e.g. a malformed `messages` entry or unknown role), or the request declares `tool_choice` without `tools` (section 18.3a, #18b). | `{"error": {"message": ..., "type": "invalid_request_error"}}` |
 | `404` | `model` doesn't resolve to a registered agent (`AgentNotFoundError`). | `{"error": {"message": ..., "type": "model_not_found"}}` |
 | `429` | The gateway refused the call (non-streaming), added in 0.1.28: budget spent or rate limited (section 18.9). Only an error from a request to `AIXON_GATEWAY_BASE_URL` counts; a 429 from another provider stays a `500`. | `{"error": {"message": <budget_exceeded_message or rate_limited_message>, "type": "insufficient_quota" \| "rate_limit_exceeded", "code": "budget_exceeded" \| "rate_limited"}}` |
-| `500` | The agent raised while running (non-streaming), anything but a gateway refusal. The real exception is logged server-side only; the client gets a generic message — `str(exc)` never leaks. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
+| `status` of `RequestRejected` (default `403`) | The `request_hook` raised `RequestRejected` (non-streaming), added in 0.1.29 (section 18.10). On a stream the message is the last message of a normal stream instead. | `{"error": {"message": <message>, "type": "request_rejected", "code": <code>}}` |
+| `500` | The agent raised while running (non-streaming), anything but a gateway refusal. Also (0.1.29) when the `request_hook` raises anything other than `RequestRejected` (message `"The request hook failed."`). The real exception is logged server-side only; the client gets a generic message — `str(exc)` never leaks. | `{"error": {"message": "The agent failed to process the request.", "type": "server_error"}}` |
 
 **Mid-stream failures** cannot use an HTTP status — the `200`/`text/event-stream` headers already went out. Instead, once streaming has started, an exception from `agent.astream` is caught and turned into one final dialect-shaped SSE error event (never propagated into Starlette, which would otherwise abort the response mid-stream) — the full exception goes to the server log, never to the client:
 
@@ -1667,7 +1731,7 @@ Optional, OFF by default, zero cost when off. Install `aixon[langfuse]` and set 
 
 - The Server (`aixon/observability.py`) opens a root span per request, so ALL internal turns — ToolAgent workers, Orchestrator routing calls, the ReflectiveAgent judge — land in the same trace (each LangChain root run would otherwise become its own trace).
 - The Langfuse `CallbackHandler` is attached via langchain-core's `register_configure_hook` (the same mechanism as LangSmith's `tracing_v2_enabled`): every callback manager — graphs, chat models, langgraph fork threads — picks it up automatically, deduped by identity. No aixon call site passes callbacks.
-- **Per-agent** = trace name. **Per-model** = each generation records the REAL provider model that served that turn (worker and judge may differ); register model prices in Langfuse to get cost. **Per-user** = when the frontend forwards identity headers (Open WebUI with `ENABLE_FORWARD_USER_INFO_HEADERS=true`), `X-OpenWebUI-User-Email`/`-Id` becomes the trace `user_id` and `X-OpenWebUI-Chat-Id` the `session_id` (`request_identity()`).
+- **Per-agent** = trace name. **Per-model** = each generation records the REAL provider model that served that turn (worker and judge may differ); register model prices in Langfuse to get cost. **Per-user** = when the frontend forwards identity headers (Open WebUI with `ENABLE_FORWARD_USER_INFO_HEADERS=true`), `X-OpenWebUI-User-Email`/`-Id` becomes the trace `user_id` and `X-OpenWebUI-Chat-Id` the `session_id`. Since 0.1.29 this is done by the default request hook (`open_webui_request_hook`, section 18.10) through `RequestDecision.trace_user_id`/`trace_session_id`; `aixon.observability.request_identity()` is deprecated.
 - Failure policy: missing SDK / bad config disables the integration for the process with ONE warning (sticky latch); an unreachable Langfuse only delays spans (the OTel exporter logs, never raises). A request is never broken by observability.
 - Serverless flush: by default the client flushes at the end of each request (Cloud Run freezes CPU after the response; batched spans might otherwise never leave). `AIXON_LANGFUSE_FLUSH_PER_REQUEST=0` disables the per-request flush for always-on deploys.
 
@@ -1681,7 +1745,124 @@ Runnable example: `examples/langfuse/` (offline demo of the hook mechanism witho
 - **No stream:** HTTP `429` with `{"error": {"message": <message>, "type": "insufficient_quota" | "rate_limit_exceeded", "code": "budget_exceeded" | "rate_limited"}}` and the header `x-should-retry: false` (the `openai` SDK would otherwise retry it and run the whole tree again).
 - **Only a gateway refusal** gets this treatment, wrapped in other exceptions or not (the `__cause__`/`__context__` chain is searched). Any other error, a 429 from another provider included, stays the generic stream error event or the `500`. The refusal is logged as a warning carrying only the verdict, the agent, the adapter and the HTTP status, never the gateway's text (which may name the user and the spend).
 - **Singleton rule:** the first `Server(...)` fixes the adapters and the two messages. A later construction with a different adapter set or a different message raises `AixonError` (call `Server._reset()` first); the default text counts as no opinion and keeps the stored message.
-- **Identity:** the Server reads the `x-openwebui-user-email` header and publishes it with `aixon.runtime.user_email_scope(email)` for the whole call, streaming or not (stripped; blank means no e-mail). Only the `gateway` provider reads it (`current_user_email()`) and sends it as the `AIXON_GATEWAY_USER_HEADER` header; the user-id is never forwarded, and a request without the header sends the gateway no header at all (refusing such a request is the application's job). The e-mail must be ASCII (internationalized addresses are not supported in this version); only that header name is read (an Open WebUI that renames it or sends a JWT instead yields no e-mail); the header is trusted from whoever passes `AUTH_API_KEY` (anyone, without it), so per-person quotas are only as good as that boundary; and a thread that does not copy the context, or a scope held across a `yield`, loses or leaks it.
+- **Identity:** since 0.1.29 the Server itself reads no header: the e-mail comes from `RequestDecision.user_email` (section 18.10). Without a `request_hook`, the default hook `aixon.server.compat.open_webui_request_hook` (deprecated, opt-in in 0.2) reads the `x-openwebui-user-email` header, and the Server publishes it with `aixon.runtime.user_email_scope(email)` for the whole call, streaming or not (stripped; blank means no e-mail). Only the `gateway` provider reads it (`current_user_email()`) and sends it as the `AIXON_GATEWAY_USER_HEADER` header; the user-id is never forwarded, and a request without the header sends the gateway no header at all (refusing such a request is the application's job: raise `RequestRejected` from a `request_hook`, section 18.10). The e-mail must be ASCII (internationalized addresses are not supported in this version); only that header name is read (an Open WebUI that renames it or sends a JWT instead yields no e-mail); the header is trusted from whoever passes `AUTH_API_KEY` (anyone, without it), so per-person quotas are only as good as that boundary; and a thread that does not copy the context, or a scope held across a `yield`, loses or leaks it.
+
+### 18.10 Per-request context: `request_hook` (0.1.29)
+
+The application decides, once per request, **which model the agent's whole tree runs on**, **who the user is** and **whether the request gets in**, from the headers, without touching the agent classes and without product knowledge in aixon. Pass a synchronous function to `Server(adapters=None, *, request_hook=None, budget_exceeded_message=..., rate_limited_message=...)`.
+
+```python
+# aixon/server/context.py (pure types: no fastapi/starlette import, testable without aixon[server])
+@dataclass(frozen=True)
+class RequestContext:
+    model: str                    # requested model (or the agent name)
+    agent_name: str               # the resolved agent
+    headers: Mapping[str, str]    # lower-case keys, read only; on duplicates the last value wins
+    params: Mapping[str, Any]     # read-only copy of the generation params the adapter extracted
+    adapter: str                  # "openai", "anthropic", ...
+    stream: bool
+
+
+@dataclass(frozen=True)
+class RequestDecision:
+    """Every field None means "leave it alone"."""
+    impose: tuple[str, str] | None = None
+    user_email: str | None = None
+    trace_user_id: str | None = None
+    trace_session_id: str | None = None
+
+
+RequestHook = Callable[[RequestContext], "RequestDecision | None"]
+
+def make_context(*, model: str, agent_name: str, raw_headers: Iterable[tuple[str, str]],
+                 params: Mapping[str, Any], adapter: str, stream: bool) -> RequestContext: ...
+
+# aixon/exceptions.py
+class RequestRejected(AixonError):
+    def __init__(
+        self, message: str, *, status: int = 403, code: str = "request_rejected"
+    ) -> None: ...
+```
+
+**Lifecycle: `parse → resolve → hook → scopes → agent`.** The adapter parses the body, the registry resolves the agent, and only then the Server calls the hook, **once**, before any scope opens. Returning `None` is the same as `RequestDecision()` (nothing imposed, no identity). The Server then opens the scopes of the decision around the agent call, identically on the streaming and the non-streaming path (`Server._request_scopes`; fixed order, outer to inner: `observe_request`, `generation_params`, `user_email_scope`, `imposed_model_scope` only when `impose` is set, `client_tools_scope`, `tool_choice_scope`, `tool_call_cache`):
+
+| Decision field | Scope the Server opens |
+|---|---|
+| `impose=(model, provider)` | `imposed_model_scope(model, provider, by="server")`; `current_imposed_by()` returns `"server"` |
+| `user_email` | `user_email_scope(email)` (what the `gateway` provider forwards, section 18.9) |
+| `trace_user_id` / `trace_session_id` | the Langfuse trace identity (section 18.5); `trace_user_id=None` with a `user_email` falls back to the e-mail |
+
+**Refusal.** A hook that raises `RequestRejected` stops the request before any LLM call (the agent never runs, no scope opens):
+
+- **No stream:** HTTP `status` (default `403`) with `{"error": {"message": <message>, "type": "request_rejected", "code": <code>}}`; the Server logs a warning with the adapter, the agent and the status.
+- **Stream:** the message is delivered as the last message of a stream that ends as usual, the same path the gateway quota message uses (section 18.9); no error event.
+- Any other exception raised by the hook becomes a `500` with `{"error": {"message": "The request hook failed.", "type": "server_error"}}` (the log names only the exception type, since its text may carry user data). An `impose` naming a provider that is not registered also ends in `500`.
+- The hook is synchronous: a network call inside it blocks the request; that is the hook author's call.
+
+**The default hook, deprecated.** Without `request_hook`, the Server uses `aixon.server.compat.open_webui_request_hook`, which is exactly what aixon did up to 0.1.28: `user_email` from `x-openwebui-user-email` (raw; `user_email_scope` strips it and treats blank as no e-mail), `trace_user_id` from the e-mail or, failing that, `x-openwebui-user-id`, and `trace_session_id` from `x-openwebui-chat-id` (the headers Open WebUI sends with `ENABLE_FORWARD_USER_INFO_HEADERS=true`). It never imposes. It is **deprecated** and becomes opt-in in 0.2. **An application hook excludes the default:** a hook of your own replaces it entirely, with no fallback to the Open WebUI headers (call `open_webui_request_hook(ctx)` from your hook if you still want them). `aixon.observability.request_identity` is deprecated with it.
+
+**Singleton rule.** The first `Server(...)` construction fixes the `request_hook`, like the adapters and the two quota messages. `request_hook=None` means "no opinion" (keep the stored hook, or use the default), never "no hook", so `aixon serve` and a `main.py` that builds the `Server` live together. A later construction with a different hook object (by identity) raises `AixonError`; call `Server._reset()` first.
+
+**Warning: `LLM.chat_model` under a server-imposed model.** The server imposes on agents that never declared `impose_model`. Under the imposed scope, reading `llm.chat_model` directly (the model the `LLM` was configured with) raises `ImposedModelViolation`; such code must go through `llm.request_chat_model()`, `complete`/`stream`, or declare `LLM(..., pinned=True)`. The non-portable kwargs of each `LLM` (`reasoning`, `timeout`, `max_retries`...) are dropped as under any imposition (section 8.6), and `LLM.request_chat_model` logs a WARNING once per (LLM, imposed model) naming them, only when `current_imposed_by() == "server"`.
+
+Runnable example (`examples/request_hook/main.py`): two agents, an `x-tier` header choosing the imposed model and an `x-user` header that is required.
+
+```python
+from aixon import LLM, LLMAgent
+from aixon.exceptions import RequestRejected
+from aixon.server.context import RequestContext, RequestDecision
+from aixon.server.server import Server
+
+# x-tier -> (model, provider) imposed on the agent's whole tree.
+TIERS: dict[str, tuple[str, str]] = {
+    "fast": ("gpt-5.4-mini", "openai"),
+    "deep": ("gpt-5.4", "openai"),
+}
+
+class HelperAgent(LLMAgent):
+    name = "helper"
+    llm = LLM("gpt-5.4-mini")
+    prompt = "You are a concise helper."
+
+def tier_hook(ctx: RequestContext) -> RequestDecision:
+    user = ctx.headers.get("x-user")
+    if not user:
+        raise RequestRejected("x-user header is required", status=401, code="no_user")
+    return RequestDecision(
+        impose=TIERS.get(ctx.headers.get("x-tier", "")),   # absent/unknown: the class model
+        user_email=user,
+        trace_user_id=user,
+    )
+
+server = Server(request_hook=tier_hook)
+
+if __name__ == "__main__":
+    server.serve()
+```
+
+> Explanation: without `x-user` the non-streaming request gets HTTP `401` with `"code": "no_user"`; with `x-tier: deep` every `LLM` beneath the resolved agent (not declared `pinned=True`) runs on `gpt-5.4` through `openai`; with no or an unknown `x-tier`, `impose` is `None` and the agents run on their own models.
+
+### 18.11 0.1.29 internal changes a user may notice
+
+0.1.29 also carries a sweep of repetition, coupling and bugs across the modules, without changing observable behavior except for these fixes (from the CHANGELOG "Fixed" section):
+
+- **`ReflectiveAgent.stream`/`astream`:** `tool_call_cache()` and `prediction_scope()` used to be opened around `yield`; a consumer that abandoned the generator inherited the cache and the predicted-output text in its later calls. They are now opened per step, like the imposed scope.
+- **`ReflectiveAgent`:** the worker's `tool_calls` are accumulated across chunks (the last chunk used to overwrite them); building the judge prompt is outside the `try/except`, so a programming error there no longer becomes "judge unavailable".
+- **`ToolAgent.astream`:** the `finally` no longer swallows a `CancelledError` delivered to the generator itself (it is deferred until the graph's `aclose()`, which cancels in-flight nodes, and then re-raised); a failing `aclose()` is logged as a WARNING instead of disappearing.
+- **`aixon.runtime` scopes:** `generation_params`, `client_tools_scope`, `tool_choice_scope`, `prediction_scope` and `aixon.usage.usage_scope` tolerate `reset()` in another Context (#21), as `user_email_scope` and `imposed_model_scope` already did; `generation_params` and `client_tools_scope` hand the `with` block a copy.
+- **Locks:** `LLM.chat_model` is built lazily under a lock (agents in threads); `MCPToolset.resolve_tools` runs discovery outside the lock and locks only the publication of the result (`MCPConnector._tools_cache` is initialized in `__init__`; `MCPToolset` uses the public `aas_tools`); `aixon.observability` initializes its handler under a lock and its degraded-path `yield` is outside the `except` (the agent's exception no longer gets the Langfuse error as `__context__`); the `Orchestrator` graph compile and the `Server` singleton and `app` are under locks; a failing `session.done()` is logged.
+- **`Orchestrator`:** `instantiate` catches only `AgentNotFoundError` (other registry errors propagate).
+- **CLI:** Ctrl+C in the middle of a remote stream discards the turn (the next turn used to send two consecutive `user` messages); a `ValueError` raised by the user's module during autodiscover becomes a warning instead of a silent "No agents registered." (`NotAPackageError` is the only error silenced).
+- **`openai` provider:** the environment key again overwrites an `api_key` passed by the caller (the provider extraction had turned this into a `TypeError`).
+
+**Planned for a later version (not applied in 0.1.29).** Sweep findings that change behavior and wait for a bigger version bump:
+
+- `Orchestrator`: the cycle guard will see `AgentTool` in `tools` (today a cycle A -> tools=[B] -> agents=[A] is not detected).
+- `Server`: the `x-should-retry` header and the envelope of non-streaming errors (400/404/429/500) will be written by the adapter (`format_error`); on the `AnthropicAdapter` the body changes to the Anthropic envelope.
+- `Server`: `thought_mode` resolved in the adapter, not injected into `params`.
+- `LLM`/`Provider`: dropping `reasoning` on a provider without support moves from `LLM._build` to the `Provider.build` boundary.
+- `Agent.astream` (sync -> async bridge): `aclose()` stops waiting for the next chunk of a blocked producer.
+- The default Open WebUI hook becomes opt-in in 0.2 (above).
 
 ---
 
@@ -1981,7 +2162,38 @@ Change the `LLM(...)` model name (the provider is inferred from the prefix: `gpt
 `LLM("grok-4.5")` (provider inferred) or `LLM("grok-4.5", provider="xai")`. Set `XAI_API_KEY` — it does NOT fall back to `OPENAI_API_KEY` if unset, so a missing key raises a clear `AixonError` instead of silently billing your OpenAI credential. Override the endpoint with `XAI_BASE_URL` (default `https://api.x.ai/v1`). The reasoning knob (section 8.2) works the same as for OpenAI models: `LLM("grok-4.5", reasoning={"effort": "high"})` translates to `reasoning_effort` verbatim. Install with `pip install "aixon[xai]"`.
 
 **How do I run a whole agent tree on the model a gateway picks, and give the gateway the user's e-mail?**
-Declare the gateway provider on the agent's `llm` and set `impose_model = True` (`llm = LLM("tier-x", provider="gateway")`), with `AIXON_GATEWAY_BASE_URL` and `AIXON_GATEWAY_API_KEY` in the environment. Every LLM beneath that agent (tools, sub-agents, judges, nodes) then runs on `tier-x` through the gateway, handed only the portable generation params; `LLM(..., pinned=True)` opts one out. Behind the `Server`, the `x-openwebui-user-email` header reaches the gateway automatically as the `AIXON_GATEWAY_USER_HEADER` header (default `X-OpenWebUI-User-Email`), and a spent budget or a rate limit reaches the user as a readable message you can customize with `Server(budget_exceeded_message=..., rate_limited_message=...)`. See sections 8.6 and 18.9.
+Declare the gateway provider on the agent's `llm` and set `impose_model = True` (`llm = LLM("tier-x", provider="gateway")`), with `AIXON_GATEWAY_BASE_URL` and `AIXON_GATEWAY_API_KEY` in the environment. Every LLM beneath that agent (tools, sub-agents, judges, nodes) then runs on `tier-x` through the gateway, handed only the portable generation params; `LLM(..., pinned=True)` opts one out. Behind the `Server`, without a `request_hook`, the `x-openwebui-user-email` header reaches the gateway automatically (through the default hook, deprecated in 0.1.29) as the `AIXON_GATEWAY_USER_HEADER` header (default `X-OpenWebUI-User-Email`), and a spent budget or a rate limit reaches the user as a readable message you can customize with `Server(budget_exceeded_message=..., rate_limited_message=...)`. See sections 8.6 and 18.9.
+
+**How do I pick the gateway tier per request, from the model name, take the e-mail from a header, and reject requests without an e-mail (the olympus-style case)?**
+Write a `request_hook` (section 18.10, 0.1.29). The agents declare nothing about imposition; the hook maps the requested model name to a gateway tier and imposes it on the whole tree, takes the e-mail from the header your frontend sends, and raises `RequestRejected` when there is none. Because a hook of your own replaces the default Open WebUI hook, read the header yourself.
+
+```python
+from aixon import Server
+from aixon.exceptions import RequestRejected
+from aixon.server.context import RequestContext, RequestDecision
+
+# Requested model name -> gateway tier (the gateway picks the real model).
+TIER_BY_SUFFIX = {"-pro": "tier-pro", "-lite": "tier-lite"}
+
+def olympus_hook(ctx: RequestContext) -> RequestDecision:
+    email = (ctx.headers.get("x-openwebui-user-email") or "").strip()
+    if not email:
+        raise RequestRejected("A signed-in user is required.", status=401, code="no_user_email")
+    tier = next((t for sfx, t in TIER_BY_SUFFIX.items() if ctx.model.endswith(sfx)), "tier-default")
+    return RequestDecision(
+        impose=(tier, "gateway"),
+        user_email=email,                                   # forwarded as AIXON_GATEWAY_USER_HEADER
+        trace_user_id=email,
+        trace_session_id=ctx.headers.get("x-openwebui-chat-id"),
+    )
+
+server = Server(request_hook=olympus_hook)
+```
+
+> Explanation: `ctx.model` is the requested model (an agent name or alias, so register one alias per tier, for example `aliases = ["assistant-pro", "assistant-lite"]`); header keys are lower case. Without an e-mail a non-streaming client gets HTTP `401` with `"code": "no_user_email"`, and a streaming client (Open WebUI) reads the message as the last message of a normal stream; no LLM is called. With an e-mail, every `LLM` beneath the agent not declared `pinned=True` runs on the tier through the `gateway` provider (`AIXON_GATEWAY_BASE_URL`, `AIXON_GATEWAY_API_KEY`), the server-imposed scope beats any `impose_model = True` class, and only the portable generation params reach the gateway.
+
+**How do I add a new OpenAI-compatible provider?**
+Subclass `aixon.providers.base.OpenAICompatProvider` with `name`, `env_key`, `base_url_env` and `default_base_url`, override `apply_reasoning`/`extra_kwargs`/`finish` only if needed, and `register_provider(...)` one instance (section 8.5, 0.1.29). No `build()` of your own.
 
 **How do I turn on extended thinking / reasoning?**
 `LLM(model, reasoning=True)` (medium effort) or `LLM(model, reasoning={"effort": "high"})` / `{"budget_tokens": ...}` (section 8.2). Anthropic and Gemini return real reasoning text on `Message.reasoning`/`Chunk.reasoning`; OpenAI's API never returns raw chain-of-thought (the knob only improves the answer); GLM enables thinking server-side but the installed `langchain-openai` doesn't yet surface the reasoning text. A per-request `reasoning_effort` field overrides the class-level knob for one call.
@@ -2332,7 +2544,7 @@ reply = await get_registry().resolve("support").ainvoke(
 
 ---
 
-## 29. Quick reference card (aixon 0.1.21)
+## 29. Quick reference card (aixon 0.1.29)
 
 ```python
 # Imports
@@ -2346,6 +2558,8 @@ from aixon import (
     Server, OpenAIAdapter, AnthropicAdapter, ProtocolAdapter, ParsedRequest,  # needs aixon[server]
     AixonError, NamingError, RegistrationError, AgentNotFoundError, CompositionCycleError,
 )
+from aixon.exceptions import RequestRejected                          # 0.1.29, not top-level
+from aixon.server.context import RequestContext, RequestDecision     # 0.1.29, no fastapi needed
 from aixon.state import END, GraphState
 from aixon.usage import merge_usage, UsageAccumulator, usage_scope, add_usage  # not top-level
 
@@ -2375,6 +2589,8 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 | MCP server as tools | `MCPConnector` (`toolset()` deferred / `as_tools()` eager, `pip install aixon[mcp]`) |
 | Vendor RAG | `TavilyRetriever` / `RagieRetriever` / `WeaviateRetriever` |
 | Serve over HTTP | `Server` plus `OpenAIAdapter` / `AnthropicAdapter` / custom `ProtocolAdapter` |
+| Per-request model, identity, refusal | `Server(request_hook=fn)` -> `RequestDecision(impose=..., user_email=...)` / `raise RequestRejected(...)` (section 18.10) |
+| New OpenAI-compatible provider | subclass `OpenAICompatProvider` (`name`, `env_key`, `base_url_env`, `default_base_url`), section 8.5 |
 | Reasoning to client | `emit_reasoning` plus `thought_stream_mode` (`custom` default / `content` / `hidden`) |
 | Client-executed tools (raw passthrough) | `LLMAgent(client_tools="passthrough")` -> `aixon.runtime.current_client_tools()`/`current_tool_choice()` -> `Message.tool_calls` / `Chunk.tool_calls` |
 | Client-executed tools (first-class merge) | `ToolAgent(client_tools="merge" \| "replace", client_tools_conflict=..., client_tools_filter=...)` |
@@ -2385,4 +2601,4 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 
 ---
 
-End of the aixon technical reference, framework version 0.1.21.
+End of the aixon technical reference, framework version 0.1.29.
