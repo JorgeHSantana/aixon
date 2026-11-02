@@ -115,11 +115,40 @@ def request_identity(headers: Any) -> dict:
     """Extract trace identity from request headers (case-insensitive mapping,
     e.g. Starlette's). Open WebUI sends these when
     ``ENABLE_FORWARD_USER_INFO_HEADERS=true``; absent headers simply yield
-    an anonymous trace."""
+    an anonymous trace.
+
+    Obsoleta na 0.1.29: delega a ``aixon.server.compat.open_webui_request_hook``
+    e emite ``DeprecationWarning``; use ``Server(request_hook=...)``."""
+    import warnings
+
+    from aixon.server.compat import (
+        OPEN_WEBUI_CHAT_ID_HEADER,
+        OPEN_WEBUI_EMAIL_HEADER,
+        OPEN_WEBUI_USER_ID_HEADER,
+        open_webui_request_hook,
+    )
+    from aixon.server.context import make_context
+
+    warnings.warn(
+        "aixon.observability.request_identity está obsoleta; a identidade da "
+        "request agora vem do request_hook do Server "
+        "(aixon.server.compat.open_webui_request_hook)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    # Só os três headers lidos, buscados pelo `get` do chamador: um mapping
+    # case-insensitive (Starlette) segue sem distinguir caixa, como na 0.1.28.
     get = getattr(headers, "get", lambda *_: None)
-    user = get("x-openwebui-user-email") or get("x-openwebui-user-id")
-    session = get("x-openwebui-chat-id")
-    return {"user_id": user, "session_id": session}
+    raw = [
+        (name, value)
+        for name in (OPEN_WEBUI_EMAIL_HEADER, OPEN_WEBUI_USER_ID_HEADER,
+                     OPEN_WEBUI_CHAT_ID_HEADER)
+        if (value := get(name)) is not None
+    ]
+    ctx = make_context(model="", agent_name="", raw_headers=raw, params={},
+                       adapter="", stream=False)
+    decision = open_webui_request_hook(ctx)
+    return {"user_id": decision.trace_user_id, "session_id": decision.trace_session_id}
 
 
 @contextmanager
