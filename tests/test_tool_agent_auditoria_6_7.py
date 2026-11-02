@@ -102,3 +102,72 @@ def test_tool_agent_5_stream_e_astream_emitem_a_mesma_sequencia():
     assert ag._absorb_update(upd, set(), seen) == "fim"
     assert seen == []
     assert [c.content for c in ag._tail_chunks(seen, set(), "fim", False)] == ["fim", ""]
+
+
+# ---- tool_agent-7 / 8: grafos falsos ---------------------------------------
+
+class _TeimosoStream:
+    """__anext__ bloqueia; ao ser cancelado, demora a terminar (a janela)."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(2)
+            raise
+
+    async def aclose(self):
+        pass
+
+
+class _AcloseFalha:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def aclose(self):
+        raise RuntimeError("teardown quebrou")
+
+
+def _graph(stream):
+    return type("G", (), {"astream": lambda self, *a, **k: stream})()
+
+
+def test_tool_agent_7_cancelamento_no_finally_propaga(monkeypatch):
+    import langchain.agents as la
+
+    monkeypatch.setattr(la, "create_agent", lambda *a, **k: _graph(_TeimosoStream()))
+    ag = _agent("aud7", max_execution_time=0.1)
+
+    async def cenario():
+        async def consome():
+            return [c async for c in ag.astream(USER)]
+
+        t = asyncio.ensure_future(consome())
+        await asyncio.sleep(0.4)  # prazo estourou; finally espera o next_task
+        t.cancel()
+        await asyncio.wait({t})
+        return t
+
+    t = asyncio.run(cenario())
+    assert t.cancelled(), "o gerador engoliu o cancelamento e terminou limpo"
+
+
+def test_tool_agent_8_aclose_que_falha_e_logado(monkeypatch, caplog):
+    import langchain.agents as la
+
+    monkeypatch.setattr(la, "create_agent", lambda *a, **k: _graph(_AcloseFalha()))
+    ag = _agent("aud8")
+
+    async def coleta():
+        return [c async for c in ag.astream(USER)]
+
+    with caplog.at_level(logging.WARNING):
+        chunks = asyncio.run(coleta())
+    assert chunks[-1].done
+    assert "teardown quebrou" in caplog.text

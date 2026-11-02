@@ -725,7 +725,6 @@ class ToolAgent(Agent, abstract=True):
         async-path (``astream``) capability — which is what ``Server`` uses.
         """
         import asyncio
-        import contextlib
 
         from langgraph.errors import GraphRecursionError
 
@@ -773,10 +772,20 @@ class ToolAgent(Agent, abstract=True):
                 # CancelledError, the original StopAsyncIteration/graph error,
                 # or a benign result from a last-instant completion — is
                 # irrelevant here; the stream is being torn down either way).
+                cancelled: asyncio.CancelledError | None = None
                 if next_task is not None and not next_task.done():
                     next_task.cancel()
-                    with contextlib.suppress(BaseException):
+                    try:
                         await asyncio.wait({next_task})
+                    except asyncio.CancelledError as exc:
+                        # Cancelamento entregue ao PRÓPRIO gerador nesta
+                        # janela (task externa cancelada, ou o cancel scope do
+                        # anyio reentregando): não pode ser engolido, mas é
+                        # adiado até depois do aclose() abaixo — a limpeza do
+                        # LangGraph é o que cancela os nós em voo (5c62e48).
+                        cancelled = exc
+                    except Exception:
+                        pass
                 elif next_task is not None and not next_task.cancelled():
                     # Sweep #1: the task already completed (this tick) but the
                     # generator is being abandoned (GeneratorExit from a
@@ -792,8 +801,15 @@ class ToolAgent(Agent, abstract=True):
                 if aclose is not None:
                     try:
                         await aclose()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # Teardown do grafo falhou (ex.: callback): ignorado,
+                        # o stream está sendo desmontado, mas nunca em silêncio.
+                        _log.warning(
+                            f"agent '{self.name}': aclose() do stream do grafo "
+                            f"falhou: {exc!r}"
+                        )
+                if cancelled is not None:
+                    raise cancelled
             if timed_out:
                 emit_reasoning(
                     f"(stopped: exceeded max_execution_time "
