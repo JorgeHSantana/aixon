@@ -140,6 +140,11 @@ class ToolAgent(Agent, abstract=True):
         without duplicating the interpolation."""
         return Chunk(content=self.timeout_message.format(seconds=self.max_execution_time))
 
+    def timeout_texts(self) -> set[str]:
+        """O texto do timeout de passagem (#19) deste agente: o mesmo que
+        ``_timeout_chunk`` emite."""
+        return {self._timeout_chunk().content}
+
     def client_tools_filter(self, defs: list[dict]) -> list[dict]:
         """Curation hook (#18c): which client tool defs are exposed. Default:
         all of them. Override e.g. to allow only a prefix."""

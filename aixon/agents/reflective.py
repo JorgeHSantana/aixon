@@ -262,19 +262,20 @@ class ReflectiveAgent(Agent, abstract=True):
         ``max_execution_time`` with nothing accumulated emits
         ``timeout_message`` as CONTENT so it never dies mute — but that text
         is not a judgeable answer, and retrying it would re-run the same
-        (already slow) worker for another full deadline. Only ToolAgent
-        workers expose ``timeout_message``/``max_execution_time``; any other
-        worker type never matches.
+        (already slow) worker for another full deadline. Quem diz qual texto é
+        esse é o próprio worker (``timeout_texts()``); um worker sem timeout
+        declarado devolve vazio e nunca casa.
 
         Checked in ``_stream``/``_astream`` ONLY: a timeout pass-through is a
         streaming-loop artifact — the worker's ``invoke``/``ainvoke`` raise
         ``AixonError`` on deadline instead, so ``_invoke``/``_ainvoke`` can
         never receive this text and intentionally have no check."""
-        tm = getattr(self._worker, "timeout_message", None)
-        if tm is None:
-            return False
-        seconds = getattr(self._worker, "max_execution_time", 0)
-        return answer.content == tm.format(seconds=seconds)
+        return answer.content in self.timeout_texts()
+
+    def timeout_texts(self) -> set[str]:
+        """Delega ao worker: o timeout dele chega ao chamador intacto."""
+        texts = getattr(self._worker, "timeout_texts", None)
+        return texts() if callable(texts) else set()
 
     def _timeout_exhausted_chunks(self, answer: Message,
                                   exc: AixonError) -> list[Chunk]:
