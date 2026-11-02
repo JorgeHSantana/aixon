@@ -65,3 +65,43 @@ def test_request_identity_delegada_e_avisa():
             "user_id": "u1", "session_id": None}
     with pytest.warns(DeprecationWarning):
         assert request_identity(object()) == {"user_id": None, "session_id": None}
+
+
+# --- 0.1.30: OpenWebUIRequestHook (classe) ---
+
+
+def test_padrao_e_instancia_da_classe():
+    from aixon.server.compat import OpenWebUIRequestHook
+    from aixon.server.context import HeaderIdentityHook
+
+    assert isinstance(open_webui_request_hook, OpenWebUIRequestHook)
+    assert isinstance(open_webui_request_hook, HeaderIdentityHook)
+
+
+def test_subclasse_herda_identidade_e_sobrescreve_imposicao():
+    from aixon.server.compat import OpenWebUIRequestHook
+
+    class Mine(OpenWebUIRequestHook):
+        def imposition(self, ctx):
+            return (ctx.model.partition("-")[0].lower(), "gateway")
+
+    ctx = make_context(model="Pro-Gerente", agent_name="a",
+                       raw_headers=[(OPEN_WEBUI_EMAIL_HEADER, "a@b.c")],
+                       params={}, adapter="openai", stream=False)
+    assert Mine()(ctx) == RequestDecision(
+        impose=("pro", "gateway"), user_email="a@b.c", trace_user_id="a@b.c"
+    )
+
+
+def test_subclasse_recusa_em_check():
+    from aixon.exceptions import RequestRejected
+    from aixon.server.compat import OpenWebUIRequestHook
+
+    class Mine(OpenWebUIRequestHook):
+        def check(self, ctx):
+            if not ctx.headers.get(OPEN_WEBUI_EMAIL_HEADER):
+                raise RequestRejected("sem e-mail")
+
+    with pytest.raises(RequestRejected):
+        Mine()(_ctx({}))
+    assert Mine()(_ctx({OPEN_WEBUI_EMAIL_HEADER: "a@b.c"})).user_email == "a@b.c"
