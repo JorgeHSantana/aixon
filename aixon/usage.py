@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextvars
 import threading
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Iterator, Optional
 
 from aixon.runtime import _reset_quietly
@@ -111,6 +112,45 @@ def usage_scope() -> Iterator[UsageAccumulator]:
         _reset_quietly(_current, token)
 
 
+# Contagem de tokens (estimativa via tiktoken, extra opcional ``aixon[tiktoken]``):
+# sem tiktoken, build_usage devolve {} e o usage é omitido (degradação graciosa).
+@lru_cache(maxsize=32)
+def _encoding(model: str):
+    import tiktoken  # optional; raises ImportError if the extra is not installed
+
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("cl100k_base")
+
+
+def count_tokens(model: str, text: str) -> int | None:
+    """Token count for ``text`` under ``model``'s encoding, or None if tiktoken
+    is unavailable."""
+    try:
+        enc = _encoding(model)
+        # disallowed_special=() treats special-token markers in user text
+        # (e.g. "<|endoftext|>") as plain text; tiktoken's default raises
+        # ValueError on them, which would break the graceful-degradation
+        # promise for user-controlled content.
+        return len(enc.encode(text or "", disallowed_special=()))
+    except Exception:
+        return None
+
+
+def build_usage(model: str, prompt_text: str, completion_text: str) -> dict:
+    """OpenAI-style usage dict, or {} when counting is unavailable."""
+    prompt = count_tokens(model, prompt_text)
+    completion = count_tokens(model, completion_text)
+    if prompt is None or completion is None:
+        return {}
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 def usage_for(model: str, messages, message) -> dict:
     """O ``usage`` de uma resposta não stream: o real do provedor
     (``message.usage``, já no formato OpenAI) quando existe, senão a
@@ -118,9 +158,6 @@ def usage_for(model: str, messages, message) -> dict:
     "\\n") e da resposta (com o reasoning anexado após "\\n")."""
     if message.usage:
         return message.usage
-    # Import tardio: aixon.usage é núcleo e não deve puxar aixon.server.
-    from aixon.server.usage import build_usage
-
     prompt_text = "\n".join(m.content for m in messages)
     completion_text = message.content
     if message.reasoning:
