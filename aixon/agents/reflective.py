@@ -20,9 +20,9 @@ One thing is never degraded, in the judge or in the worker: a verdict of the
 gateway (``classify_gateway_error``: budget spent, rate limited). It is neither
 a quality shortfall nor an outage but the end of the request, and an unreviewed
 answer, or a worker failure delivered as content, would hide it from whoever
-has to answer it. The 8 handlers of the loop (the judge's, in ``_invoke``,
-``_stream``, ``_ainvoke`` and ``_astream``; the worker's #19 ones, in the two
-streams and in their patch rounds) re-raise it, the same object, before any
+has to answer it. The handlers of the loop (the judge's, in ``_judge_round``
+and ``_ajudge_round``, shared by the 4 entry points; the worker's #19 ones, in
+the two streams and in their patch rounds) re-raise it, the same object, before any
 log, label or run line. What is not a verdict of the gateway degrades as above:
 a 429 of another API (a judge running straight on OpenAI) included."""
 
@@ -281,6 +281,53 @@ class ReflectiveAgent(Agent, abstract=True):
             f"delivering unreviewed answer"
         )
 
+    def _judge_failed(self, exc: Exception, round_: int,
+                      patch_applied: int, patch_fallback: int) -> None:
+        """#24: o juiz caiu (não por veredito do gateway) — aviso e a linha de
+        run ``judge_error``. O rótulo no canal de raciocínio fica no chamador
+        (emit_reasoning ou yield)."""
+        self._judge_unavailable(exc)
+        self._log_run(rounds=round_, patch_applied=patch_applied,
+                      patch_fallback=patch_fallback, outcome="judge_error")
+
+    def _judge_round(self, messages: list[Message], answer: Message,
+                     round_: int, patch_applied: int,
+                     patch_fallback: int) -> Message | None:
+        """Uma chamada ao juiz. None = juiz indisponível, já logado: o chamador
+        entrega a resposta sem conferência. O prompt é montado FORA do try:
+        um erro de programação nele não é "juiz caído" e sobe."""
+        judge_msgs = self._judge_messages(messages, answer)
+        try:
+            return self.judge_llm.complete(judge_msgs)
+        except Exception as exc:
+            if classify_gateway_error(exc) is not None:
+                raise  # gateway verdict: re-raised, never degraded (module docstring)
+            self._judge_failed(exc, round_, patch_applied, patch_fallback)
+            return None
+
+    async def _ajudge_round(self, messages: list[Message], answer: Message,
+                            round_: int, patch_applied: int,
+                            patch_fallback: int) -> Message | None:
+        """Gêmeo async de ``_judge_round``."""
+        judge_msgs = self._judge_messages(messages, answer)
+        try:
+            return await self.judge_llm.acomplete(judge_msgs)
+        except Exception as exc:
+            if classify_gateway_error(exc) is not None:
+                raise  # gateway verdict: re-raised, never degraded (module docstring)
+            self._judge_failed(exc, round_, patch_applied, patch_fallback)
+            return None
+
+    def _exhausted(self, patch_applied: int, patch_fallback: int) -> None:
+        """Epílogo de rodadas esgotadas: o log e a linha de run ``exhausted``
+        (o rótulo fica no chamador)."""
+        _log.info(
+            f"reflective '{self.name}': rounds exhausted "
+            f"(max_rounds={self.max_rounds}); returning last attempt"
+        )
+        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
+                      patch_fallback=patch_fallback, outcome="exhausted")
+
     def _retry_messages(self, messages: list[Message], answer: Message,
                         critique: str,
                         template: str = _RETRY_TEMPLATE) -> list[Message]:
@@ -394,20 +441,13 @@ class ReflectiveAgent(Agent, abstract=True):
         patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
-            try:
-                verdict_msg = self.judge_llm.complete(
-                    self._judge_messages(messages, answer))
-            except Exception as exc:
-                if classify_gateway_error(exc) is not None:
-                    raise  # gateway verdict: re-raised, never degraded (module docstring)
+            verdict_msg = self._judge_round(messages, answer, round_,
+                                            patch_applied, patch_fallback)
+            if verdict_msg is None:
                 # #24: the judge itself is unavailable (any round, including
                 # a retry round) — deliver the current worker answer
                 # unreviewed rather than crash a run that produced one.
-                self._judge_unavailable(exc)
                 emit_reasoning(self.judge_unavailable_label)
-                self._log_run(rounds=round_, patch_applied=patch_applied,
-                              patch_fallback=patch_fallback,
-                              outcome="judge_error")
                 return dataclasses.replace(answer, usage=total_usage)
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
@@ -443,12 +483,7 @@ class ReflectiveAgent(Agent, abstract=True):
                 answer = self._worker.invoke(msgs)
             total_usage = merge_usage(total_usage, answer.usage)
         emit_reasoning(self.exhausted_label)
-        _log.info(
-            f"reflective '{self.name}': rounds exhausted "
-            f"(max_rounds={self.max_rounds}); returning last attempt"
-        )
-        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
-                      patch_fallback=patch_fallback, outcome="exhausted")
+        self._exhausted(patch_applied, patch_fallback)
         return dataclasses.replace(answer, usage=total_usage)
 
     def stream(self, messages: list[Message]) -> Iterator[Chunk]:
@@ -521,22 +556,15 @@ class ReflectiveAgent(Agent, abstract=True):
                 yield Chunk(done=True)
                 return
             yield Chunk(reasoning=self.judge_label + "\n")
-            try:
-                verdict = self.judge_llm.complete(
-                    self._judge_messages(messages, answer)
-                ).content
-            except Exception as exc:
-                if classify_gateway_error(exc) is not None:
-                    raise  # gateway verdict: re-raised, never degraded (module docstring)
+            verdict_msg = self._judge_round(messages, answer, round_,
+                                            patch_applied, patch_fallback)
+            if verdict_msg is None:
                 # #24: see _invoke() — same outage, deliver unreviewed.
-                self._judge_unavailable(exc)
                 yield Chunk(reasoning=self.judge_unavailable_label + "\n")
-                self._log_run(rounds=round_, patch_applied=patch_applied,
-                              patch_fallback=patch_fallback,
-                              outcome="judge_error")
                 yield Chunk(content=answer.content)
                 yield Chunk(done=True)
                 return
+            verdict = verdict_msg.content
             if self._approved(verdict):
                 self._log_run(rounds=round_, patch_applied=patch_applied,
                               patch_fallback=patch_fallback, outcome="approved")
@@ -575,12 +603,7 @@ class ReflectiveAgent(Agent, abstract=True):
                 yield Chunk(reasoning=self.patch_fallback_label + "\n")
             msgs = self._retry_messages(msgs, answer, verdict)
         yield Chunk(reasoning=self.exhausted_label + "\n")
-        _log.info(
-            f"reflective '{self.name}': rounds exhausted "
-            f"(max_rounds={self.max_rounds}); returning last attempt"
-        )
-        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
-                      patch_fallback=patch_fallback, outcome="exhausted")
+        self._exhausted(patch_applied, patch_fallback)
         yield Chunk(content=answer.content)
         yield Chunk(done=True)
 
@@ -606,19 +629,11 @@ class ReflectiveAgent(Agent, abstract=True):
         patch_applied = patch_fallback = 0
         for round_ in range(1, self.max_rounds + 1):
             emit_reasoning(self.judge_label)
-            try:
-                verdict_msg = await self.judge_llm.acomplete(
-                    self._judge_messages(messages, answer)
-                )
-            except Exception as exc:
-                if classify_gateway_error(exc) is not None:
-                    raise  # gateway verdict: re-raised, never degraded (module docstring)
+            verdict_msg = await self._ajudge_round(messages, answer, round_,
+                                                   patch_applied, patch_fallback)
+            if verdict_msg is None:
                 # #24: see _invoke() — same outage, deliver unreviewed.
-                self._judge_unavailable(exc)
                 emit_reasoning(self.judge_unavailable_label)
-                self._log_run(rounds=round_, patch_applied=patch_applied,
-                              patch_fallback=patch_fallback,
-                              outcome="judge_error")
                 return dataclasses.replace(answer, usage=total_usage)
             total_usage = merge_usage(total_usage, verdict_msg.usage)
             verdict = verdict_msg.content
@@ -648,12 +663,7 @@ class ReflectiveAgent(Agent, abstract=True):
                 answer = await self._worker.ainvoke(msgs)
             total_usage = merge_usage(total_usage, answer.usage)
         emit_reasoning(self.exhausted_label)
-        _log.info(
-            f"reflective '{self.name}': rounds exhausted "
-            f"(max_rounds={self.max_rounds}); returning last attempt"
-        )
-        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
-                      patch_fallback=patch_fallback, outcome="exhausted")
+        self._exhausted(patch_applied, patch_fallback)
         return dataclasses.replace(answer, usage=total_usage)
 
     async def astream(self, messages: list[Message]) -> "AsyncIterator[Chunk]":
@@ -713,23 +723,15 @@ class ReflectiveAgent(Agent, abstract=True):
                 yield Chunk(done=True)
                 return
             yield Chunk(reasoning=self.judge_label + "\n")
-            try:
-                verdict = (
-                    await self.judge_llm.acomplete(
-                        self._judge_messages(messages, answer))
-                ).content
-            except Exception as exc:
-                if classify_gateway_error(exc) is not None:
-                    raise  # gateway verdict: re-raised, never degraded (module docstring)
+            verdict_msg = await self._ajudge_round(messages, answer, round_,
+                                                   patch_applied, patch_fallback)
+            if verdict_msg is None:
                 # #24: see _invoke() — same outage, deliver unreviewed.
-                self._judge_unavailable(exc)
                 yield Chunk(reasoning=self.judge_unavailable_label + "\n")
-                self._log_run(rounds=round_, patch_applied=patch_applied,
-                              patch_fallback=patch_fallback,
-                              outcome="judge_error")
                 yield Chunk(content=answer.content)
                 yield Chunk(done=True)
                 return
+            verdict = verdict_msg.content
             if self._approved(verdict):
                 self._log_run(rounds=round_, patch_applied=patch_applied,
                               patch_fallback=patch_fallback, outcome="approved")
@@ -761,11 +763,6 @@ class ReflectiveAgent(Agent, abstract=True):
                 yield Chunk(reasoning=self.patch_fallback_label + "\n")
             msgs = self._retry_messages(msgs, answer, verdict)
         yield Chunk(reasoning=self.exhausted_label + "\n")
-        _log.info(
-            f"reflective '{self.name}': rounds exhausted "
-            f"(max_rounds={self.max_rounds}); returning last attempt"
-        )
-        self._log_run(rounds=self.max_rounds, patch_applied=patch_applied,
-                      patch_fallback=patch_fallback, outcome="exhausted")
+        self._exhausted(patch_applied, patch_fallback)
         yield Chunk(content=answer.content)
         yield Chunk(done=True)
