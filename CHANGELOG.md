@@ -5,6 +5,114 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Não lançado]
+
+Varredura da 0.1.29 (plano 1 de 2): repetição, acoplamento e bugs encontrados
+por leitura de cada módulo, corrigidos sem mudar o comportamento observável
+da 0.1.28. O plano 2 (contexto por request no `Server`) fecha a versão.
+
+### Added
+- **`OpenAICompatProvider`** em `aixon/providers/base.py`: base dos provedores
+  que falam Chat Completions via `langchain_openai.ChatOpenAI` (`openai`,
+  `xai`, `zai`, `gateway`), com os ganchos `api_key()`, `base_url()`,
+  `apply_reasoning()`, `extra_kwargs()` e `finish()`. Os quatro provedores
+  viraram subclasses sem `build()` próprio; os kwargs que chegam ao
+  `ChatOpenAI` são os mesmos de antes (testes de igualdade gravados contra a
+  0.1.28).
+- **`aixon/providers/gateway_errors.py`**: `gateway_base_url()`, as constantes
+  do contrato do gateway (`BUDGET_STATUS`, `BUDGET_MARKER`,
+  `RATE_LIMIT_STATUS`) e `classify_gateway_error`. `aixon.exceptions` e
+  `aixon` continuam exportando `classify_gateway_error` (compatibilidade).
+- **`aixon.runtime.normalize_param_aliases(params)`**: a única regra de
+  alias → canônico (`max_completion_tokens`, `stop_sequences`), usada por
+  `generation_params`, `LLM.request_chat_model` e
+  `LLM.settings_lost_under_imposition`.
+- **`LLM.provider_name`, `LLM.imposition()`, `LLM.settings_lost_under_imposition()`**:
+  o agente impositor pergunta ao LLM, em vez de ler `_provider()` e recalcular
+  a portabilidade dos params.
+- **`Agent.timeout_texts()`** e **`aixon.agent.instantiate(agent)`**:
+  `as_tool` e o `ReflectiveAgent` deixam de conhecer `_worker` e o formato do
+  `timeout_message` do `ToolAgent`; `instantiate` sai de
+  `aixon.agents.orchestrator._instantiate` para a base.
+- **`aixon.toolcache.use_tool_cache(cache)`**: reativa um cache existente num
+  bloco (para escopos abertos por passo de stream).
+- **`aixon.usage.usage_for(model, messages, message)`**: `message.usage` ou a
+  estimativa `build_usage`, no lugar do fallback inline do `Server`.
+- **`aixon.discovery.NotAPackageError`** (`ValueError`): o único erro que o
+  `aixon` CLI silencia no autodiscover.
+
+### Changed
+- **Extrações sem mudança de comportamento**, cada uma com teste de igualdade:
+  `Server._request_scopes` (a pilha de seis escopos num lugar só, igual nos
+  caminhos stream e não stream); a closure `chat` do `Server` dividida em
+  `_parse_body`, `_resolve_agent`, `_stream_response`, `_sync_response` e um
+  `_ChatCall`; `Agent._finish_tool_run` (pós-run de `as_tool`, sync e async);
+  `ToolAgent._resolve_client_tools`, `_finish_run`, `_absorb_update`,
+  `_tail_chunks`, `_emit_ai_message`; `ReflectiveAgent._judge_round`/
+  `_ajudge_round`, `_exhausted`, um só `_retry_messages` com template por
+  parâmetro; `Orchestrator._recursion_error`, `_final_message`,
+  `_final_chunks`, workers resolvidos uma vez no build; o walk de ciclo de
+  composição num só `Agent._check_composition_cycle` (mensagem unificada, a
+  do `Orchestrator`); `Connector._clean_params`; `_stream_in_steps`/
+  `_astream_in_steps` genéricos em `aixon.agent` (o escopo imposto e agora os
+  escopos do `ReflectiveAgent` usam o mesmo laço); menu e turno falho do CLI
+  num helper só.
+- **Docstrings**: sem referências a "Task N"/"Plan N", sem nomes de produto
+  (OnlyOffice, olympus) e sem descrições de caminhos que já não existem.
+
+### Fixed
+- **`ReflectiveAgent.stream`/`astream`**: `tool_call_cache()` e
+  `prediction_scope()` eram abertos em volta de `yield`; um consumidor que
+  abandonava o gerador herdava o cache e o texto de predicted output nas
+  chamadas seguintes do seu contexto. Agora abrem por passo, como o escopo
+  imposto.
+- **`ReflectiveAgent`**: `tool_calls` do worker acumulados entre chunks (antes
+  o último chunk sobrescrevia); a montagem do prompt do juiz fora do
+  `try/except` (um erro de programação ali não vira "juiz indisponível").
+- **`ToolAgent.astream`**: o `finally` não engole mais o `CancelledError`
+  entregue ao próprio gerador (ele é adiado até o `aclose()` do grafo, que é
+  o que cancela os nós em voo, e relançado); falha do `aclose()` é logada em
+  WARNING em vez de sumir.
+- **`aixon.runtime`**: todos os escopos (`generation_params`,
+  `client_tools_scope`, `tool_choice_scope`, `prediction_scope`) toleram o
+  `reset()` em outro Context (#21), como `user_email_scope` e
+  `imposed_model_scope` já faziam; `generation_params` e
+  `client_tools_scope` entregam uma cópia ao bloco `with`.
+- **`LLM.chat_model`**: construção preguiçosa sob trava (agentes em threads),
+  no padrão do cache por request.
+- **`MCPToolset.resolve_tools`**: a descoberta roda fora da trava; só a
+  publicação do resultado é travada. **`MCPConnector`**: `_tools_cache`
+  inicializado no `__init__`; `MCPToolset` usa `aas_tools` (API pública).
+- **`aixon.observability`**: inicialização do handler sob trava; o `yield` do
+  caminho degradado fora do `except` (a exceção do agente não ganha
+  `__context__` do erro do Langfuse); registro do hook num lugar só.
+- **`Orchestrator`**: `instantiate` captura só `AgentNotFoundError` (outros
+  erros do registry sobem); compile do grafo sob trava.
+- **`Server`**: singleton e `app` sob trava; falha de `session.done()` logada.
+- **CLI**: Ctrl+C no meio de um stream remoto descarta o turno (antes o
+  próximo turno mandava dois `user` seguidos); um `ValueError` levantado pelo
+  módulo do usuário no autodiscover vira aviso, em vez de "No agents
+  registered." silencioso.
+- **`openai`**: a chave do ambiente volta a sobrescrever um `api_key` passado
+  pelo chamador (a extração do provedor tinha trocado isso por `TypeError`).
+
+### Breaking futuro (não aplicado nesta versão)
+Achados da varredura que mudam comportamento e ficam para uma versão com
+bump maior:
+- `Orchestrator`: a guarda de ciclo passa a enxergar `AgentTool` em `tools`
+  (hoje um ciclo A → tools=[B] → agents=[A] não é detectado).
+- `Server`: o header `x-should-retry` e o envelope dos erros não stream
+  (400/404/429/500) passam a ser escritos pelo adapter (`format_error`); no
+  `AnthropicAdapter` o corpo muda para o envelope Anthropic.
+- `Server`: `thought_mode` resolvido no adapter, não injetado em `params`.
+- `LLM`/`Provider`: o descarte de `reasoning` em provedor sem suporte sai de
+  `LLM._build` para a fronteira `Provider.build`.
+- `Agent.astream` (ponte sync→async): `aclose()` deixa de esperar o próximo
+  chunk do produtor bloqueado.
+- Os headers `x-openwebui-*` lidos pelo `Server` e por
+  `observability.request_identity` saem para um módulo de compatibilidade
+  (plano 2 desta versão).
+
 ## [0.1.28] - 2026-10-28
 
 Gateway com modelo imposto. Um deploy que passa toda chamada de LLM por um
