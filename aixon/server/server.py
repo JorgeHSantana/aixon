@@ -20,6 +20,7 @@ import hmac
 import json
 import os
 import threading
+from types import MappingProxyType
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -28,21 +29,25 @@ from aixon.exceptions import (
     AgentNotFoundError,
     AixonError,
     GatewayBudgetExceeded,
+    RequestRejected,
     classify_gateway_error,
 )
 from aixon.logging import Logger
 from aixon.message import Chunk
-from aixon.observability import observe_request, request_identity
+from aixon.observability import observe_request
 from aixon.registry import get_registry
 from aixon.runtime import (
     client_tools_scope,
     generation_params,
+    imposed_model_scope,
     tool_choice_scope,
     user_email_scope,
 )
 from aixon.toolcache import tool_call_cache
 from aixon.usage import usage_for
 from aixon.server.adapters.openai import OpenAIAdapter
+from aixon.server.compat import open_webui_request_hook
+from aixon.server.context import RequestDecision, RequestHook, make_context
 from aixon.server.protocol import ParsedRequest, ProtocolAdapter
 
 if TYPE_CHECKING:
@@ -78,7 +83,7 @@ def _valid_token(raw: str) -> bool:
 class _ChatCall:
     """O que uma request de chat já resolvida carrega até a resposta: o par
     adapter/rota, o agente, o pedido neutro, o corpo cru (só para o tap) e a
-    identidade publicada nos escopos."""
+    decisão do ``request_hook`` (imposição, e-mail e identidade do trace)."""
 
     adapter: ProtocolAdapter
     path: str
@@ -87,8 +92,7 @@ class _ChatCall:
     body: dict
     model: str
     tap: bool
-    ident: dict
-    user_email: Optional[str]
+    decision: RequestDecision
 
 
 def _tap_enabled(agent_name: str) -> bool:
@@ -159,6 +163,7 @@ class Server:
     # above the line that assigns them on the first construction.
     budget_exceeded_message: str
     rate_limited_message: str
+    request_hook: RequestHook
 
     # Trava de classe (server-10): a primeira construção (__new__/__init__) e
     # o build lazy do app acontecem uma vez só, mesmo com threads concorrentes.
@@ -170,6 +175,7 @@ class Server:
         cls,
         adapters: list[ProtocolAdapter] | None = None,
         *,
+        request_hook: RequestHook | None = None,
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
@@ -183,12 +189,14 @@ class Server:
         self,
         adapters: list[ProtocolAdapter] | None = None,
         *,
+        request_hook: RequestHook | None = None,
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
         with type(self)._lock:
             self._init_locked(
                 adapters,
+                request_hook=request_hook,
                 budget_exceeded_message=budget_exceeded_message,
                 rate_limited_message=rate_limited_message,
             )
@@ -197,6 +205,7 @@ class Server:
         self,
         adapters: list[ProtocolAdapter] | None,
         *,
+        request_hook: RequestHook | None,
         budget_exceeded_message: str,
         rate_limited_message: str,
     ) -> None:
@@ -232,8 +241,21 @@ class Server:
                         "Server._reset() before constructing it with a new "
                         f"{argument}."
                     )
+            # O request_hook idem: None é "sem opinião" (é o que `aixon serve`
+            # passa depois do autodiscover); outro objeto (por identidade)
+            # levanta.
+            if request_hook is not None and request_hook is not self.request_hook:
+                raise AixonError(
+                    "Server is already constructed with a different request_hook "
+                    f"({self.request_hook!r}). The singleton's request_hook is "
+                    "fixed; call Server._reset() before constructing it with a "
+                    "new request_hook."
+                )
             return
         self._protocol_adapters: list[ProtocolAdapter] = adapters or [OpenAIAdapter()]
+        # Sem hook da aplicação, o padrão reproduz a 0.1.28 (headers do Open
+        # WebUI). Um hook próprio o EXCLUI: não há fallback para os headers.
+        self.request_hook = request_hook or open_webui_request_hook
         self.budget_exceeded_message = budget_exceeded_message
         self.rate_limited_message = rate_limited_message
         self._app = None
@@ -344,22 +366,26 @@ class Server:
         return self.rate_limited_message, "rate_limit_exceeded", "rate_limited"
 
     def _request_scopes(
-        self, *, agent, adapter, pr, user_email, ident, stream: bool,
+        self, *, agent, adapter, pr, decision: RequestDecision, stream: bool,
     ) -> contextlib.ExitStack:
         """A pilha de escopos de uma request de chat, igual nos caminhos stream
         e não stream. Ordem fixa, de fora para dentro: observe_request,
-        generation_params, user_email_scope, client_tools_scope,
-        tool_choice_scope, tool_call_cache. Se um enter falhar, o ExitStack
-        fecha os que já entraram."""
+        generation_params, user_email_scope, imposed_model_scope (só quando o
+        hook decidiu ``impose``), client_tools_scope, tool_choice_scope,
+        tool_call_cache. Se um enter falhar, o ExitStack fecha os que já
+        entraram."""
         stack = contextlib.ExitStack()
         with stack:
             stack.enter_context(observe_request(
-                agent.name, user_id=ident["user_id"],
-                session_id=ident["session_id"],
+                agent.name,
+                user_id=decision.trace_user_id or decision.user_email,
+                session_id=decision.trace_session_id,
                 metadata={"adapter": adapter.name, "stream": stream},
             ))
             stack.enter_context(generation_params(pr.params))
-            stack.enter_context(user_email_scope(user_email))
+            stack.enter_context(user_email_scope(decision.user_email))
+            if decision.impose is not None:
+                stack.enter_context(imposed_model_scope(*decision.impose, by="server"))
             stack.enter_context(client_tools_scope(pr.tools))
             stack.enter_context(tool_choice_scope(pr.tool_choice))
             stack.enter_context(tool_call_cache())
@@ -379,18 +405,28 @@ class Server:
             _log.info(f"{adapter.name}: {path} -> agent '{agent.name}' (stream={pr.stream})")
             # O Starlette guarda o JSON já lido: esta é a mesma dict do parse.
             body = await request.json()
+            model = pr.model or agent.name
+            decision = self._decide(request, adapter, agent, pr)
+            if isinstance(decision, JSONResponse):
+                return decision
             call = _ChatCall(
                 adapter=adapter, path=path, agent=agent, pr=pr, body=body,
-                model=pr.model or agent.name, tap=_tap_enabled(agent.name),
-                # Langfuse (#26, opcional): identidade do trace vinda dos
-                # headers que o frontend encaminha (Open WebUI:
-                # ENABLE_FORWARD_USER_INFO_HEADERS).
-                ident=request_identity(request.headers),
-                # O e-mail do usuário final, publicado para a chamada inteira:
-                # só o provedor `gateway` lê. Só o e-mail — nunca o user-id do
-                # fallback de request_identity. Ausente ou vazio, vira None.
-                user_email=request.headers.get("x-openwebui-user-email"),
+                model=model, tap=_tap_enabled(agent.name),
+                decision=RequestDecision(),
             )
+            if isinstance(decision, RequestRejected):
+                if pr.stream:
+                    return self._stream_response(call, refusal=str(decision))
+                _log.warning(
+                    f"{adapter.name}: request for agent '{agent.name}' rejected "
+                    f"by the request hook (HTTP {decision.status})"
+                )
+                return JSONResponse(
+                    {"error": {"message": str(decision), "type": "request_rejected",
+                               "code": decision.code}},
+                    status_code=decision.status,
+                )
+            call.decision = decision
             if pr.stream:
                 return self._stream_response(call)
             return await self._sync_response(call)
@@ -405,6 +441,35 @@ class Server:
         # real class object so FastAPI's introspection needs no string lookup.
         chat.__annotations__["request"] = Request
         app.add_api_route(path, chat, methods=["POST"])
+
+    def _decide(self, request, adapter, agent, pr):
+        """Chama o ``request_hook`` uma vez, antes de qualquer escopo. Devolve a
+        decisão (``None`` vira ``RequestDecision()``), a ``RequestRejected``
+        que o hook levantou, ou a JSONResponse 500 para qualquer outra falha
+        (o log nomeia só o tipo: o texto pode trazer dado do usuário)."""
+        from starlette.responses import JSONResponse
+
+        ctx = make_context(
+            model=pr.model or agent.name, agent_name=agent.name,
+            raw_headers=request.headers.items(),
+            # Cópia somente leitura: o hook não altera os params da request.
+            params=MappingProxyType(dict(pr.params or {})),
+            adapter=adapter.name, stream=bool(pr.stream),
+        )
+        try:
+            return self.request_hook(ctx) or RequestDecision()
+        except RequestRejected as exc:
+            return exc
+        except Exception as exc:
+            _log.error(
+                f"{adapter.name}: request hook failed for agent '{agent.name}' "
+                f"({type(exc).__name__})"
+            )
+            return JSONResponse(
+                {"error": {"message": "The request hook failed.",
+                           "type": "server_error"}},
+                status_code=500,
+            )
 
     async def _parse_body(self, request, adapter, path):
         """Lê e valida o corpo: devolve o ParsedRequest do adapter, ou a
@@ -459,7 +524,7 @@ class Server:
     def _scopes_for(self, call: "_ChatCall", *, stream: bool) -> contextlib.ExitStack:
         return self._request_scopes(
             agent=call.agent, adapter=call.adapter, pr=call.pr,
-            user_email=call.user_email, ident=call.ident, stream=stream,
+            decision=call.decision, stream=stream,
         )
 
     @staticmethod
@@ -472,9 +537,11 @@ class Server:
             "stream": stream, "body": call.body, "response": response,
         })
 
-    def _stream_response(self, call: "_ChatCall"):
+    def _stream_response(self, call: "_ChatCall", *, refusal: Optional[str] = None):
         """O caminho stream: StreamingResponse SSE que nunca deixa uma falha
-        no meio do stream chegar ao Starlette."""
+        no meio do stream chegar ao Starlette. Com ``refusal`` (a recusa do
+        ``request_hook``), o agente não roda: o texto sai como a última
+        mensagem de um stream que termina como de costume, sem escopos."""
         from starlette.responses import StreamingResponse
 
         adapter, agent = call.adapter, call.agent
@@ -508,9 +575,20 @@ class Server:
                     yield item
 
             try:
-                with self._scopes_for(call, stream=True):
-                    async for line in drain(agent.astream(call.pr.messages)):
+                if refusal is not None:
+                    _log.warning(
+                        f"{adapter.name}: stream for agent '{agent.name}' "
+                        f"rejected by the request hook; answered in the "
+                        f"stream (HTTP 200)"
+                    )
+                    async for line in drain(
+                        _aiter((Chunk(content=refusal), Chunk(done=True)))
+                    ):
                         yield line
+                else:
+                    with self._scopes_for(call, stream=True):
+                        async for line in drain(agent.astream(call.pr.messages)):
+                            yield line
             except Exception as exc:
                 verdict = classify_gateway_error(exc)
                 if verdict is None:
