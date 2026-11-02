@@ -435,6 +435,18 @@ def test_aviso_uma_vez_por_chave(rec, caplog, sem_avisos_previos):
     assert record.levelno == logging.WARNING
 
 
+def test_aviso_por_conjunto_de_kwargs_perdidos(rec, caplog, sem_avisos_previos):
+    a = LLM("x", provider="fake", seed=7)
+    b = LLM("x", provider="fake", timeout=300)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            a.request_chat_model()
+            b.request_chat_model()
+    first, second = _avisos(caplog)
+    assert "seed" in first.getMessage() and "timeout" not in first.getMessage()
+    assert "timeout" in second.getMessage() and "seed" not in second.getMessage()
+
+
 def test_sem_aviso_quando_a_classe_impoe(rec, caplog, sem_avisos_previos):
     from aixon import LLMAgent
 

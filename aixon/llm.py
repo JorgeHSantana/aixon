@@ -82,7 +82,7 @@ class LLM:
 
     # Chaves (modelo do LLM, modelo imposto, provedor imposto) já avisadas de
     # kwargs não portáveis descartados sob imposição do servidor: uma vez cada.
-    _warned_imposed: set[tuple[str, str, str]] = set()
+    _warned_imposed: set[tuple[str, str, str, tuple[str, ...]]] = set()
     _warned_imposed_lock = threading.Lock()
 
     def __init__(
@@ -251,13 +251,14 @@ class LLM:
         """Avisa, uma vez por chave, dos kwargs não portáveis que ficam para trás
         quando o SERVIDOR impõe o modelo. Uma classe com ``impose_model=True`` já
         avisou na definição (``Agent._warn_about_lost_settings``): o escopo dela
-        é ``by="agent"`` e não passa por aqui."""
-        key = (self.model, imposed_model, imposed_provider)
+        é ``by="agent"`` e não passa por aqui. A chave inclui as chaves perdidas:
+        dois LLM do mesmo modelo com kwargs diferentes avisam cada um."""
+        lost = self.settings_lost_under_imposition()
+        if not lost:
+            return
+        key = (self.model, imposed_model, imposed_provider, tuple(lost))
         with LLM._warned_imposed_lock:
             if key in LLM._warned_imposed:
-                return
-            lost = self.settings_lost_under_imposition()
-            if not lost:
                 return
             LLM._warned_imposed.add(key)
         _log.warning(

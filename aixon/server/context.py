@@ -49,8 +49,10 @@ def make_context(
     stream: bool,
 ) -> RequestContext:
     """Monta o contexto normalizando as chaves dos cabeçalhos para minúsculas;
-    em duplicata, o último valor vence."""
-    headers = {k.lower(): v for k, v in raw_headers}
+    em duplicata, o PRIMEIRO valor vence (como ``starlette.Headers.get``)."""
+    headers: dict[str, str] = {}
+    for k, v in raw_headers:
+        headers.setdefault(k.lower(), v)
     return RequestContext(
         model=model,
         agent_name=agent_name,

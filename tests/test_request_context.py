@@ -35,8 +35,11 @@ def test_make_context_normaliza_chaves():
         params={}, adapter="openai", stream=True,
     )
     assert ctx.headers["x-tier"] == "pro"
-    # último valor vence em duplicata
-    assert _ctx().headers["x-tier"] == "pro"
+
+
+def test_make_context_header_duplicado_primeiro_vence():
+    # como starlette.Headers.get: o primeiro valor vence em duplicata
+    assert _ctx().headers["x-tier"] == "free"
 
 
 def test_decision_vazia_tem_tudo_none():
