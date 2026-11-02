@@ -171,3 +171,29 @@ def test_server_7_both_paths_same_answer_through_app():
     streamed = client.post("/v1/chat/completions", json=_chat(stream=True))
     assert sync["choices"][0]["message"]["content"] == "echo:oi"
     assert sse_content(streamed.text) == "echo:oi"
+
+
+# --- revisão final (item 1): trava reentrante no build do app ---------------
+class _ReentrantAdapter(OpenAIAdapter):
+    """routes() relê o singleton durante o build: com Lock simples, trava."""
+
+    def routes(self):
+        assert Server.get_instance() is Server()
+        return super().routes()
+
+
+def test_build_app_reentrant_does_not_deadlock():
+    make_echo("eco")
+    box: dict = {}
+
+    def build():
+        box["app"] = Server(adapters=[_ReentrantAdapter()]).app
+
+    t = threading.Thread(target=build, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    if t.is_alive():
+        # Trava presa pela thread: troca a trava para o teardown não travar.
+        Server._lock = threading.RLock()
+        pytest.fail("build do app travou na trava do Server")
+    assert TestClient(box["app"]).get("/health").status_code == 200

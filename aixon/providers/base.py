@@ -214,7 +214,9 @@ class OpenAICompatProvider(Provider):
         """Lê ``env_key``; vazio levanta AixonError se ``require_key``."""
         value = os.getenv(self.env_key)
         if not value and self.require_key:
-            raise AixonError(self.require_key_message)
+            raise AixonError(
+                self.require_key_message or f"{self.env_key} is not set."
+            )
         return value or None
 
     def base_url(self) -> str | None:

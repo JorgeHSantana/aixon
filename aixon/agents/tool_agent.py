@@ -14,6 +14,7 @@ never requires it."""
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import TYPE_CHECKING, AsyncIterator, Iterator, Literal
 
@@ -772,6 +773,8 @@ class ToolAgent(Agent, abstract=True):
                 # or a benign result from a last-instant completion — is
                 # irrelevant here; the stream is being torn down either way).
                 cancelled: asyncio.CancelledError | None = None
+                # Exceção em voo que um cancelamento adiado substituiria.
+                in_flight = sys.exc_info()[1]
                 if next_task is not None and not next_task.done():
                     next_task.cancel()
                     try:
@@ -808,7 +811,9 @@ class ToolAgent(Agent, abstract=True):
                             f"falhou: {exc!r}"
                         )
                 if cancelled is not None:
-                    raise cancelled
+                    if in_flight is not None and in_flight is not cancelled:
+                        raise cancelled from in_flight
+                    raise cancelled from None
             if timed_out:
                 emit_reasoning(
                     f"(stopped: exceeded max_execution_time "

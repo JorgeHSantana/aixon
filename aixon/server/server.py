@@ -162,7 +162,9 @@ class Server:
 
     # Trava de classe (server-10): a primeira construção (__new__/__init__) e
     # o build lazy do app acontecem uma vez só, mesmo com threads concorrentes.
-    _lock = threading.Lock()
+    # Reentrante: _build_app() roda adapter.routes() e overrides de subclasse,
+    # que podem construir Server() ou ler .app sob a mesma trava.
+    _lock = threading.RLock()
 
     def __new__(
         cls,

@@ -161,3 +161,23 @@ def test_xai_nao_toca_org(fake_chat):
 
 def test_openai_nao_toca_org(fake_chat):
     _org_intacta(OpenAIProvider().build("gpt-4o"))
+
+
+@pytest.mark.parametrize("provider", [XAIProvider(), ZAIProvider(), GatewayProvider()])
+def test_api_key_do_chamador_com_env_levanta_typeerror(fake_chat, provider):
+    # Comportamento da 0.1.28: a chave da env e a do chamador colidem.
+    with pytest.raises(TypeError):
+        provider.build("m", api_key="do-chamador")
+
+
+def test_require_key_message_padrao_nomeia_env_key(monkeypatch):
+    from aixon.exceptions import AixonError
+    from aixon.providers.base import OpenAICompatProvider
+
+    class _Novo(OpenAICompatProvider):
+        name = "novo"
+        env_key = "NOVO_API_KEY"
+
+    monkeypatch.delenv("NOVO_API_KEY", raising=False)
+    with pytest.raises(AixonError, match="NOVO_API_KEY is not set."):
+        _Novo().api_key()

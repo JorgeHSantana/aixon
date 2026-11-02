@@ -25,6 +25,8 @@ import json
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
+from aixon.runtime import _reset_quietly
+
 
 class ToolCallCache:
     """Maps (tool_name, normalized_args) -> result for one context."""
@@ -74,7 +76,7 @@ def tool_call_cache() -> Iterator[ToolCallCache]:
     try:
         yield cache
     finally:
-        _current.reset(token)
+        _reset_quietly(_current, token)
 
 
 @contextmanager
@@ -85,4 +87,4 @@ def use_tool_cache(cache: ToolCallCache) -> Iterator[ToolCallCache]:
     try:
         yield cache
     finally:
-        _current.reset(token)
+        _reset_quietly(_current, token)
