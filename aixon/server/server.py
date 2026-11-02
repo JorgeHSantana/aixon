@@ -14,6 +14,7 @@ construction."""
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hmac
 import json
@@ -296,6 +297,28 @@ class Server:
             return self.budget_exceeded_message, "insufficient_quota", "budget_exceeded"
         return self.rate_limited_message, "rate_limit_exceeded", "rate_limited"
 
+    def _request_scopes(
+        self, *, agent, adapter, pr, user_email, ident, stream: bool,
+    ) -> contextlib.ExitStack:
+        """A pilha de escopos de uma request de chat, igual nos caminhos stream
+        e não stream. Ordem fixa, de fora para dentro: observe_request,
+        generation_params, user_email_scope, client_tools_scope,
+        tool_choice_scope, tool_call_cache. Se um enter falhar, o ExitStack
+        fecha os que já entraram."""
+        stack = contextlib.ExitStack()
+        with stack:
+            stack.enter_context(observe_request(
+                agent.name, user_id=ident["user_id"],
+                session_id=ident["session_id"],
+                metadata={"adapter": adapter.name, "stream": stream},
+            ))
+            stack.enter_context(generation_params(pr.params))
+            stack.enter_context(user_email_scope(user_email))
+            stack.enter_context(client_tools_scope(pr.tools))
+            stack.enter_context(tool_choice_scope(pr.tool_choice))
+            stack.enter_context(tool_call_cache())
+            return stack.pop_all()
+
     def _mount_chat(self, app, adapter, path) -> None:
         from fastapi import Request
         from starlette.responses import JSONResponse, StreamingResponse
@@ -372,14 +395,10 @@ class Server:
                         return line
 
                     try:
-                        with observe_request(
-                            agent.name, user_id=ident["user_id"],
-                            session_id=ident["session_id"],
-                            metadata={"adapter": adapter.name, "stream": True},
-                        ), generation_params(pr.params), \
-                                user_email_scope(user_email), \
-                                client_tools_scope(pr.tools), \
-                                tool_choice_scope(pr.tool_choice), tool_call_cache():
+                        with self._request_scopes(
+                            agent=agent, adapter=adapter, pr=pr,
+                            user_email=user_email, ident=ident, stream=True,
+                        ):
                             async for chunk in agent.astream(pr.messages):
                                 line = session.chunk(chunk)
                                 if line:
@@ -446,13 +465,10 @@ class Server:
             # never blocks the event loop. Request generation params are active
             # for the duration of the call via the runtime contextvar.
             try:
-                with observe_request(
-                    agent.name, user_id=ident["user_id"],
-                    session_id=ident["session_id"],
-                    metadata={"adapter": adapter.name, "stream": False},
-                ), generation_params(pr.params), user_email_scope(user_email), \
-                        client_tools_scope(pr.tools), \
-                        tool_choice_scope(pr.tool_choice), tool_call_cache():
+                with self._request_scopes(
+                    agent=agent, adapter=adapter, pr=pr,
+                    user_email=user_email, ident=ident, stream=False,
+                ):
                     message = await agent.ainvoke(pr.messages)
             except Exception as exc:
                 verdict = classify_gateway_error(exc)
