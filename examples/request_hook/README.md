@@ -51,5 +51,15 @@ curl -s -i localhost:8000/v1/chat/completions -H 'content-type: application/json
   -d '{"model":"helper","messages":[{"role":"user","content":"oi"}]}'
 ```
 
-O teste `tests/test_example_request_hook.py` roda esses três casos contra um
+## Cliente
+
+Com o servidor no ar, `client.py` manda a mesma pergunta ao agente `helper`
+com `x-tier: fast` e com `x-tier: deep` e imprime as duas respostas, cada uma
+ao lado do tier enviado (o corpo da resposta não expõe o modelo imposto):
+
+```bash
+python client.py                      # AIXON_URL opcional, padrão http://localhost:8000
+```
+
+O teste `tests/test_example_request_hook.py` roda esses três casos e o cliente contra um
 provedor fake (sem rede, sem chave).

@@ -60,3 +60,19 @@ def test_sem_usuario_e_401(client, rec_openai):
     assert "x-user header is required" in r.text
     assert "no_user" in r.text
     assert rec_openai.builds == []
+
+
+CLIENT = MAIN.with_name("client.py")
+
+
+def test_client_manda_fast_e_deep(client, rec_openai, capsys):
+    """O client do exemplo, contra o provedor fake: uma pergunta com cada tier,
+    dois modelos diferentes construídos e os dois tiers no stdout."""
+    spec = importlib.util.spec_from_file_location("example_request_hook_client", CLIENT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.main(http=client)
+    out = capsys.readouterr().out
+    assert "x-tier: fast" in out and "x-tier: deep" in out
+    assert [m for m, _ in rec_openai.builds] == ["gpt-5.4-mini", "gpt-5.4"]
