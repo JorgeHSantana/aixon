@@ -41,12 +41,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError
-from aixon.providers.base import (
-    Provider,
-    apply_resilience_defaults,
-    register_provider,
-    resolve_reasoning_spec,
-)
+from aixon.providers.base import OpenAICompatProvider, register_provider
 from aixon.runtime import current_user_email
 
 if TYPE_CHECKING:
@@ -120,44 +115,31 @@ def _identity_clients(header: str) -> dict[str, Any]:
     }
 
 
-class GatewayProvider(Provider):
+class GatewayProvider(OpenAICompatProvider):
     name = "gateway"
     env_key = "AIXON_GATEWAY_API_KEY"
-    supports_reasoning = True
     # No `supports_prediction`: Predicted Outputs is an OpenAI feature, and
     # here the gateway, not the caller, picks the model that answers.
 
-    def build(self, model: str, **params: Any) -> "BaseChatModel":
-        from langchain_openai import ChatOpenAI  # lazy import
-        from pydantic import SecretStr
+    def base_url(self) -> str:
+        return _required_env("AIXON_GATEWAY_BASE_URL")
 
-        base_url = _required_env("AIXON_GATEWAY_BASE_URL")
-        api_key = _required_env(self.env_key)
-        apply_resilience_defaults(params)
-        spec = resolve_reasoning_spec(params)
-        if spec is not None:
-            # The gateway hands the effort to whichever model it picked and is
-            # the authority on the values that model accepts: forward it as is.
-            params["reasoning_effort"] = spec["effort"]
+    def api_key(self) -> str:
+        return _required_env(self.env_key)
 
+    def extra_kwargs(self) -> dict[str, Any]:
         # An empty header name turns the forwarding off: plain SDK clients.
         header = _user_header()
-        clients = _identity_clients(header) if header else {}
-
-        # ChatOpenAI's `api_key` field is SecretStr | Callable | None, not a
-        # bare str — wrap explicitly (api_key is non-empty, see above).
-        chat = ChatOpenAI(
-            model=model,
-            api_key=SecretStr(api_key),
-            base_url=base_url,
+        return {
             # A gateway speaks Chat Completions; never let ChatOpenAI pick /responses.
-            use_responses_api=False,
+            "use_responses_api": False,
             # OPENAI_PROXY is meant for the OpenAI agents: left to the field's
             # default, ChatOpenAI reads it and refuses it next to the clients.
-            openai_proxy=None,
-            **clients,
-            **params,
-        )
+            "openai_proxy": None,
+            **(_identity_clients(header) if header else {}),
+        }
+
+    def finish(self, chat: "BaseChatModel") -> "BaseChatModel":
         # Nor do OPENAI_ORG_ID / OPENAI_ORGANIZATION / OPENAI_PROJECT_ID belong
         # to the gateway. No constructor argument keeps them out: given None,
         # ChatOpenAI and then the SDK client read them from the environment.
