@@ -28,7 +28,7 @@ def test_build_usage_counts_tokens():
 def test_build_usage_empty_when_counter_unavailable(monkeypatch):
     from aixon.server import usage as usage_mod
 
-    monkeypatch.setattr(usage_mod, "count_tokens", lambda model, text: None)
+    monkeypatch.setattr("aixon.usage.count_tokens", lambda model, text: None)
     assert usage_mod.build_usage("gpt-5.4", "a", "b") == {}
 
 
@@ -43,3 +43,22 @@ def test_non_stream_response_includes_usage():
     assert usage["prompt_tokens"] > 0
     assert usage["completion_tokens"] > 0
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_usage_nao_importa_server():
+    # Guarda estática da direção: aixon.usage é núcleo e não importa aixon.server.
+    # (Checagem por sys.modules é impossível: aixon/__init__.py importa o server.)
+    import ast
+    import pathlib
+
+    import aixon.usage
+
+    tree = ast.parse(pathlib.Path(aixon.usage.__file__).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        assert not any(n.startswith("aixon.server") for n in names), names

@@ -14,10 +14,16 @@ from aixon.logging import Logger
 _log = Logger("aixon.discovery")
 
 
+class NotAPackageError(ValueError):
+    """O nome importa, mas é um módulo e não um pacote (sem ``__path__``).
+    Exceção própria para que o CLI silencie só este caso, e não um
+    ValueError levantado dentro do módulo do usuário."""
+
+
 def autodiscover(package: str) -> None:
     pkg = importlib.import_module(package)
     if not hasattr(pkg, "__path__"):
-        raise ValueError(f"{package!r} is not a package (has no __path__).")
+        raise NotAPackageError(f"{package!r} is not a package (has no __path__).")
     _log.info(f"autodiscover: scanning package '{package}'")
     count = 0
     for module in pkgutil.iter_modules(pkg.__path__):

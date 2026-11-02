@@ -19,6 +19,8 @@ import contextvars
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
+from aixon.runtime import _reset_quietly
+
 
 class ReasoningChannel:
     """Buffers reasoning lines for one agent run."""
@@ -92,11 +94,5 @@ def reasoning_channel() -> Iterator[ReasoningChannel]:
     try:
         yield channel
     finally:
-        try:
-            _current.reset(token)
-        except ValueError:
-            # (#21) reset() raises ValueError when cleanup runs in a different
-            # Context — e.g. GC-driven finalization of an abandoned async generator
-            # after an abrupt client disconnect. The var dies with that context;
-            # swallowing here only silences the unraisable-exception log noise.
-            pass
+        # (#21) tolera a saída num Context diferente: ver runtime._reset_quietly.
+        _reset_quietly(_current, token)

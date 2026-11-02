@@ -84,6 +84,6 @@ def test_build_usage_returns_empty_without_tiktoken(monkeypatch):
     def _raise(_model):
         raise ImportError("no tiktoken")
 
-    monkeypatch.setattr(usage_mod, "_encoding", _raise)
+    monkeypatch.setattr("aixon.usage._encoding", _raise)
     assert usage_mod.count_tokens("gpt-4o-mini", "hello") is None
     assert usage_mod.build_usage("gpt-4o-mini", "prompt", "completion") == {}

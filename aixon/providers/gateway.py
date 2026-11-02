@@ -1,7 +1,7 @@
 """Gateway provider — an OpenAI-compatible gateway that imposes the model.
 
 Some deployments send every LLM call through one gateway (a LiteLLM proxy, for
-instance): the caller names a tier, the gateway picks the real model and meters
+example — the provider assumes no particular product): the caller names a tier, the gateway picks the real model and meters
 the spend per end user. It speaks the OpenAI Chat Completions contract, so this
 provider reuses langchain_openai.ChatOpenAI pointed at it. Self-registers as
 'gateway' at import time. There is no model-name inference rule: it is reached
@@ -14,8 +14,9 @@ Environment:
     AIXON_GATEWAY_BASE_URL     the gateway's OpenAI-compatible URL (required)
     AIXON_GATEWAY_API_KEY      its key (required)
     AIXON_GATEWAY_USER_HEADER  name of the header that carries the end user's
-                               e-mail (default X-OpenWebUI-User-Email); empty
-                               turns the forwarding off
+                               e-mail (default X-OpenWebUI-User-Email, kept for
+                               compatibility: Open WebUI is only an
+                               example); empty turns the forwarding off
 
 It NEVER reads OPENAI_API_KEY, OPENAI_BASE_URL or OPENAI_API_BASE: it hands
 ChatOpenAI its own key and URL, so the SDK has nothing to fill in from those.
@@ -27,6 +28,11 @@ The end user's e-mail travels as that header on every call made while
 is SENT, from the caller's context, not when the model is built: the LLM caches
 one model, and that model serves many users. Without an e-mail no header goes
 out at all; refusing such a request is the application's job, not this one's.
+
+Este é o ÚNICO provedor que lê ``current_user_email()``; nenhum outro o
+consulta, então o e-mail nunca sai do processo rumo a OpenAI, xAI, z.AI,
+Anthropic ou Google. Como viaja num header HTTP, precisa ser ASCII: e-mail
+internacionalizado não é suportado nesta versão.
 
 Both ``http_client`` and ``http_async_client`` get the hook, on purpose.
 ChatOpenAI keeps one SDK client per path (sync for invoke/stream, async for
@@ -41,12 +47,8 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from aixon.exceptions import AixonError
-from aixon.providers.base import (
-    Provider,
-    apply_resilience_defaults,
-    register_provider,
-    resolve_reasoning_spec,
-)
+from aixon.providers.base import OpenAICompatProvider, register_provider
+from aixon.providers.gateway_errors import gateway_base_url, required_env_error
 from aixon.runtime import current_user_email
 
 if TYPE_CHECKING:
@@ -67,15 +69,9 @@ def _transports() -> tuple[httpx.BaseTransport | None, httpx.AsyncBaseTransport 
 
 
 def _required_env(name: str) -> str:
-    # Stripped like classify_gateway_error() strips the URL, so the two read
-    # AIXON_GATEWAY_BASE_URL the same way.
     value = os.getenv(name, "").strip()
     if not value:
-        raise AixonError(
-            f"{name} is missing or empty. Refusing to build the gateway model — "
-            f"this provider never falls back to OPENAI_API_KEY, OPENAI_BASE_URL "
-            f"or OPENAI_API_BASE."
-        )
+        raise required_env_error(name)
     return value
 
 
@@ -120,44 +116,35 @@ def _identity_clients(header: str) -> dict[str, Any]:
     }
 
 
-class GatewayProvider(Provider):
+class GatewayProvider(OpenAICompatProvider):
     name = "gateway"
     env_key = "AIXON_GATEWAY_API_KEY"
-    supports_reasoning = True
     # No `supports_prediction`: Predicted Outputs is an OpenAI feature, and
     # here the gateway, not the caller, picks the model that answers.
 
-    def build(self, model: str, **params: Any) -> "BaseChatModel":
-        from langchain_openai import ChatOpenAI  # lazy import
-        from pydantic import SecretStr
+    def base_url(self) -> str:
+        # A mesma leitura que classify_gateway_error usa (gateway_errors).
+        url = gateway_base_url(required=True)
+        # required=True levanta quando vazia: aqui nunca é None.
+        assert url is not None
+        return url
 
-        base_url = _required_env("AIXON_GATEWAY_BASE_URL")
-        api_key = _required_env(self.env_key)
-        apply_resilience_defaults(params)
-        spec = resolve_reasoning_spec(params)
-        if spec is not None:
-            # The gateway hands the effort to whichever model it picked and is
-            # the authority on the values that model accepts: forward it as is.
-            params["reasoning_effort"] = spec["effort"]
+    def api_key(self) -> str:
+        return _required_env(self.env_key)
 
+    def extra_kwargs(self) -> dict[str, Any]:
         # An empty header name turns the forwarding off: plain SDK clients.
         header = _user_header()
-        clients = _identity_clients(header) if header else {}
-
-        # ChatOpenAI's `api_key` field is SecretStr | Callable | None, not a
-        # bare str — wrap explicitly (api_key is non-empty, see above).
-        chat = ChatOpenAI(
-            model=model,
-            api_key=SecretStr(api_key),
-            base_url=base_url,
+        return {
             # A gateway speaks Chat Completions; never let ChatOpenAI pick /responses.
-            use_responses_api=False,
+            "use_responses_api": False,
             # OPENAI_PROXY is meant for the OpenAI agents: left to the field's
             # default, ChatOpenAI reads it and refuses it next to the clients.
-            openai_proxy=None,
-            **clients,
-            **params,
-        )
+            "openai_proxy": None,
+            **(_identity_clients(header) if header else {}),
+        }
+
+    def finish(self, chat: Any) -> "BaseChatModel":
         # Nor do OPENAI_ORG_ID / OPENAI_ORGANIZATION / OPENAI_PROJECT_ID belong
         # to the gateway. No constructor argument keeps them out: given None,
         # ChatOpenAI and then the SDK client read them from the environment.

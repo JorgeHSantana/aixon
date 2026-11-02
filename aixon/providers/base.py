@@ -8,6 +8,7 @@ missing vendor SDK.
 """
 from __future__ import annotations
 
+import os
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -193,6 +194,74 @@ class Provider(ABC):
         **params are passed through (temperature, max_tokens, top_p, etc.).
         The API key is read from os.getenv(self.env_key) inside this method.
         """
+
+
+class OpenAICompatProvider(Provider):
+    """Base dos provedores que falam Chat Completions via langchain_openai.ChatOpenAI.
+
+    O fluxo de ``build`` é o mesmo para todos: base_url, chave, defaults de
+    resiliência, reasoning, ``SecretStr`` e ``ChatOpenAI(...)``. As subclasses
+    só declaram atributos e, quando preciso, sobrescrevem os ganchos.
+    """
+
+    supports_reasoning = True
+    base_url_env: str | None = None      # ex. "XAI_BASE_URL"; None = sem base_url
+    default_base_url: str | None = None  # usado quando base_url_env está vazio
+    require_key: bool = True             # False só no openai (o SDK lê a env)
+    require_key_message: str = ""        # texto do AixonError de chave ausente
+
+    def api_key(self) -> str | None:
+        """Lê ``env_key``; vazio levanta AixonError se ``require_key``."""
+        value = os.getenv(self.env_key)
+        if not value and self.require_key:
+            raise AixonError(
+                self.require_key_message or f"{self.env_key} is not set."
+            )
+        return value or None
+
+    def base_url(self) -> str | None:
+        """A URL da env ``base_url_env`` ou, na falta dela, ``default_base_url``."""
+        if self.base_url_env is None:
+            return self.default_base_url
+        return os.getenv(self.base_url_env, self.default_base_url)
+
+    def apply_reasoning(self, params: dict[str, Any], spec: dict[str, Any]) -> None:
+        """Traduz o spec de reasoning; padrão: o effort vai como está em
+        ``reasoning_effort`` (o provedor é a autoridade sobre os valores)."""
+        params["reasoning_effort"] = spec["effort"]
+
+    def extra_kwargs(self) -> dict[str, Any]:
+        """Gancho: kwargs a mais para o ChatOpenAI; padrão nenhum."""
+        return {}
+
+    def finish(self, chat: "BaseChatModel") -> "BaseChatModel":
+        """Gancho pós-construção; padrão identidade."""
+        return chat
+
+    def build(self, model: str, **params: Any) -> "BaseChatModel":
+        from langchain_openai import ChatOpenAI  # lazy import
+        from pydantic import SecretStr
+
+        base_url = self.base_url()
+        api_key = self.api_key()
+        apply_resilience_defaults(params)
+        spec = resolve_reasoning_spec(params)
+        if spec is not None:
+            self.apply_reasoning(params, spec)
+
+        # O campo `api_key` do ChatOpenAI é SecretStr | Callable | None, não
+        # str. Sem chave (só no openai) nada vai: o SDK lê OPENAI_API_KEY.
+        kwargs: dict[str, Any] = {"model": model}
+        if api_key and not self.require_key:
+            # openai (0.1.28): a chave da env sobrescreve um api_key do chamador.
+            params["api_key"] = SecretStr(api_key)
+        elif api_key:
+            # Os demais passam a chave ao lado de **params: um api_key do
+            # chamador dá TypeError, como antes.
+            kwargs["api_key"] = SecretStr(api_key)
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        return self.finish(ChatOpenAI(**kwargs, **self.extra_kwargs(), **params))
 
 
 # ---------------------------------------------------------------------------

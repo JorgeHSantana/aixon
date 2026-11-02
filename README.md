@@ -337,6 +337,13 @@ response = client.chat.completions.create(
 
 See [docs/server.md](docs/server.md) for Anthropic adapter, auth, and SSE streaming.
 
+`Server(request_hook=...)` lets the application decide, per request, the imposed
+model, the user's identity and whether to refuse the call — see
+[Per-request context](docs/server.md#per-request-context-request_hook) and
+[examples/request_hook](examples/request_hook). The hook is a plain function or,
+since 0.1.30, a subclass of `RequestHook` (`check` → `identity` → `imposition`),
+with `HeaderIdentityHook` and `ChainRequestHook` ready-made.
+
 Behind an OpenAI-compatible gateway (the `gateway` provider, see
 [docs/agents.md](docs/agents.md#llm--declaring-a-language-model)), a spent
 budget or a rate limit reaches the user as a readable message instead of a
@@ -398,6 +405,7 @@ never registered.
 - [Example: Reflective Review](examples/reflective_review) — the `ReflectiveAgent` loop, runnable offline
 - [Example: Tracing](examples/tracing) — the execution tree a tracer captures, runnable offline
 - [Example: Langfuse](examples/langfuse) — the first-class integration, offline demo or real traces
+- [Example: request_hook](examples/request_hook) — per-request model, identity and refusal from headers, the hook as a `HeaderIdentityHook` subclass
 
 ---
 

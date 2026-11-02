@@ -5,7 +5,7 @@ Commands
 list    List registered agents.
 chat    Interactive chat with an agent (in-process or remote).
 new     Scaffold a consumer project.
-serve   Start the aixon server (delegates to Plan 5 Server).
+serve   Start the aixon server (OpenAI dialect at /v1; --anthropic adds /anthropic).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import click
 
 from aixon import __version__
-from aixon.discovery import autodiscover
+from aixon.discovery import NotAPackageError, autodiscover
 from aixon.registry import get_registry
 
 if TYPE_CHECKING:
@@ -50,10 +50,12 @@ def _autodiscover_quietly(package: str) -> None:
         if name and (package == name or package.startswith(name + ".")):
             return  # graceful: no agents package in this directory
         click.echo(f"Warning: error importing agents from '{package}': {exc}", err=True)
-    except ImportError as exc:
-        click.echo(f"Warning: error importing agents from '{package}': {exc}", err=True)
-    except ValueError:
+    except NotAPackageError:
         pass  # graceful: name exists but is not a package
+    except (ImportError, ValueError) as exc:
+        # ValueError aqui vem do módulo do usuário (ex.: validação de LLM(...))
+        # e recebe o mesmo diagnóstico de um ImportError.
+        click.echo(f"Warning: error importing agents from '{package}': {exc}", err=True)
 
 # ---------------------------------------------------------------------------
 # OpenAI — module-level import so tests can patch aixon.cli.OpenAI
@@ -148,26 +150,48 @@ def _pick_agent() -> "Agent | None":
     click.echo("  0. Exit")
     click.echo()
 
+    idx = _prompt_choice(len(agents))
+    return None if idx is None else agents[idx]
+
+
+def _prompt_choice(n: int) -> int | None:
+    """Pede a escolha numérica de um menu de ``n`` itens (1..n). Devolve o
+    índice base 0, ou None quando o usuário digita '0' (sair). Entrada
+    inválida repete o prompt."""
     while True:
         raw = click.prompt("Choose", default="1")
         if raw.strip() == "0":
             return None
         try:
             idx = int(raw.strip()) - 1
-            if 0 <= idx < len(agents):
-                return agents[idx]
+            if 0 <= idx < n:
+                return idx
         except ValueError:
             pass
         click.echo("Invalid choice, try again.")
 
 
-def _stream_inprocess(agent: "Agent", messages: list) -> str | None:
-    """Stream agent.stream(messages) to the terminal and RETURN the assistant
-    content collected from the stream, or None when the turn errored.
+def _discard_failed_turn(messages: list, exc: BaseException | None) -> None:
+    """Descarta o turno que falhou: reporta ``exc`` em stderr (quando houver)
+    e remove o 'user' recém-apendado, para que o próximo turno não mande dois
+    'user' seguidos. Aceita ``Message`` (in-process) ou dict (remoto)."""
+    if exc is not None:
+        click.echo(f"\nError: {exc}", err=True)
+    if messages:
+        last = messages[-1]
+        role = last["role"] if isinstance(last, dict) else last.role
+        if role == "user":
+            messages.pop()
 
-    Returning the streamed content (rather than re-running the agent via
-    invoke() to build the history message) means the saved history is exactly
-    what the user saw, and each turn costs ONE inference call, not two."""
+
+def _stream_inprocess(agent: "Agent", messages: list) -> tuple[str | None, Exception | None]:
+    """Só renderiza ``agent.stream(messages)`` no terminal; não mexe em
+    ``messages``. Devolve ``(conteúdo, None)`` no sucesso (ou no Ctrl+C, com o
+    parcial exibido) e ``(None, exc)`` quando o turno falhou.
+
+    Devolver o conteúdo do stream (em vez de reexecutar o agente via
+    invoke()) faz o histórico ser exatamente o que o usuário viu, com UMA
+    inferência por turno."""
     parts: list[str] = []
     try:
         for chunk in agent.stream(messages):
@@ -181,18 +205,10 @@ def _stream_inprocess(agent: "Agent", messages: list) -> str | None:
     except KeyboardInterrupt:
         click.echo()  # ensure newline after interrupted output
     except Exception as exc:
-        # A provider error must not crash the CLI and lose the conversation —
-        # report it and return to the prompt (same pattern as remote mode).
-        click.echo(f"\nError: {exc}", err=True)
-        # The turn's 'user' message was already appended before this call —
-        # drop it so a retry does not send two consecutive 'user' messages.
-        if messages and messages[-1].role == "user":
-            messages.pop()
-        # None, NOT the partial parts: the caller must not append an
-        # assistant message built from truncated error output — especially
-        # now that its matching user turn was just popped.
-        return None
-    return "".join(parts)
+        # Erro de provedor não derruba o CLI: o chamador reporta e descarta
+        # o turno. Sem o parcial: não se apenda resposta truncada por erro.
+        return None, exc
+    return "".join(parts), None
 
 
 def _chat_inprocess(package: str) -> None:
@@ -242,13 +258,14 @@ def _chat_inprocess(package: str) -> None:
         # the history message from what was just displayed — never re-invoke
         # the agent (a second call would double cost/latency and could diverge
         # from the shown output under temperature > 0).
-        content = _stream_inprocess(agent, messages)
-        # None means the turn errored (the matching user message was already
-        # popped by _stream_inprocess) — NOT the same as "" (a successful turn
-        # that simply produced no content). Conflating them via `if content:`
-        # left an empty successful turn with no assistant reply appended, so
-        # the NEXT user message became a second consecutive 'user' entry.
-        if content is not None:
+        content, exc = _stream_inprocess(agent, messages)
+        # Erro: descarta o turno (pop do 'user'). Sucesso, mesmo vazio (""),
+        # apenda o assistant: tratar "" como falha deixava dois 'user' seguidos.
+        if exc is not None:
+            _discard_failed_turn(messages, exc)
+        else:
+            # Sem erro, _stream_inprocess sempre devolve str (talvez "").
+            assert content is not None
             messages.append(Message(role="assistant", content=content))
 
 
@@ -287,18 +304,10 @@ def _chat_remote(url: str) -> None:
             click.echo(f"  {i}. {name}")
         click.echo("  0. Exit\n")
 
-        while True:
-            raw = click.prompt("Choose", default="1")
-            if raw.strip() == "0":
-                return
-            try:
-                idx = int(raw.strip()) - 1
-                if 0 <= idx < len(remote_agents):
-                    chosen_model = remote_agents[idx]
-                    break
-            except ValueError:
-                pass
-            click.echo("Invalid choice, try again.")
+        idx = _prompt_choice(len(remote_agents))
+        if idx is None:
+            return
+        chosen_model = remote_agents[idx]
 
         messages: list["ChatCompletionMessageParam"] = []
         back_to_menu = False
@@ -339,12 +348,11 @@ def _chat_remote(url: str) -> None:
                 messages.append({"role": "assistant", "content": "".join(collected)})
             except KeyboardInterrupt:
                 click.echo()
+                # Interrompido sem resposta apendada: descarta o 'user' do
+                # turno, senão o próximo manda dois 'user' seguidos.
+                _discard_failed_turn(messages, None)
             except Exception as exc:
-                click.echo(f"\nError: {exc}", err=True)
-                # Drop the just-appended 'user' message — a retry must not
-                # send two consecutive 'user' messages to the server.
-                if messages and messages[-1]["role"] == "user":
-                    messages.pop()
+                _discard_failed_turn(messages, exc)
 
 
 # ---------------------------------------------------------------------------

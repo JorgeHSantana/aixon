@@ -4,3 +4,25 @@ Public surface lands incrementally across this plan's tasks. The neutral
 protocol seam (ParsedRequest, ProtocolAdapter) is import-safe with no server
 deps; the concrete adapters and Server require the ``server`` extra
 (``pip install aixon[server]``)."""
+
+from aixon.server.context import (
+    ChainRequestHook,
+    HeaderIdentityHook,
+    Identity,
+    RequestContext,
+    RequestDecision,
+    RequestHook,
+    RequestHookLike,
+    make_context,
+)
+
+__all__ = [
+    "ChainRequestHook",
+    "HeaderIdentityHook",
+    "Identity",
+    "RequestContext",
+    "RequestDecision",
+    "RequestHook",
+    "RequestHookLike",
+    "make_context",
+]

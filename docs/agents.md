@@ -337,6 +337,19 @@ de um `Orchestrator` — constrói esse modelo pelo provedor imposto, no lugar d
 que declarou. Os padrões preservam o comportamento de antes: `impose_model =
 False` e um `LLM` fora de qualquer escopo não mudam em nada.
 
+**Quem decide: a classe ou o servidor.** Desde a 0.1.29 há dois impositores.
+A **classe** decide com `impose_model = True`: o modelo é o do `llm` dela, para
+toda request. O **servidor** decide por request, com o `request_hook` do
+`Server` devolvendo `RequestDecision(impose=(modelo, provedor))` (veja
+[server.md](server.md#per-request-context-request_hook)): o modelo depende de
+quem pede, e o agente não precisa declarar nada. Os dois publicam o mesmo
+escopo; `aixon.runtime.current_imposed_by()` diz quem o abriu (`"agent"` ou
+`"server"`, e `imposed_model_scope(..., by=)` o grava). Como o escopo de fora
+vale, o servidor vence a classe: um agente com `impose_model = True` sob um
+modelo imposto pelo servidor não abre o dele. Sob o servidor, o `LLM` de um
+agente que nunca pediu imposição perde os kwargs não portáveis, e o
+`request_chat_model` loga um WARNING por (LLM, modelo imposto) nomeando-os.
+
 - **Validação.** `impose_model` tem de ser `bool`, e `True` exige um `llm` de
   classe do tipo `LLM` (aquele de onde sai o modelo imposto). As duas coisas são
   checadas na definição da classe e levantam `AixonError` antes do registro.
@@ -397,7 +410,19 @@ False` e um `LLM` fora de qualquer escopo não mudam em nada.
   funcionam. As tasks do asyncio e as threads que copiam o contexto (veja os
   limites) iniciadas durante um passo herdam o escopo: é assim que o grafo e as
   tools o recebem.
-- **Limites.**
+- **Limites.** Em resumo:
+
+  | Caso | Sob modelo imposto |
+  |---|---|
+  | `Embedding` | não coberto: usa o provedor e a chave dele |
+  | `MCPToolset._discover` no loop do `Server` | thread sem `copy_context`; só `tools/list`, sem LLM |
+  | entry point ou `impose_model` atribuídos depois da classe | não embrulhados: rodam fora do escopo, em silêncio |
+  | introspecção dos entry points de quem impõe | `iscoroutinefunction`/`isasyncgenfunction`/`isgeneratorfunction` dão `False` |
+  | `threading.Thread`, `run_in_executor`, `ThreadPoolExecutor.submit` | perdem o modelo imposto e o e-mail, sem erro |
+  | `llm.chat_model` lido direto | levanta `ImposedModelViolation` (classe ou servidor) |
+  | kwargs não portáveis (`reasoning`, `timeout`...) | descartados; WARNING na definição (classe) ou no build (servidor) |
+
+  Em detalhe:
   - O `Embedding` não é coberto: ele não passa pelo `LLM`, então um
     `OpenAIEmbedding` continua usando o provedor e a chave dele sob um modelo
     imposto.

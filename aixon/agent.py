@@ -57,28 +57,6 @@ def _client_tool_leak_text(name: str, tool_calls: list[dict]) -> str:
     )
 
 
-def _timeout_texts(agent: "Agent") -> set[str]:
-    """Candidate strings that mean "this agent gave up on its OWN deadline,
-    not a real answer" (#19 pass-through content), for the given *agent*.
-
-    A plain ``ToolAgent`` exposes ``timeout_message``/``max_execution_time``
-    directly. A ``ReflectiveAgent`` does not declare these itself — its
-    ``stream``/``astream`` pass a timed-out WORKER's content straight through
-    unchanged (``_is_worker_timeout_answer`` in ``aixon/agents/reflective.py``)
-    — so its ``_worker`` (when present) is checked too. Returns an empty set
-    when neither the agent nor its worker exposes both attributes (e.g. a
-    bare ``Agent`` test double, or a worker that isn't a ``ToolAgent``)."""
-    texts: set[str] = set()
-    for candidate in (agent, getattr(agent, "_worker", None)):
-        if candidate is None:
-            continue
-        tm = getattr(candidate, "timeout_message", None)
-        seconds = getattr(candidate, "max_execution_time", None)
-        if tm is not None and seconds is not None:
-            texts.add(tm.format(seconds=seconds))
-    return texts
-
-
 def _tool_call_names(tool_calls: list[dict]) -> str:
     """Sorted, comma-joined tool names out of a list of raw tool_call dicts
     (each either a dict or an object with a ``.name``) — shared by the
@@ -103,8 +81,8 @@ def _default_render_input(kwargs: dict) -> str:
 
 @dataclass
 class AgentTool:
-    """Neutral descriptor of an Agent exposed as a callable tool. Later plans
-    adapt this to a LangChain StructuredTool for tool-calling agents."""
+    """Neutral descriptor of an Agent exposed as a callable tool.
+    ``aixon.tools.coerce_tools`` adapta isto a um StructuredTool."""
 
     name: str
     description: str
@@ -166,7 +144,7 @@ def _step_scope(agent: "Agent") -> Callable[[], AbstractContextManager[Any]]:
     if current_imposed_model() is not None:
         return nullcontext
     llm: Any = getattr(agent, "llm")  # a class-level LLM: checked at class definition
-    model, provider = llm.model, llm._provider().name
+    model, provider = llm.imposition()
     return lambda: imposed_model_scope(model, provider)
 
 
@@ -180,12 +158,18 @@ async def _ainvoke_imposing(fn: Callable[..., Any], agent: "Agent", args: tuple,
         return await fn(agent, *args, **kwargs)
 
 
-def _stream_imposing(
-    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
-) -> Iterator[Chunk]:
-    scope = _step_scope(agent)
+StepScope = Callable[[], AbstractContextManager[Any]]
+
+
+def _stream_in_steps(make: Callable[[], Any],
+                     resolve: Callable[[], StepScope]) -> Iterator[Chunk]:
+    """Itera ``make()`` abrindo o escopo de ``resolve()`` em volta de cada passo
+    (criação, cada ``next`` e o ``close``), nunca em volta de um ``yield``: o
+    consumidor nunca vê o escopo, nem se abandonar o gerador sem fechá-lo.
+    ``resolve`` roda no primeiro passo, no contexto em que o run executa."""
+    scope = resolve()
     with scope():  # creating the iterator may already run code (not a generator function)
-        inner = iter(fn(agent, *args, **kwargs))
+        inner = iter(make())
     try:
         while True:
             with scope():
@@ -201,12 +185,12 @@ def _stream_imposing(
                 close()
 
 
-async def _astream_imposing(
-    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
-) -> AsyncIterator[Chunk]:
-    scope = _step_scope(agent)
+async def _astream_in_steps(make: Callable[[], Any],
+                            resolve: Callable[[], StepScope]) -> AsyncIterator[Chunk]:
+    """Gêmeo async de ``_stream_in_steps``."""
+    scope = resolve()
     with scope():
-        inner = fn(agent, *args, **kwargs).__aiter__()
+        inner = make().__aiter__()
     try:
         while True:
             with scope():
@@ -220,6 +204,20 @@ async def _astream_imposing(
         if aclose is not None:
             with scope():
                 await aclose()
+
+
+def _stream_imposing(
+    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
+) -> Iterator[Chunk]:
+    return _stream_in_steps(lambda: fn(agent, *args, **kwargs),
+                            lambda: _step_scope(agent))
+
+
+def _astream_imposing(
+    fn: Callable[..., Any], agent: "Agent", args: tuple, kwargs: dict
+) -> AsyncIterator[Chunk]:
+    return _astream_in_steps(lambda: fn(agent, *args, **kwargs),
+                             lambda: _step_scope(agent))
 
 
 _IMPOSING_RUNNERS: dict[str, Callable[..., Any]] = {
@@ -305,17 +303,9 @@ def _warn_about_lost_settings(cls: type["Agent"], llm: "LLM") -> None:
     """Under its own scope the imposer's ``llm`` is one more LLM of the tree:
     it gets only the portable generation params, like every other. Name, at
     class definition, what it declares that will not reach the imposed model."""
-    if llm.pinned:
-        return
-    from aixon.runtime import _PARAM_ALIASES, PORTABLE_PARAMS
-
-    lost = sorted(
-        k for k, v in llm.params.items()
-        if v is not None and _PARAM_ALIASES.get(k, k) not in PORTABLE_PARAMS
-    )
-    if llm.reasoning is not None and llm.reasoning is not False:
-        lost.insert(0, "reasoning")
+    lost = llm.settings_lost_under_imposition()
     if lost:
+        llm._warned_at_definition = True
         _log.warning(
             "'%s' sets impose_model=True: in its own calls its LLM('%s') gets "
             "only the portable generation params, like every LLM of the tree, "
@@ -451,7 +441,14 @@ class Agent(ABC):
         completion. ``stream()``'s contract is ``Iterator[Chunk]``, not
         ``Generator``, so plain iterators (no ``close()``) are accepted too;
         the done sentinel is always enqueued, even if ``close()`` raises or
-        ``stream()`` itself raises before returning."""
+        ``stream()`` itself raises before returning.
+
+        Limite do cancelamento: a ponte não cancela o produtor. Ao parar,
+        ``aclose()`` espera (``await fut``) o produtor chegar ao PRÓXIMO chunk;
+        se ``stream()`` está bloqueado numa chamada longa (tool/LLM), o
+        consumidor fica preso pelo mesmo tempo. Os agentes embutidos (LLMAgent,
+        ToolAgent, Orchestrator, ReflectiveAgent) sobrescrevem este método; só
+        Agents puramente síncronos caem aqui."""
         import asyncio
         import contextvars
         import threading
@@ -496,6 +493,99 @@ class Agent(ABC):
             stop.set()
             await fut
 
+    # ----- guarda de ciclo de composição (walk único, Orchestrator e Reflective) -----
+
+    @classmethod
+    def _referenced_agent_classes(cls) -> list[type]:
+        """Classes de Agent que esta classe compõe. Base: nenhuma; cada subtipo
+        que compõe (Orchestrator, ReflectiveAgent) define só isto."""
+        return []
+
+    @classmethod
+    def _check_composition_cycle(cls) -> None:
+        """Busca em profundidade pelas ``_referenced_agent_classes``; uma classe
+        que reaparece no caminho atual fecha um ciclo → ``CompositionCycleError``."""
+        from aixon.exceptions import CompositionCycleError
+
+        path: list[type] = []
+
+        def walk(node_cls: type) -> None:
+            if node_cls in path:
+                chain = " -> ".join(c.__name__ for c in path + [node_cls])
+                raise CompositionCycleError(
+                    f"Composition cycle detected: {chain}. An agent cannot "
+                    f"(transitively) include itself as a worker/node/tool. "
+                    f"Break the cycle by removing one of the references."
+                )
+            path.append(node_cls)
+            neighbors = getattr(node_cls, "_referenced_agent_classes", None)
+            if callable(neighbors):
+                # Chama o `neighbors` já buscado e conferido: `node_cls` é um
+                # `type` qualquer aqui (qualquer classe pode ser nó/tool), e o
+                # acesso direto ao atributo não passaria no type-check.
+                for nxt in neighbors():
+                    walk(nxt)
+            path.pop()
+
+        walk(cls)
+
+    def timeout_texts(self) -> set[str]:
+        """Textos que significam "este agente desistiu pelo SEU próprio prazo",
+        não uma resposta (o conteúdo de passagem do #19). Base: nenhum.
+        ``ToolAgent`` devolve o seu ``timeout_message`` formatado;
+        ``ReflectiveAgent`` delega ao worker, cujo timeout ele repassa intacto.
+        ``as_tool`` usa isto para transformar esse conteúdo em ``AixonError``.
+
+        Base: um agente que declare ``timeout_message`` e
+        ``max_execution_time`` (o contrato do ToolAgent, também usado por
+        agentes de teste com esse formato) devolve o texto formatado; os
+        demais, nenhum."""
+        tm = getattr(self, "timeout_message", None)
+        seconds = getattr(self, "max_execution_time", None)
+        if tm is None or seconds is None:
+            return set()
+        return {tm.format(seconds=seconds)}
+
+    def _finish_tool_run(self, parts: list[str], tool_calls: list[dict], via: str) -> str:
+        """Pós-processamento comum a ``_drive_sync``/``_drive_async`` de
+        ``as_tool``: junta o conteúdo, avisa do descarte de tool_calls, levanta
+        no timeout de passagem e cai no texto de vazamento de client tools.
+        *via* ("stream()"/"astream()") só nomeia o caminho no aviso."""
+        content = "".join(parts)
+        if content and tool_calls:
+            # Invariant (sweep-0123 item 2): a built-in stream() is not
+            # expected to yield BOTH content and tool_calls in the same
+            # run — but if a custom/future one does, `tool_calls` is
+            # silently dropped below (the caller only ever sees `content`
+            # returned as a string; there is no channel to relay
+            # tool_calls back through as_tool). Warn so the drop is
+            # visible in telemetry instead of a silent data loss.
+            _log.warning(
+                f"as_tool('{self.name}'): discarding tool_calls "
+                f"({_tool_call_names(tool_calls)}) — {via} produced "
+                f"content alongside tool_calls in the same run"
+            )
+        if content and content in self.timeout_texts():
+            # (#22 follow-up / sweep-0123 item 1) `content` is the
+            # wrapped agent's OWN #19 timeout pass-through, not a real
+            # answer — before #22 drove as_tool() through invoke()/
+            # ainvoke(), the same timeout raised AixonError here, and the
+            # parent's tool-call shield (#9) turned it into a visible
+            # TOOL ERROR. Since #22 switched to stream()/astream(), that
+            # AixonError was replaced by ordinary CONTENT (the #19
+            # pass-through exists so a DIRECT stream() call never dies
+            # mute) — which as_tool() then handed the parent model as a
+            # normal, trustworthy tool result. A failure must never look
+            # like a legitimate response reaching the caller as fact, so
+            # raise here too, restoring the pre-#22 semantics.
+            raise AixonError(
+                f"subagente '{self.name}' excedeu o tempo limite antes "
+                f"de responder"
+            )
+        if tool_calls and not content:
+            return _client_tool_leak_text(self.name, tool_calls)
+        return content
+
     def as_tool(
         self, name: str | None = None, description: str | None = None,
         memoize: bool = True, audience: str = "human",
@@ -528,7 +618,7 @@ class Agent(ABC):
         blows its OWN ``max_execution_time`` with nothing accumulated emits
         its ``timeout_message`` as CONTENT instead of dying mute (#19); left
         alone, that content would reach the caller as an ordinary, trustworthy
-        tool result. ``_timeout_texts`` detects it (byte-matching the wrapped
+        tool result. ``timeout_texts()`` detects it (byte-matching the wrapped
         agent's own formatted ``timeout_message``, or its ``_worker``'s for a
         ``ReflectiveAgent`` pass-through) and raises ``AixonError`` instead,
         so the caller's tool-call shield (#9) turns it into a ``TOOL ERROR`` —
@@ -586,40 +676,7 @@ class Agent(ABC):
                     parts.append(ch.content)
                 if ch.tool_calls:
                     tool_calls.extend(ch.tool_calls)
-            content = "".join(parts)
-            if content and tool_calls:
-                # Invariant (sweep-0123 item 2): a built-in stream() is not
-                # expected to yield BOTH content and tool_calls in the same
-                # run — but if a custom/future one does, `tool_calls` is
-                # silently dropped below (the caller only ever sees `content`
-                # returned as a string; there is no channel to relay
-                # tool_calls back through as_tool). Warn so the drop is
-                # visible in telemetry instead of a silent data loss.
-                _log.warning(
-                    f"as_tool('{self.name}'): discarding tool_calls "
-                    f"({_tool_call_names(tool_calls)}) — stream() produced "
-                    f"content alongside tool_calls in the same run"
-                )
-            if content and content in _timeout_texts(self):
-                # (#22 follow-up / sweep-0123 item 1) `content` is the
-                # wrapped agent's OWN #19 timeout pass-through, not a real
-                # answer — before #22 drove as_tool() through invoke()/
-                # ainvoke(), the same timeout raised AixonError here, and the
-                # parent's tool-call shield (#9) turned it into a visible
-                # TOOL ERROR. Since #22 switched to stream()/astream(), that
-                # AixonError was replaced by ordinary CONTENT (the #19
-                # pass-through exists so a DIRECT stream() call never dies
-                # mute) — which as_tool() then handed the parent model as a
-                # normal, trustworthy tool result. A failure must never look
-                # like a legitimate response reaching the caller as fact, so
-                # raise here too, restoring the pre-#22 semantics.
-                raise AixonError(
-                    f"subagente '{self.name}' excedeu o tempo limite antes "
-                    f"de responder"
-                )
-            if tool_calls and not content:
-                return _client_tool_leak_text(self.name, tool_calls)
-            return content
+            return self._finish_tool_run(parts, tool_calls, "stream()")
 
         async def _drive_async(text: str) -> str:
             # Same capture-before-iterating rule as _drive_sync — see its comment.
@@ -633,24 +690,7 @@ class Agent(ABC):
                     parts.append(ch.content)
                 if ch.tool_calls:
                     tool_calls.extend(ch.tool_calls)
-            content = "".join(parts)
-            if content and tool_calls:
-                # See _drive_sync's twin comment (sweep-0123 item 2).
-                _log.warning(
-                    f"as_tool('{self.name}'): discarding tool_calls "
-                    f"({_tool_call_names(tool_calls)}) — astream() produced "
-                    f"content alongside tool_calls in the same run"
-                )
-            if content and content in _timeout_texts(self):
-                # See _drive_sync's twin comment (#22 follow-up / sweep-0123
-                # item 1) — same fix, async path.
-                raise AixonError(
-                    f"subagente '{self.name}' excedeu o tempo limite antes "
-                    f"de responder"
-                )
-            if tool_calls and not content:
-                return _client_tool_leak_text(self.name, tool_calls)
-            return content
+            return self._finish_tool_run(parts, tool_calls, "astream()")
 
         # Two DISTINCT closures per sync/async path (not one `*args`-sniffing
         # func): StructuredTool.from_function infers the LLM-facing signature
@@ -693,3 +733,19 @@ class Agent(ABC):
             memoize=memoize,
             args_schema=args_schema,
         )
+
+
+def instantiate(agent: Any) -> Agent:
+    """Aceita uma subclasse OU uma instância de Agent e devolve a instância.
+
+    Uma classe resolve para o singleton registrado; se ela não estiver no
+    registry, constrói uma nova. Qualquer outro erro do registry sobe."""
+    if isinstance(agent, type):
+        from aixon.exceptions import AgentNotFoundError
+
+        name = getattr(agent, "name", "") or agent.__name__.lower()
+        try:
+            return get_registry().resolve(name)
+        except AgentNotFoundError:
+            return agent()
+    return agent

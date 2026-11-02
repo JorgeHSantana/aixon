@@ -7,51 +7,18 @@ langchain-openai is not installed; only build() will fail in that case.
 """
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING, Any
-
-from aixon.providers.base import (
-    Provider,
-    apply_resilience_defaults,
-    register_provider,
-    resolve_reasoning_spec,
-)
-
-if TYPE_CHECKING:
-    from langchain_core.language_models.chat_models import BaseChatModel
+from aixon.providers.base import OpenAICompatProvider, register_provider
 
 
-class OpenAIProvider(Provider):
+class OpenAIProvider(OpenAICompatProvider):
     name = "openai"
     env_key = "OPENAI_API_KEY"
-    supports_reasoning = True
+    # Sem chave, nada é passado: o SDK lê OPENAI_API_KEY sozinho.
+    require_key = False
     # Predicted Outputs (#6): LLM._invoke_kwargs attaches the previous
     # attempt's text as `prediction` on ReflectiveAgent retries. OpenAI-only
     # feature; providers without this flag never see the kwarg.
     supports_prediction = True
-
-    def build(self, model: str, **params: Any) -> "BaseChatModel":
-        from langchain_openai import ChatOpenAI  # lazy import
-        from pydantic import SecretStr
-
-        api_key = os.getenv(self.env_key)
-        apply_resilience_defaults(params)
-
-        spec = resolve_reasoning_spec(params)
-        if spec is not None:
-            # ChatOpenAI's own `reasoning_effort` constructor kwarg (verified
-            # on the installed langchain-openai) takes the effort string
-            # directly — OpenAI has no separate budget_tokens dial.
-            params["reasoning_effort"] = spec["effort"]
-
-        # ChatOpenAI's `api_key` field accepts SecretStr | Callable | None, not
-        # a bare str (pydantic coerces at runtime, but the static field type
-        # rejects it). None IS accepted and falls back to the SDK's own
-        # OPENAI_API_KEY env read (same var as `env_key`), so only wrap when
-        # a value is actually present.
-        if api_key:
-            params["api_key"] = SecretStr(api_key)
-        return ChatOpenAI(model=model, **params)
 
 
 register_provider(OpenAIProvider())

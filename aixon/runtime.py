@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextvars
 import copy
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Literal
 
 # Wire params we forward to the provider. Everything else in the request body
 # (thought_stream_mode, stream_options, user, n, ...) is NOT a generation knob.
@@ -46,6 +46,34 @@ _PARAM_ALIASES = {
     "stop_sequences": "stop",               # Anthropic dialect
 }
 
+def normalize_param_aliases(params: dict) -> dict:
+    """Cópia de *params* com cada grafia de dialeto trocada pela canônica.
+
+    O valor do alias só entra quando a chave canônica falta ou é None (a
+    canônica vence), e um alias None é descartado. A entrada não é mutada.
+    Regra única usada por ``generation_params``, ``LLM.request_chat_model`` e
+    ``LLM.settings_lost_under_imposition``."""
+    out = {k: v for k, v in params.items() if k not in _PARAM_ALIASES}
+    for alias, canonical in _PARAM_ALIASES.items():
+        value = params.get(alias)
+        if value is not None and out.get(canonical) is None:
+            out[canonical] = value
+    return out
+
+
+def _reset_quietly(var: contextvars.ContextVar, token: contextvars.Token) -> None:
+    """``var.reset(token)`` que tolera a saída num Context diferente (#21).
+
+    ``reset()`` levanta ValueError quando a limpeza roda em outro Context, por
+    exemplo na finalização por GC de um async generator abandonado depois de
+    uma desconexão abrupta do cliente. A variável morre com aquele Context;
+    engolir aqui só cala o log de exceção não levantável."""
+    try:
+        var.reset(token)
+    except ValueError:
+        pass
+
+
 # default=None (not a mutable {}) so no shared dict can leak across contexts.
 _gen_params: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "aixon_generation_params", default=None
@@ -64,17 +92,15 @@ def current_generation_params() -> dict:
 @contextmanager
 def generation_params(params: dict | None) -> Iterator[dict]:
     """Activate allow-listed generation params for the duration of the block."""
-    raw = params or {}
+    raw = normalize_param_aliases(params or {})
     filtered = {k: v for k, v in raw.items() if k in GENERATION_PARAMS and v is not None}
-    for alias, canonical in _PARAM_ALIASES.items():
-        value = raw.get(alias)
-        if value is not None and canonical not in filtered:
-            filtered[canonical] = value
     token = _gen_params.set(filtered)
     try:
-        yield filtered
+        # Uma cópia, como current_generation_params(): mutar o valor do
+        # `with ... as p` não altera o estado guardado na ContextVar.
+        yield dict(filtered)
     finally:
-        _gen_params.reset(token)
+        _reset_quietly(_gen_params, token)
 
 
 # Tool definitions the CLIENT declared on the request (agentic clients bring
@@ -106,9 +132,11 @@ def client_tools_scope(tools: list[dict] | None) -> Iterator[list[dict]]:
     value = copy.deepcopy([t for t in tools if isinstance(t, dict)]) if tools else None
     token = _client_tools.set(value)
     try:
-        yield value or []
+        # Cópia profunda, como current_client_tools(): o bloco `with` não
+        # recebe o objeto guardado na ContextVar.
+        yield copy.deepcopy(value) if value else []
     finally:
-        _client_tools.reset(token)
+        _reset_quietly(_client_tools, token)
 
 
 # tool_choice of the client (#18a): published per request alongside
@@ -136,7 +164,7 @@ def tool_choice_scope(value) -> Iterator:
     try:
         yield value
     finally:
-        _tool_choice.reset(token)
+        _reset_quietly(_tool_choice, token)
 
 
 # Predicted output (#6): the previous attempt's full text, published by the
@@ -161,15 +189,12 @@ def prediction_scope(text: str | None) -> Iterator[str | None]:
     try:
         yield text or None
     finally:
-        _prediction.reset(token)
+        _reset_quietly(_prediction, token)
 
 
 # The e-mail of the end user the current call acts for, published around the
-# agent call by whoever serves the request. ONLY the `gateway` provider reads
-# it, via current_user_email(), to tell the gateway whom the call is for (spend
-# and limits are then per person, not per shared key). No other provider looks
-# at it, so the e-mail never leaves the process towards OpenAI, xAI, z.AI,
-# Anthropic or Google.
+# agent call by whoever serves the request. Quem o lê e como ele sai do
+# processo é assunto de quem lê (ver aixon.providers.gateway).
 _user_email: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "aixon_user_email", default=None
 )
@@ -187,8 +212,7 @@ def user_email_scope(email: str | None) -> Iterator[str | None]:
     The e-mail is stripped and a blank one becomes None, so readers never
     tell "" from absent. On exit the previous value comes back.
 
-    It travels as an HTTP header, so it must be ASCII: an internationalized
-    e-mail address is not supported in this version. Like any ContextVar
+    Like any ContextVar
     scope, it is seen only by what runs in this context (asyncio tasks and
     ``asyncio.to_thread`` copy it; a bare thread does not), and a scope held
     across a ``yield`` is also seen by the generator's consumer between two
@@ -198,13 +222,7 @@ def user_email_scope(email: str | None) -> Iterator[str | None]:
     try:
         yield value
     finally:
-        try:
-            _user_email.reset(token)
-        except ValueError:
-            # (#21) Same as reasoning_channel(): reset() raises ValueError when
-            # cleanup runs in a different Context (GC-driven finalization of
-            # an abandoned async generator). The var dies with that context.
-            pass
+        _reset_quietly(_user_email, token)
 
 
 # The model imposed on the current call, as a (model, provider) pair, published
@@ -217,28 +235,42 @@ _imposed_model: contextvars.ContextVar[tuple[str, str] | None] = contextvars.Con
 )
 
 
+# Quem abriu o escopo imposto ativo: "agent" (classe com impose_model=True, que
+# já avisou dos kwargs perdidos na definição) ou "server" (request_hook). Setado
+# e restaurado junto com _imposed_model.
+_imposed_by: contextvars.ContextVar[Literal["agent", "server"] | None] = contextvars.ContextVar(
+    "aixon_imposed_by", default=None
+)
+
+
 def current_imposed_model() -> tuple[str, str] | None:
     """The ``(model, provider)`` imposed on this context, or None."""
     return _imposed_model.get()
 
 
+def current_imposed_by() -> Literal["agent", "server"] | None:
+    """Quem abriu o escopo imposto ativo, ou None fora de um."""
+    return _imposed_by.get()
+
+
 @contextmanager
-def imposed_model_scope(model: str, provider: str) -> Iterator[tuple[str, str]]:
+def imposed_model_scope(
+    model: str, provider: str, *, by: Literal["agent", "server"] = "agent"
+) -> Iterator[tuple[str, str]]:
     """Impose ``model`` of ``provider`` on the LLM calls made in the block.
 
     Always activates the pair it is given, and on exit the previous value comes
     back. Which scope wins when they nest is not decided here: an agent that
     finds one already active chooses whether to open its own.
+
+    ``by`` diz quem impõe (``current_imposed_by``): o ``Server`` passa
+    ``"server"``, e só então o LLM avisa dos kwargs não portáveis descartados.
     """
     value = (model, provider)
     token = _imposed_model.set(value)
+    by_token = _imposed_by.set(by)
     try:
         yield value
     finally:
-        try:
-            _imposed_model.reset(token)
-        except ValueError:
-            # (#21) Same as reasoning_channel(): reset() raises ValueError when
-            # cleanup runs in a different Context (GC-driven finalization of
-            # an abandoned async generator). The var dies with that context.
-            pass
+        _reset_quietly(_imposed_by, by_token)
+        _reset_quietly(_imposed_model, token)

@@ -80,6 +80,11 @@ def _drain_chunk(lc_chunk: Any, agg: Any, *, tools: list[dict] | None) -> tuple[
 class LLM:
     """Declarative handle for a LangChain chat model behind a neutral boundary."""
 
+    # Chaves (modelo do LLM, modelo imposto, provedor imposto) já avisadas de
+    # kwargs não portáveis descartados sob imposição do servidor: uma vez cada.
+    _warned_imposed: set[tuple[str, str, str, tuple[str, ...]]] = set()
+    _warned_imposed_lock = threading.Lock()
+
     def __init__(
         self,
         model: str,
@@ -106,6 +111,9 @@ class LLM:
         # exact model whatever the scope says.
         self.pinned = pinned
         self._provider_name = provider          # None → inferred from model name
+        # Ligado por Agent._warn_about_lost_settings quando já avisou na definição
+        # da classe impositora: o aviso sob o servidor não se repete.
+        self._warned_at_definition: bool = False
         self._chat_model: "BaseChatModel | None" = None  # lazy
         self._request_model_cache: dict[tuple, "BaseChatModel"] = {}
 
@@ -118,6 +126,33 @@ class LLM:
         if self._provider_name is not None:
             return get_provider(self._provider_name)
         return resolve_provider_for_model(self.model)
+
+    @property
+    def provider_name(self) -> str:
+        """Nome do provedor que este LLM resolve (explícito ou inferido do
+        nome do modelo), pela mesma regra de ``chat_model``."""
+        return self._provider().name
+
+    def imposition(self) -> tuple[str, str]:
+        """O par ``(model, provider)`` que este LLM impõe à árvore quando é o
+        ``llm`` de um agente com ``impose_model=True``."""
+        return self.model, self.provider_name
+
+    def settings_lost_under_imposition(self) -> list[str]:
+        """O que este LLM declara e não chega a um modelo imposto: sob um
+        ``imposed_model_scope`` só os PORTABLE_PARAMS atravessam. ``reasoning``
+        vem primeiro, os demais em ordem alfabética; vazio quando ``pinned``."""
+        from aixon.runtime import PORTABLE_PARAMS, normalize_param_aliases
+
+        if self.pinned:
+            return []
+        lost = sorted(
+            k for k, v in normalize_param_aliases(self.params).items()
+            if v is not None and k not in PORTABLE_PARAMS
+        )
+        if self.reasoning is not None and self.reasoning is not False:
+            lost.insert(0, "reasoning")
+        return lost
 
     def _imposed(self) -> tuple[str, str] | None:
         """The ``(model, provider)`` imposed on this call, or None when none is
@@ -178,11 +213,10 @@ class LLM:
     def chat_model(self) -> "BaseChatModel":
         """Lazily build and cache the LangChain model.
 
-        Used directly when no per-request generation params are active
-        (LLMAgent's ``_bound_model``, and ``request_chat_model`` itself as its
-        no-params fast path). ToolAgent goes through ``request_chat_model()``
-        instead, which applies per-request params via a fresh/cached provider
-        model rather than this bare cached one. The provider must already be
+        Usado apenas por ``request_chat_model()``, como fast path quando não
+        há params por requisição nem modelo imposto; LLMAgent (via
+        ``_bound_model``) e ToolAgent passam sempre por
+        ``request_chat_model()``. The provider must already be
         registered (via importing its module or a custom register_provider()
         call).
 
@@ -202,9 +236,41 @@ class LLM:
                 f"request_chat_model(), which honors the imposed model, or "
                 f"declare the LLM with pinned=True to keep its own."
             )
-        if self._chat_model is None:
-            self._chat_model = self._build(self._provider(), **self.params)
-        return self._chat_model
+        # Mesmo padrão do cache por request (agentes em threads worker): ler
+        # sob a trava, construir fora dela (cria um cliente SDK inteiro) e
+        # gravar sob a trava mantendo o que outra thread já tiver guardado,
+        # para que todos compartilhem um cliente (e um pool HTTP).
+        with _REQUEST_MODEL_CACHE_LOCK:
+            model = self._chat_model
+        if model is not None:
+            return model
+        model = self._build(self._provider(), **self.params)
+        with _REQUEST_MODEL_CACHE_LOCK:
+            if self._chat_model is None:
+                self._chat_model = model
+            return self._chat_model
+
+    def _warn_lost_under_server_imposition(self, imposed_model: str, imposed_provider: str) -> None:
+        """Avisa, uma vez por chave, dos kwargs não portáveis que ficam para trás
+        quando o SERVIDOR impõe o modelo. Uma classe com ``impose_model=True`` já
+        avisou na definição (``Agent._warn_about_lost_settings``); quando é o
+        SERVIDOR que impõe, o LLM dela passa por aqui, mas sai cedo porque
+        ``_warned_at_definition`` está marcado. A chave inclui as chaves perdidas:
+        dois LLM do mesmo modelo com kwargs diferentes avisam cada um."""
+        if self._warned_at_definition:
+            return
+        lost = self.settings_lost_under_imposition()
+        if not lost:
+            return
+        key = (self.model, imposed_model, imposed_provider, tuple(lost))
+        with LLM._warned_imposed_lock:
+            if key in LLM._warned_imposed:
+                return
+            LLM._warned_imposed.add(key)
+        _log.warning(
+            "LLM('%s') sob modelo imposto '%s' (%s): ignorando kwargs não portáveis %s",
+            self.model, imposed_model, imposed_provider, lost,
+        )
 
     def request_chat_model(self) -> "BaseChatModel":
         """chat_model with the current request's generation params applied.
@@ -229,9 +295,16 @@ class LLM:
         stay behind. The cache key carries the model, the provider and whether
         it was imposed, so one LLM used inside and outside a scope never gets
         the other's model. A ``pinned`` LLM ignores the scope."""
-        from aixon.runtime import _PARAM_ALIASES, PORTABLE_PARAMS, current_generation_params
+        from aixon.runtime import (
+            PORTABLE_PARAMS,
+            current_generation_params,
+            current_imposed_by,
+            normalize_param_aliases,
+        )
 
         imposed = self._imposed()
+        if imposed is not None and current_imposed_by() == "server":
+            self._warn_lost_under_server_imposition(*imposed)
         params = current_generation_params()
         if imposed is None and not params:
             return self.chat_model
@@ -243,10 +316,7 @@ class LLM:
             model_name = imposed[0]
             # The class's dialect spellings get the normalization the request's
             # already got in generation_params(): the canonical key wins.
-            class_params = dict(self.params)
-            for alias, canonical in _PARAM_ALIASES.items():
-                if class_params.get(alias) is not None and class_params.get(canonical) is None:
-                    class_params[canonical] = class_params[alias]
+            class_params = normalize_param_aliases(self.params)
             build_params = {
                 k: v for k, v in {**class_params, **params}.items()
                 if k in PORTABLE_PARAMS and v is not None

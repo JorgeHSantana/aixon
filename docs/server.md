@@ -60,11 +60,14 @@ class Server:
         self,
         adapters: list[ProtocolAdapter] | None = None,
         *,
+        request_hook: RequestHookLike | None = None,
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
         """Create a server. Defaults to [OpenAIAdapter()] if adapters is None.
-        The two messages are what the user reads when the gateway refuses the call."""
+        The two messages are what the user reads when the gateway refuses the call.
+        request_hook decides, per request, the imposed model, the identity and
+        the refusal (see "Per-request context")."""
 
     @property
     def app(self):
@@ -83,7 +86,8 @@ rate limiting the caller (see [Errors](#errors)). Their defaults are:
 
 `Server` is a singleton — `Server.get_instance()` returns the existing instance
 or creates one. Multiple `Server()` calls in the same process share state, and
-the **first construction fixes** the adapters and the two messages. A later
+the **first construction fixes** the adapters, the two messages and the
+`request_hook`. A later
 construction:
 
 - with no arguments, or with arguments equal to what is stored (an equivalent
@@ -95,7 +99,9 @@ construction:
   configuration;
 - passing a message's default text counts as having no opinion: a bare
   `Server()` keeps working after the application configured the messages, and
-  keeps the ones stored.
+  keeps the ones stored. The same holds for `request_hook=None`: it means "no
+  opinion" (keep the stored hook, or use the default one), never "no hook", so
+  `aixon serve` and a `main.py` that builds the `Server` live together.
 
 **Built-in routes (always public, no auth required):**
 
@@ -571,7 +577,8 @@ server.serve()
 ASGI
   -> adapter.parse_request        # wire body -> ParsedRequest (neutral)
   -> get_registry().resolve(model) # name / alias lookup
-  -> request scopes               # generation params, user e-mail, client tools / tool_choice, tool-call cache
+  -> request_hook(ctx)            # once: RequestDecision | None, or RequestRejected
+  -> request scopes               # in order: observe_request (trace identity) -> generation_params -> user_email_scope -> imposed_model_scope (only with impose) -> client_tools_scope -> tool_choice_scope -> tool_call_cache
   -> agent.invoke | agent.stream  # neutral Message[] / Chunk only
   -> gateway refusal?             # budget / rate limit -> the quota message (see Errors)
   -> adapter.format_*             # neutral -> wire HTTP / SSE
@@ -579,14 +586,16 @@ ASGI
 
 The Server is dialect-agnostic. Every wire detail lives in the adapter.
 
-**The user's e-mail.** Right before the agent runs, the Server reads the
-`x-openwebui-user-email` header (what Open WebUI sends with
-`ENABLE_FORWARD_USER_INFO_HEADERS=true`) and publishes it for the whole call,
+**The user's e-mail.** Right before the agent runs, the Server publishes the
+`user_email` of the request hook's decision. With the default hook
+(`open_webui_request_hook`, see [Per-request context](#per-request-context-request_hook))
+that is the `x-openwebui-user-email` header (what Open WebUI sends with
+`ENABLE_FORWARD_USER_INFO_HEADERS=true`); the Server publishes it for the whole call,
 streaming or not, with `aixon.runtime.user_email_scope(email)`; an absent or
 blank header publishes no e-mail. The chain is:
 
 ```
-x-openwebui-user-email header
+RequestDecision.user_email (default hook: x-openwebui-user-email header)
   -> user_email_scope(email) / current_user_email()
   -> the gateway header (AIXON_GATEWAY_USER_HEADER, default X-OpenWebUI-User-Email)
 ```
@@ -598,13 +607,14 @@ ever receives it. Only the **e-mail** is forwarded, never the Open WebUI
 user-id: a Langfuse trace falls back to the user-id when there is no e-mail (see
 [tracing.md](tracing.md)), but the gateway never sees it. A request without the
 header runs with no e-mail, and the gateway then gets no header at all; refusing
-such a request is the application's job, not the Server's.
+such a request is the application's job: a `request_hook` that raises
+`RequestRejected` when there is no e-mail.
 
 What this identity is worth:
 
 - **ASCII only.** The e-mail travels as an HTTP header, so it must be ASCII; an
   internationalized e-mail address is not supported in this version.
-- **One header name.** The Server reads only `x-openwebui-user-email`. If Open
+- **One header name.** The default hook reads only `x-openwebui-user-email`. If Open
   WebUI is configured to rename it (`FORWARD_USER_INFO_HEADER_USER_EMAIL`) or to
   send a signed JWT instead (`FORWARD_USER_INFO_HEADER_JWT_SECRET`), the Server
   publishes no e-mail (`None`), and it is up to the application to refuse the
@@ -618,6 +628,207 @@ What this identity is worth:
   `ThreadPoolExecutor.submit`, `loop.run_in_executor`) sees no e-mail, and its
   gateway calls go out without the header. A `user_email_scope` held across a
   `yield` is also seen by the generator's consumer: open it around the call.
+
+---
+
+## Per-request context (`request_hook`)
+
+The application decides, once per request, **which model the agent's whole tree
+runs on**, **who the user is** and **whether the request gets in** — from the
+headers, without touching the agent classes. Pass a function, or an instance of
+a `RequestHook` subclass (see [Hook as a class](#hook-as-a-class-0130)), to
+`Server(request_hook=...)`:
+
+```python
+# aixon/server/context.py
+@dataclass(frozen=True)
+class RequestContext:
+    """O que o hook enxerga de uma request: modelo pedido, agente resolvido,
+    cabeçalhos (chaves minúsculas, somente leitura), parâmetros, adapter e
+    se a resposta é em stream."""
+
+    model: str
+    agent_name: str
+    headers: Mapping[str, str]
+    params: Mapping[str, Any]
+    adapter: str
+    stream: bool
+
+
+@dataclass(frozen=True)
+class RequestDecision:
+    """A decisão do hook. Todo campo ``None`` significa "não mexer"."""
+
+    impose: tuple[str, str] | None = None
+    user_email: str | None = None
+    trace_user_id: str | None = None
+    trace_session_id: str | None = None
+
+
+RequestHookLike = Callable[[RequestContext], "RequestDecision | None"]
+
+# aixon/exceptions.py
+class RequestRejected(AixonError):
+    """O ``request_hook`` recusou a request; o Server responde com ``status``
+    e ``code`` no envelope de erro do protocolo."""
+
+    def __init__(
+        self, message: str, *, status: int = 403, code: str = "request_rejected"
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+```
+
+```python
+from aixon import Server
+from aixon.exceptions import RequestRejected
+from aixon.server.context import RequestContext, RequestDecision
+
+TIERS = {"fast": ("gpt-5.4-mini", "openai"), "deep": ("gpt-5.4", "openai")}
+
+def tier_hook(ctx: RequestContext) -> RequestDecision:
+    user = ctx.headers.get("x-user")
+    if not user:
+        raise RequestRejected("x-user header is required", status=401, code="no_user")
+    return RequestDecision(impose=TIERS.get(ctx.headers.get("x-tier", "")),
+                           user_email=user)
+
+server = Server(request_hook=tier_hook)
+```
+
+**Lifecycle.** `parse → resolve → hook → scopes → agent`. The adapter parses the
+body, the registry resolves the agent, and only then the Server calls the hook,
+**once**, before any scope opens. `ctx.headers` has lower-case keys (on a duplicate
+header the first value wins, like `starlette.Headers.get`) and is read only; `ctx.params` is a read-only copy of the generation params the adapter
+extracted. The Server then opens the scopes of the decision around the agent
+call, on the streaming and the non-streaming path alike:
+
+| Field | Scope the Server opens |
+|---|---|
+| `impose=(model, provider)` | `imposed_model_scope(model, provider, by="server")` — `current_imposed_by()` returns `"server"` |
+| `user_email` | `user_email_scope(email)` (the gateway header, see below) |
+| `trace_user_id` / `trace_session_id` | the Langfuse trace identity; `trace_user_id=None` with a `user_email` falls back to the e-mail |
+
+The scopes open in this order: `observe_request` (trace identity) →
+`generation_params` → `user_email_scope` → `imposed_model_scope` (only with
+`impose`) → `client_tools_scope` → `tool_choice_scope` → `tool_call_cache`.
+
+`None` from the hook is the same as `RequestDecision()`: nothing imposed, no
+identity. Since the outermost imposed scope wins, an agent with
+`impose_model = True` under a server-imposed model does not open its own (see
+[agents.md](agents.md#modelo-imposto-impose_model)).
+
+**Refusal.** A hook that raises `RequestRejected` stops the request before any
+LLM call. Without streaming, the answer is HTTP `status` (default `403`) with
+`{"error": {"message": ..., "type": "request_rejected", "code": ...}}`; on a
+stream, the message is delivered as the last chat message, the same path the
+quota message uses. Any other exception raised by the hook becomes a `500`
+`server_error` (the log names only the exception type). An `impose` naming a
+provider that is not registered also ends in `500`.
+
+**The hook is synchronous.** A network call inside it blocks the request; that
+is the hook author's call.
+
+**The default hook, deprecated.** Without `request_hook`, the Server uses
+`aixon.server.compat.open_webui_request_hook` — what aixon did up to 0.1.28: it
+reads `x-openwebui-user-email` as `user_email` and, for the trace,
+`x-openwebui-user-email` (falling back to `x-openwebui-user-id`) and
+`x-openwebui-chat-id`. It is **deprecated** and becomes opt-in in 0.2; write
+your own. A hook of your own replaces it entirely: there is no fallback to the
+Open WebUI headers. `aixon.observability.request_identity` is deprecated with
+it.
+
+**Warning: `LLM.chat_model` under a server-imposed model.** The server imposes
+on agents that never declared `impose_model`. Under the imposed scope,
+`llm.chat_model` (the model the `LLM` was *configured* with) raises
+`ImposedModelViolation`; code that reads it directly must go through
+`llm.request_chat_model()`, `complete`/`stream` or declare
+`LLM(..., pinned=True)`. The non-portable kwargs of each `LLM` (`reasoning`,
+`timeout`, `max_retries`...) are dropped as under any imposition, and
+`LLM.request_chat_model` logs a WARNING once per (LLM, imposed model) naming
+them.
+
+### Hook as a class (0.1.30)
+
+`RequestHookLike` is still what the Server accepts: any callable. `RequestHook`
+is a base class that organises one into phases. Its `__call__` runs `check` →
+`identity` → `imposition`, in that order, and assembles the `RequestDecision`.
+Any phase may raise `RequestRejected`; a refusal in `check` skips the others.
+Override only the phases you need. All of these are exported from
+`aixon.server` (`OpenWebUIRequestHook` from `aixon.server.compat`).
+
+```python
+# aixon/server/context.py
+@dataclass(frozen=True)
+class Identity:
+    user_email: str | None = None
+    trace_user_id: str | None = None
+    trace_session_id: str | None = None
+
+
+class RequestHook:
+    def check(self, ctx: RequestContext) -> None: ...            # base: accepts
+    def identity(self, ctx: RequestContext) -> Identity: ...     # base: Identity()
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None: ...  # base: None
+    def __call__(self, ctx: RequestContext) -> RequestDecision: ...
+
+
+class HeaderIdentityHook(RequestHook):
+    def __init__(
+        self,
+        *,
+        email_header: str,
+        user_id_header: str | None = None,
+        session_header: str | None = None,
+    ) -> None: ...
+
+
+class ChainRequestHook(RequestHook):
+    def __init__(self, hooks: Sequence[RequestHookLike]) -> None: ...
+
+# aixon/server/compat.py
+class OpenWebUIRequestHook(HeaderIdentityHook):
+    def __init__(self) -> None: ...   # x-openwebui-user-email / -user-id / -chat-id
+
+open_webui_request_hook = OpenWebUIRequestHook()
+```
+
+- `HeaderIdentityHook`: `user_email` is the raw value of `email_header`;
+  `trace_user_id` is the e-mail or, when empty/absent, `user_id_header` (if
+  configured); `trace_session_id` comes from `session_header` (if configured).
+  Header names are lower-cased. An empty `email_header` raises `AixonError`.
+- `OpenWebUIRequestHook`: the default hook as a class. Subclass it to add
+  `check` or `imposition` while keeping the Open WebUI identity.
+- `ChainRequestHook`: runs the hooks in order; a `RequestRejected` from any of
+  them stops the chain. Decisions merge field by field: the first non-`None`
+  value wins; a hook returning `None` counts as `RequestDecision()`.
+
+The tier hook above, as a subclass:
+
+```python
+from aixon.exceptions import RequestRejected
+from aixon.server import HeaderIdentityHook, RequestContext
+from aixon.server.server import Server
+
+TIERS = {"fast": ("gpt-5.4-mini", "openai"), "deep": ("gpt-5.4", "openai")}
+
+class TierHook(HeaderIdentityHook):
+    def __init__(self) -> None:
+        super().__init__(email_header="x-user")
+
+    def check(self, ctx: RequestContext) -> None:
+        if not ctx.headers.get("x-user", "").strip():
+            raise RequestRejected("x-user header is required", status=401, code="no_user")
+
+    def imposition(self, ctx: RequestContext) -> tuple[str, str] | None:
+        return TIERS.get(ctx.headers.get("x-tier", ""))
+
+server = Server(request_hook=TierHook())
+```
+
+Example: [examples/request_hook](../examples/request_hook) — two agents, an
+`x-tier` header choosing the model and an `x-user` header that is required.
 
 ---
 
