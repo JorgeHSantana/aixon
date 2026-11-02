@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextvars
 import copy
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Literal
 
 # Wire params we forward to the provider. Everything else in the request body
 # (thought_stream_mode, stream_options, user, n, ...) is NOT a generation knob.
@@ -235,22 +235,42 @@ _imposed_model: contextvars.ContextVar[tuple[str, str] | None] = contextvars.Con
 )
 
 
+# Quem abriu o escopo imposto ativo: "agent" (classe com impose_model=True, que
+# já avisou dos kwargs perdidos na definição) ou "server" (request_hook). Setado
+# e restaurado junto com _imposed_model.
+_imposed_by: contextvars.ContextVar[Literal["agent", "server"] | None] = contextvars.ContextVar(
+    "aixon_imposed_by", default=None
+)
+
+
 def current_imposed_model() -> tuple[str, str] | None:
     """The ``(model, provider)`` imposed on this context, or None."""
     return _imposed_model.get()
 
 
+def current_imposed_by() -> Literal["agent", "server"] | None:
+    """Quem abriu o escopo imposto ativo, ou None fora de um."""
+    return _imposed_by.get()
+
+
 @contextmanager
-def imposed_model_scope(model: str, provider: str) -> Iterator[tuple[str, str]]:
+def imposed_model_scope(
+    model: str, provider: str, *, by: Literal["agent", "server"] = "agent"
+) -> Iterator[tuple[str, str]]:
     """Impose ``model`` of ``provider`` on the LLM calls made in the block.
 
     Always activates the pair it is given, and on exit the previous value comes
     back. Which scope wins when they nest is not decided here: an agent that
     finds one already active chooses whether to open its own.
+
+    ``by`` diz quem impõe (``current_imposed_by``): o ``Server`` passa
+    ``"server"``, e só então o LLM avisa dos kwargs não portáveis descartados.
     """
     value = (model, provider)
     token = _imposed_model.set(value)
+    by_token = _imposed_by.set(by)
     try:
         yield value
     finally:
+        _reset_quietly(_imposed_by, by_token)
         _reset_quietly(_imposed_model, token)

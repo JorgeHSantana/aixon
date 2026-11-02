@@ -80,6 +80,11 @@ def _drain_chunk(lc_chunk: Any, agg: Any, *, tools: list[dict] | None) -> tuple[
 class LLM:
     """Declarative handle for a LangChain chat model behind a neutral boundary."""
 
+    # Chaves (modelo do LLM, modelo imposto, provedor imposto) já avisadas de
+    # kwargs não portáveis descartados sob imposição do servidor: uma vez cada.
+    _warned_imposed: set[tuple[str, str, str]] = set()
+    _warned_imposed_lock = threading.Lock()
+
     def __init__(
         self,
         model: str,
@@ -242,6 +247,24 @@ class LLM:
                 self._chat_model = model
             return self._chat_model
 
+    def _warn_lost_under_server_imposition(self, imposed_model: str, imposed_provider: str) -> None:
+        """Avisa, uma vez por chave, dos kwargs não portáveis que ficam para trás
+        quando o SERVIDOR impõe o modelo. Uma classe com ``impose_model=True`` já
+        avisou na definição (``Agent._warn_about_lost_settings``): o escopo dela
+        é ``by="agent"`` e não passa por aqui."""
+        key = (self.model, imposed_model, imposed_provider)
+        with LLM._warned_imposed_lock:
+            if key in LLM._warned_imposed:
+                return
+            lost = self.settings_lost_under_imposition()
+            if not lost:
+                return
+            LLM._warned_imposed.add(key)
+        _log.warning(
+            "LLM('%s') sob modelo imposto '%s' (%s): ignorando kwargs não portáveis %s",
+            self.model, imposed_model, imposed_provider, lost,
+        )
+
     def request_chat_model(self) -> "BaseChatModel":
         """chat_model with the current request's generation params applied.
 
@@ -265,9 +288,16 @@ class LLM:
         stay behind. The cache key carries the model, the provider and whether
         it was imposed, so one LLM used inside and outside a scope never gets
         the other's model. A ``pinned`` LLM ignores the scope."""
-        from aixon.runtime import PORTABLE_PARAMS, current_generation_params, normalize_param_aliases
+        from aixon.runtime import (
+            PORTABLE_PARAMS,
+            current_generation_params,
+            current_imposed_by,
+            normalize_param_aliases,
+        )
 
         imposed = self._imposed()
+        if imposed is not None and current_imposed_by() == "server":
+            self._warn_lost_under_server_imposition(*imposed)
         params = current_generation_params()
         if imposed is None and not params:
             return self.chat_model

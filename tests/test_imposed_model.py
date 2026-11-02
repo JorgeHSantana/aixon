@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,6 +25,7 @@ from aixon.llm import LLM
 from aixon.message import Message
 from aixon.runtime import (
     PORTABLE_PARAMS,
+    current_imposed_by,
     current_imposed_model,
     generation_params,
     imposed_model_scope,
@@ -398,3 +400,74 @@ def test_prediction_and_prompt_cache_follow_effective_provider(rec):
         assert all(isinstance(m.content, str) for m in wire)  # rec has no cache_control
         wire = pinned._to_wire([system, user])
         assert [_cache_marked(m) for m in wire] == [True, True]  # pinned keeps its own
+
+
+# ── 0.1.29: aviso de kwargs descartados quando o SERVIDOR impõe ──────────────
+
+@pytest.fixture
+def sem_avisos_previos(monkeypatch):
+    monkeypatch.setattr(LLM, "_warned_imposed", set())
+
+
+def _avisos(caplog):
+    return [r for r in caplog.records
+            if r.name == "aixon.llm" and "sob modelo imposto" in r.getMessage()]
+
+
+def test_imposed_by_padrao_agent_e_restaura():
+    assert current_imposed_by() is None
+    with imposed_model_scope("tier-x", "rec"):
+        assert current_imposed_by() == "agent"
+        with imposed_model_scope("tier-y", "rec", by="server"):
+            assert current_imposed_by() == "server"
+        assert current_imposed_by() == "agent"
+    assert current_imposed_by() is None
+
+
+def test_aviso_uma_vez_por_chave(rec, caplog, sem_avisos_previos):
+    llm = LLM("fake-1", provider="fake", seed=7)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            llm.request_chat_model()
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            llm.request_chat_model()
+    (record,) = _avisos(caplog)
+    assert record.levelno == logging.WARNING
+
+
+def test_sem_aviso_quando_a_classe_impoe(rec, caplog, sem_avisos_previos):
+    from aixon import LLMAgent
+
+    class ImpostoraAgent(LLMAgent):
+        llm = LLM("tier-x", provider="rec", seed=7, timeout=300)
+        impose_model = True
+
+    rec.model.script = [AIMessage(content="ok")]
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        assert ImpostoraAgent().invoke([Message(role="user", content="oi")]).content == "ok"
+    assert rec.builds  # passou mesmo pelo modelo imposto
+    assert _avisos(caplog) == []
+
+
+def test_sem_aviso_sem_kwargs_nao_portaveis(rec, caplog, sem_avisos_previos):
+    llm = LLM("fake-1", provider="fake", temperature=0.2, max_tokens=64)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            llm.request_chat_model()
+        pinned = LLM("fake-1", provider="fake", seed=7, pinned=True)
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            pinned.request_chat_model()
+    assert _avisos(caplog) == []
+
+
+def test_aviso_nomeia_as_chaves(rec, caplog, sem_avisos_previos):
+    llm = LLM("fake-1", provider="fake", timeout=5, reasoning=True, temperature=0.2)
+    with caplog.at_level(logging.WARNING, logger="aixon.llm"):
+        with imposed_model_scope("tier-x", "rec", by="server"):
+            llm.request_chat_model()
+    (record,) = _avisos(caplog)
+    message = record.getMessage()
+    assert message.startswith("LLM('fake-1') sob modelo imposto 'tier-x' (rec): "
+                              "ignorando kwargs não portáveis ")
+    assert message.index("'reasoning'") < message.index("'timeout'")
+    assert "temperature" not in message
