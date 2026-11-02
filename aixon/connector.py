@@ -93,6 +93,12 @@ class Connector:
         return headers
 
     @staticmethod
+    def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
+        """Os params sem os de valor ``None``: a regra "None é omitido" de
+        todo connector (HTTP e MCP)."""
+        return {k: v for k, v in params.items() if v is not None}
+
+    @staticmethod
     def _httpx():
         """Lazily import httpx. Keeps `import aixon` working on a bare install;
         a clear error tells the user which extra to install if it's missing."""
@@ -253,7 +259,7 @@ class HttpToolConnector(Connector):
 
     def call(self, method: str, path: str, **params: Any) -> Any:
         """Sync tool call. ``None`` params are dropped."""
-        clean = {k: v for k, v in params.items() if v is not None}
+        clean = self._clean_params(params)
         if method.upper() == "POST":
             resp = self.post(path, json=clean)
         else:
@@ -262,7 +268,7 @@ class HttpToolConnector(Connector):
 
     async def acall(self, method: str, path: str, **params: Any) -> Any:
         """Async tool call (non-blocking IO). ``None`` params are dropped."""
-        clean = {k: v for k, v in params.items() if v is not None}
+        clean = self._clean_params(params)
         if method.upper() == "POST":
             resp = await self.apost(path, json=clean)
         else:

@@ -88,6 +88,7 @@ class MCPConnector(Connector):
         # `Connector._async_client`'s `_aclient_lock`) so concurrent first-use
         # from multiple threads triggers exactly one discovery session.
         self._tools_lock = threading.Lock()
+        self._tools_cache: list[dict] | None = None
 
     @staticmethod
     def _sdk():
@@ -148,11 +149,11 @@ class MCPConnector(Connector):
         without blocking the loop, keeps cross-THREAD first-use exactly-once
         (each thread runs its own loop), and is cancellation-safe (a
         cancelled waiter never owns the lock, so nothing is poisoned)."""
-        if getattr(self, "_tools_cache", None) is None:
+        if self._tools_cache is None:
             while not self._tools_lock.acquire(blocking=False):
                 await asyncio.sleep(0.01)
             try:
-                if getattr(self, "_tools_cache", None) is None:
+                if self._tools_cache is None:
                     async with self._session() as session:
                         result = await session.list_tools()
                     self._tools_cache = [
@@ -169,7 +170,7 @@ class MCPConnector(Connector):
 
     def list_tools(self) -> list[dict]:
         """Sync ``alist_tools`` (not callable from a running event loop)."""
-        if getattr(self, "_tools_cache", None) is None:
+        if self._tools_cache is None:
             asyncio.run(self.alist_tools())
         return self._tools_cache
 
@@ -178,7 +179,7 @@ class MCPConnector(Connector):
     async def acall(self, name: str, **params: Any) -> str:
         """Call one server tool (``tools/call``). ``None`` params are dropped
         (same contract as ``HttpToolConnector``)."""
-        clean = {k: v for k, v in params.items() if v is not None}
+        clean = self._clean_params(params)
         async with self._session() as session:
             result = await session.call_tool(name, clean)
         return self._unwrap(result)
@@ -325,9 +326,10 @@ class MCPToolset:
     as ``AixonError``) is contained to whichever agent's request first needed
     it, and is NOT cached — a later invoke retries discovery.
 
-    The resolved catalog IS cached on this instance once it succeeds
-    (double-checked locking, mirroring ``Connector._async_client``), so
-    repeat invokes of the same agent do not re-discover."""
+    The resolved catalog IS cached on this instance once it succeeds, so
+    repeat invokes of the same agent do not re-discover. Discovery runs
+    outside the lock; only publishing the result is locked (first to finish
+    wins, a concurrent loser discards its own list)."""
 
     connector: "MCPConnector"
     include: list[str] | None = None
@@ -341,39 +343,34 @@ class MCPToolset:
         protocol error) surfaces as ``AixonError``, scoped to this call —
         nothing is cached, so a later call can retry."""
         if self._resolved is None:
+            # Descoberta FORA da trava (I/O de rede de duração aberta): a
+            # trava só protege a publicação. O primeiro a terminar vence; quem
+            # chega depois descarta a sua lista e devolve a publicada.
+            discovered = self._discover()
             with self._lock:
                 if self._resolved is None:
-                    self._resolved = self._discover()
+                    self._resolved = discovered
         return self._resolved
 
     def _discover(self) -> list[AgentTool]:
         try:
+            coro = self.connector.aas_tools(include=self.include, exclude=self.exclude)
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 # No running loop (plain sync call, e.g. a sync ToolAgent
                 # invoke building its tool list): asyncio.run is safe here.
-                return asyncio.run(
-                    self.connector._aas_tools_core(
-                        include=self.include, exclude=self.exclude
-                    )
-                )
-            else:
-                # A running loop means resolve_tools() is being called
-                # synchronously from inside async agent code (coerce_tools /
-                # _build_agent are sync, called from ainvoke/astream without
-                # awaiting). asyncio.run() cannot nest inside a running loop,
-                # so discovery runs on a worker thread with its own loop;
-                # `.result()` blocks the calling thread until it completes —
-                # a bounded block, same class as any sync tool invoked from an
-                # async agent loop.
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    return pool.submit(
-                        asyncio.run,
-                        self.connector._aas_tools_core(
-                            include=self.include, exclude=self.exclude
-                        ),
-                    ).result()
+                return asyncio.run(coro)
+            # A running loop means resolve_tools() is being called
+            # synchronously from inside async agent code (coerce_tools /
+            # _build_agent are sync, called from ainvoke/astream without
+            # awaiting). asyncio.run() cannot nest inside a running loop,
+            # so discovery runs on a worker thread with its own loop;
+            # `.result()` blocks the calling thread until it completes —
+            # a bounded block, same class as any sync tool invoked from an
+            # async agent loop.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
         except AixonError:
             raise
         except Exception as exc:
