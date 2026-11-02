@@ -166,12 +166,13 @@ class MCPConnector(Connector):
                     ]
             finally:
                 self._tools_lock.release()
+        assert self._tools_cache is not None  # publicado acima (ou já estava)
         return self._tools_cache
 
     def list_tools(self) -> list[dict]:
         """Sync ``alist_tools`` (not callable from a running event loop)."""
         if self._tools_cache is None:
-            asyncio.run(self.alist_tools())
+            return asyncio.run(self.alist_tools())
         return self._tools_cache
 
     # ----- execution (one session per call) ----------------------------------
@@ -354,13 +355,15 @@ class MCPToolset:
 
     def _discover(self) -> list[AgentTool]:
         try:
-            coro = self.connector.aas_tools(include=self.include, exclude=self.exclude)
+            # A coroutine nasce dentro de cada ramo: criada antes, um executor
+            # que falhasse deixaria "coroutine was never awaited".
+            kwargs = {"include": self.include, "exclude": self.exclude}
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 # No running loop (plain sync call, e.g. a sync ToolAgent
                 # invoke building its tool list): asyncio.run is safe here.
-                return asyncio.run(coro)
+                return asyncio.run(self.connector.aas_tools(**kwargs))
             # A running loop means resolve_tools() is being called
             # synchronously from inside async agent code (coerce_tools /
             # _build_agent are sync, called from ainvoke/astream without
@@ -370,7 +373,9 @@ class MCPToolset:
             # a bounded block, same class as any sync tool invoked from an
             # async agent loop.
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
+                return pool.submit(
+                    lambda: asyncio.run(self.connector.aas_tools(**kwargs))
+                ).result()
         except AixonError:
             raise
         except Exception as exc:

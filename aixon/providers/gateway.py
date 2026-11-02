@@ -123,7 +123,10 @@ class GatewayProvider(OpenAICompatProvider):
 
     def base_url(self) -> str:
         # A mesma leitura que classify_gateway_error usa (gateway_errors).
-        return gateway_base_url(required=True)
+        url = gateway_base_url(required=True)
+        # required=True levanta quando vazia: aqui nunca é None.
+        assert url is not None
+        return url
 
     def api_key(self) -> str:
         return _required_env(self.env_key)
@@ -140,7 +143,7 @@ class GatewayProvider(OpenAICompatProvider):
             **(_identity_clients(header) if header else {}),
         }
 
-    def finish(self, chat: "BaseChatModel") -> "BaseChatModel":
+    def finish(self, chat: Any) -> "BaseChatModel":
         # Nor do OPENAI_ORG_ID / OPENAI_ORGANIZATION / OPENAI_PROJECT_ID belong
         # to the gateway. No constructor argument keeps them out: given None,
         # ChatOpenAI and then the SDK client read them from the environment.

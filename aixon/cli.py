@@ -264,6 +264,8 @@ def _chat_inprocess(package: str) -> None:
         if exc is not None:
             _discard_failed_turn(messages, exc)
         else:
+            # Sem erro, _stream_inprocess sempre devolve str (talvez "").
+            assert content is not None
             messages.append(Message(role="assistant", content=content))
 
 
