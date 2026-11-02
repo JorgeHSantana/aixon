@@ -19,8 +19,10 @@ import datetime as dt
 import hmac
 import json
 import os
+import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from aixon.exceptions import (
     AgentNotFoundError,
@@ -39,9 +41,12 @@ from aixon.runtime import (
     user_email_scope,
 )
 from aixon.toolcache import tool_call_cache
+from aixon.usage import usage_for
 from aixon.server.adapters.openai import OpenAIAdapter
-from aixon.server.usage import build_usage
-from aixon.server.protocol import ProtocolAdapter
+from aixon.server.protocol import ParsedRequest, ProtocolAdapter
+
+if TYPE_CHECKING:
+    from aixon.agent import Agent
 
 _log = Logger("aixon.server")
 
@@ -68,6 +73,23 @@ def _valid_token(raw: str) -> bool:
 # non-stream payload, or the raw SSE lines of a stream). Headers are NEVER
 # recorded — Authorization can't leak by construction. Env is checked per
 # request (like auth) so tests/hot-reload can toggle it without a rebuild.
+
+@dataclass
+class _ChatCall:
+    """O que uma request de chat já resolvida carrega até a resposta: o par
+    adapter/rota, o agente, o pedido neutro, o corpo cru (só para o tap) e a
+    identidade publicada nos escopos."""
+
+    adapter: ProtocolAdapter
+    path: str
+    agent: "Agent"
+    pr: ParsedRequest
+    body: dict
+    model: str
+    tap: bool
+    ident: dict
+    user_email: Optional[str]
+
 
 def _tap_enabled(agent_name: str) -> bool:
     """Truthy values ("1"/"true"/"yes") record EVERY agent; anything else is a
@@ -138,6 +160,10 @@ class Server:
     budget_exceeded_message: str
     rate_limited_message: str
 
+    # Trava de classe (server-10): a primeira construção (__new__/__init__) e
+    # o build lazy do app acontecem uma vez só, mesmo com threads concorrentes.
+    _lock = threading.Lock()
+
     def __new__(
         cls,
         adapters: list[ProtocolAdapter] | None = None,
@@ -145,10 +171,11 @@ class Server:
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
 
     def __init__(
         self,
@@ -157,6 +184,22 @@ class Server:
         budget_exceeded_message: str = DEFAULT_BUDGET_EXCEEDED_MESSAGE,
         rate_limited_message: str = DEFAULT_RATE_LIMITED_MESSAGE,
     ):
+        with type(self)._lock:
+            self._init_locked(
+                adapters,
+                budget_exceeded_message=budget_exceeded_message,
+                rate_limited_message=rate_limited_message,
+            )
+
+    def _init_locked(
+        self,
+        adapters: list[ProtocolAdapter] | None,
+        *,
+        budget_exceeded_message: str,
+        rate_limited_message: str,
+    ) -> None:
+        """Corpo do __init__, sempre sob ``_lock``: assim ``_initialized`` não
+        é lido por uma thread enquanto outra ainda o está montando."""
         # Singleton: adapters are fixed on first construction. A later
         # Server(adapters=[...]) that asks for a DIFFERENT set raises instead of
         # silently ignoring the argument (which used to lock callers into
@@ -204,9 +247,10 @@ class Server:
     # --- app construction ------------------------------------------------
     @property
     def app(self):
-        if self._app is None:
-            self._app = self._build_app()
-        return self._app
+        with type(self)._lock:
+            if self._app is None:
+                self._app = self._build_app()
+            return self._app
 
     @staticmethod
     def _full_path(adapter: ProtocolAdapter, path: str) -> str:
@@ -321,200 +365,33 @@ class Server:
 
     def _mount_chat(self, app, adapter, path) -> None:
         from fastapi import Request
-        from starlette.responses import JSONResponse, StreamingResponse
+        from starlette.responses import JSONResponse
 
         async def chat(request: Request):
-            try:
-                body = await request.json()
-            except Exception:
-                body = None
-            if not isinstance(body, dict):
-                return JSONResponse(
-                    {
-                        "error": {
-                            "message": "Request body must be a JSON object.",
-                            "type": "invalid_request_error",
-                        }
-                    },
-                    status_code=400,
-                )
-            try:
-                pr = adapter.parse_request(body, path=path)
-            except Exception as exc:
-                return JSONResponse(
-                    {"error": {"message": str(exc), "type": "invalid_request_error"}},
-                    status_code=400,
-                )
-            try:
-                agent = get_registry().resolve(pr.model)
-            except AgentNotFoundError as exc:
-                return JSONResponse(
-                    {"error": {"message": exc.message, "type": "model_not_found"}},
-                    status_code=404,
-                )
+            pr = await self._parse_body(request, adapter, path)
+            if isinstance(pr, JSONResponse):
+                return pr
+            agent = self._resolve_agent(pr)
+            if isinstance(agent, JSONResponse):
+                return agent
             _log.info(f"{adapter.name}: {path} -> agent '{agent.name}' (stream={pr.stream})")
-            model = pr.model or agent.name
-
-            # Agent-level thought mode: fills the gap between the per-request
-            # param (which always wins — only injected when absent) and the
-            # adapter-wide default. Injected into params so both the stream
-            # session and format_response see one resolved knob. Safe for the
-            # provider: thought_stream_mode is not in GENERATION_PARAMS.
-            agent_mode = getattr(agent, "thought_mode", None)
-            if agent_mode and "thought_stream_mode" not in (pr.params or {}):
-                pr.params = {**(pr.params or {}), "thought_stream_mode": agent_mode}
-
-            tap = _tap_enabled(agent.name)
-
-            # Langfuse (#26, opcional): identidade do trace vinda dos headers
-            # que o frontend encaminha (Open WebUI:
-            # ENABLE_FORWARD_USER_INFO_HEADERS). Sem envs do Langfuse,
-            # observe_request é um no-op de custo zero.
-            ident = request_identity(request.headers)
-
-            # The end user's e-mail, published for the whole call: only the
-            # `gateway` provider reads it, so spend and limits are per person.
-            # The e-mail alone — never the user-id that request_identity falls
-            # back to for the trace. Absent or blank, the scope publishes None.
-            user_email = request.headers.get("x-openwebui-user-email")
-
-            if pr.stream:
-                session = adapter.open_stream(model=model, request=pr)
-
-                async def gen():
-                    # A mid-stream failure (provider hard-wall timeout, usage
-                    # counting, adapter bug) fires AFTER the 200/text/event-stream
-                    # headers went out, so it must not propagate into Starlette
-                    # (which would abort the response with a truncated stream).
-                    # Emit an error event instead, then still close the stream.
-                    sse_lines: list[str] = []  # collected only when tap is on
-
-                    def emit(line: str) -> str:
-                        if tap:
-                            sse_lines.append(line)
-                        return line
-
-                    try:
-                        with self._request_scopes(
-                            agent=agent, adapter=adapter, pr=pr,
-                            user_email=user_email, ident=ident, stream=True,
-                        ):
-                            async for chunk in agent.astream(pr.messages):
-                                line = session.chunk(chunk)
-                                if line:
-                                    yield emit(line)
-                            tail = session.finish()
-                        if tail:
-                            yield emit(tail)
-                    except Exception as exc:
-                        verdict = classify_gateway_error(exc)
-                        if verdict is None:
-                            _log.error(
-                                f"{adapter.name}: stream via agent '{agent.name}' "
-                                f"failed: {exc}"
-                            )
-                            yield emit(session.error(exc))
-                        else:
-                            # The gateway said no (budget spent, rate limit): an
-                            # answer for the user, not a server failure. It goes
-                            # out as the last message of a stream that ends as
-                            # usual — the content delta closes a <think> block
-                            # the failed run left open, then the finish chunk
-                            # and [DONE] follow — so a chat UI shows it instead
-                            # of a generic error event.
-                            # The verdict only: the gateway's own text may name
-                            # the end user and the spend.
-                            _log.warning(
-                                f"{adapter.name}: stream via agent '{agent.name}' "
-                                f"refused by the gateway ({verdict.__name__}); "
-                                f"answered in the stream (HTTP 200)"
-                            )
-                            try:
-                                text = self._gateway_refusal(verdict)[0]
-                                for chunk in (Chunk(content=text), Chunk(done=True)):
-                                    line = session.chunk(chunk)
-                                    if line:
-                                        yield emit(line)
-                                tail = session.finish()
-                                if tail:
-                                    yield emit(tail)
-                            except Exception as inner:
-                                # Same rule as any mid-stream failure: it must
-                                # not reach Starlette. Generic error, then done.
-                                _log.error(
-                                    f"{adapter.name}: stream via agent "
-                                    f"'{agent.name}' failed while reporting the "
-                                    f"gateway refusal: {inner}"
-                                )
-                                yield emit(session.error(inner))
-                    try:
-                        yield emit(session.done())
-                    except Exception:
-                        pass  # never re-raise through Starlette mid-stream
-                    if tap:
-                        _tap_write({
-                            "adapter": adapter.name, "path": path,
-                            "agent": agent.name, "model": model,
-                            "stream": True, "body": body,
-                            "response": sse_lines,
-                        })
-
-                return StreamingResponse(gen(), media_type="text/event-stream")
-
-            # await ainvoke (async-native or threaded bridge) so the LLM call
-            # never blocks the event loop. Request generation params are active
-            # for the duration of the call via the runtime contextvar.
-            try:
-                with self._request_scopes(
-                    agent=agent, adapter=adapter, pr=pr,
-                    user_email=user_email, ident=ident, stream=False,
-                ):
-                    message = await agent.ainvoke(pr.messages)
-            except Exception as exc:
-                verdict = classify_gateway_error(exc)
-                if verdict is not None:
-                    # The gateway said no: tell the client so with a 429 it can
-                    # act on (the type/code pair is what tells the two apart).
-                    # The verdict only in the log: the gateway's own text may
-                    # name the end user and the spend.
-                    _log.warning(
-                        f"{adapter.name}: agent '{agent.name}' refused by the "
-                        f"gateway ({verdict.__name__}); answered HTTP 429"
-                    )
-                    text, err_type, err_code = self._gateway_refusal(verdict)
-                    return JSONResponse(
-                        {"error": {"message": text, "type": err_type, "code": err_code}},
-                        status_code=429,
-                        # The openai SDK retries a 429 unless told not to, and
-                        # each retry would run the whole tree again.
-                        headers={"x-should-retry": "false"},
-                    )
-                _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")
-                return JSONResponse(
-                    {"error": {"message": "The agent failed to process the request.",
-                              "type": "server_error"}},
-                    status_code=500,
-                )
-            # Provider-real usage (Message.usage, already OpenAI-shaped) wins;
-            # the tiktoken estimate is the fallback for agents whose provider
-            # reported none. Streaming keeps the estimate-only path.
-            usage = message.usage
-            if not usage:
-                prompt_text = "\n".join(m.content for m in pr.messages)
-                completion_text = message.content
-                if message.reasoning:
-                    completion_text += "\n" + message.reasoning
-                usage = build_usage(model, prompt_text, completion_text)
-            payload = adapter.format_response(
-                model=model, message=message, usage=usage, params=pr.params
+            # O Starlette guarda o JSON já lido: esta é a mesma dict do parse.
+            body = await request.json()
+            call = _ChatCall(
+                adapter=adapter, path=path, agent=agent, pr=pr, body=body,
+                model=pr.model or agent.name, tap=_tap_enabled(agent.name),
+                # Langfuse (#26, opcional): identidade do trace vinda dos
+                # headers que o frontend encaminha (Open WebUI:
+                # ENABLE_FORWARD_USER_INFO_HEADERS).
+                ident=request_identity(request.headers),
+                # O e-mail do usuário final, publicado para a chamada inteira:
+                # só o provedor `gateway` lê. Só o e-mail — nunca o user-id do
+                # fallback de request_identity. Ausente ou vazio, vira None.
+                user_email=request.headers.get("x-openwebui-user-email"),
             )
-            if tap:
-                _tap_write({
-                    "adapter": adapter.name, "path": path,
-                    "agent": agent.name, "model": model,
-                    "stream": False, "body": body, "response": payload,
-                })
-            return payload
+            if pr.stream:
+                return self._stream_response(call)
+            return await self._sync_response(call)
 
         # `from __future__ import annotations` (module-level) turns
         # `request: Request` into the *string* "Request". FastAPI resolves
@@ -526,6 +403,205 @@ class Server:
         # real class object so FastAPI's introspection needs no string lookup.
         chat.__annotations__["request"] = Request
         app.add_api_route(path, chat, methods=["POST"])
+
+    async def _parse_body(self, request, adapter, path):
+        """Lê e valida o corpo: devolve o ParsedRequest do adapter, ou a
+        JSONResponse 400 quando o corpo não é um objeto JSON ou o adapter o
+        recusa."""
+        from starlette.responses import JSONResponse
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": "Request body must be a JSON object.",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status_code=400,
+            )
+        try:
+            return adapter.parse_request(body, path=path)
+        except Exception as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+    def _resolve_agent(self, pr):
+        """O agente de ``pr.model`` (com o thought_mode do agente injetado em
+        ``pr.params``), ou a JSONResponse 404 quando o modelo não existe."""
+        from starlette.responses import JSONResponse
+
+        try:
+            agent = get_registry().resolve(pr.model)
+        except AgentNotFoundError as exc:
+            return JSONResponse(
+                {"error": {"message": exc.message, "type": "model_not_found"}},
+                status_code=404,
+            )
+        # Agent-level thought mode: fills the gap between the per-request
+        # param (which always wins — only injected when absent) and the
+        # adapter-wide default. Injected into params so both the stream
+        # session and format_response see one resolved knob. Safe for the
+        # provider: thought_stream_mode is not in GENERATION_PARAMS.
+        agent_mode = getattr(agent, "thought_mode", None)
+        if agent_mode and "thought_stream_mode" not in (pr.params or {}):
+            pr.params = {**(pr.params or {}), "thought_stream_mode": agent_mode}
+        return agent
+
+    def _scopes_for(self, call: "_ChatCall", *, stream: bool) -> contextlib.ExitStack:
+        return self._request_scopes(
+            agent=call.agent, adapter=call.adapter, pr=call.pr,
+            user_email=call.user_email, ident=call.ident, stream=stream,
+        )
+
+    @staticmethod
+    def _write_tap(call: "_ChatCall", *, stream: bool, response) -> None:
+        """O registro do debug tap, igual nos dois caminhos salvo ``stream``
+        e ``response``."""
+        _tap_write({
+            "adapter": call.adapter.name, "path": call.path,
+            "agent": call.agent.name, "model": call.model,
+            "stream": stream, "body": call.body, "response": response,
+        })
+
+    def _stream_response(self, call: "_ChatCall"):
+        """O caminho stream: StreamingResponse SSE que nunca deixa uma falha
+        no meio do stream chegar ao Starlette."""
+        from starlette.responses import StreamingResponse
+
+        adapter, agent = call.adapter, call.agent
+        session = adapter.open_stream(model=call.model, request=call.pr)
+
+        async def gen():
+            # A mid-stream failure (provider hard-wall timeout, usage
+            # counting, adapter bug) fires AFTER the 200/text/event-stream
+            # headers went out, so it must not propagate into Starlette
+            # (which would abort the response with a truncated stream).
+            # Emit an error event instead, then still close the stream.
+            sse_lines: list[str] = []  # collected only when tap is on
+
+            def emit(line: str) -> str:
+                if call.tap:
+                    sse_lines.append(line)
+                return line
+
+            async def drain(chunks):
+                # chunk → linha SSE para cada chunk, depois a cauda da sessão.
+                async for chunk in chunks:
+                    line = session.chunk(chunk)
+                    if line:
+                        yield emit(line)
+                tail = session.finish()
+                if tail:
+                    yield emit(tail)
+
+            async def _aiter(items):
+                for item in items:
+                    yield item
+
+            try:
+                with self._scopes_for(call, stream=True):
+                    async for line in drain(agent.astream(call.pr.messages)):
+                        yield line
+            except Exception as exc:
+                verdict = classify_gateway_error(exc)
+                if verdict is None:
+                    _log.error(
+                        f"{adapter.name}: stream via agent '{agent.name}' "
+                        f"failed: {exc}"
+                    )
+                    yield emit(session.error(exc))
+                else:
+                    # The gateway said no (budget spent, rate limit): an
+                    # answer for the user, not a server failure. It goes
+                    # out as the last message of a stream that ends as
+                    # usual — the content delta closes a <think> block
+                    # the failed run left open, then the finish chunk
+                    # and [DONE] follow — so a chat UI shows it instead
+                    # of a generic error event.
+                    # The verdict only: the gateway's own text may name
+                    # the end user and the spend.
+                    _log.warning(
+                        f"{adapter.name}: stream via agent '{agent.name}' "
+                        f"refused by the gateway ({verdict.__name__}); "
+                        f"answered in the stream (HTTP 200)"
+                    )
+                    try:
+                        text = self._gateway_refusal(verdict)[0]
+                        async for line in drain(
+                            _aiter((Chunk(content=text), Chunk(done=True)))
+                        ):
+                            yield line
+                    except Exception as inner:
+                        # Same rule as any mid-stream failure: it must
+                        # not reach Starlette. Generic error, then done.
+                        _log.error(
+                            f"{adapter.name}: stream via agent "
+                            f"'{agent.name}' failed while reporting the "
+                            f"gateway refusal: {inner}"
+                        )
+                        yield emit(session.error(inner))
+            try:
+                yield emit(session.done())
+            except Exception as exc:
+                # Nunca relança pelo Starlette no meio do stream, mas registra.
+                _log.error(f"{adapter.name}: session.done() failed: {exc}")
+            if call.tap:
+                self._write_tap(call, stream=True, response=sse_lines)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async def _sync_response(self, call: "_ChatCall"):
+        """O caminho não stream: o payload do adapter, ou 429/500 em JSON."""
+        from starlette.responses import JSONResponse
+
+        adapter, agent = call.adapter, call.agent
+        # await ainvoke (async-native or threaded bridge) so the LLM call
+        # never blocks the event loop. Request generation params are active
+        # for the duration of the call via the runtime contextvar.
+        try:
+            with self._scopes_for(call, stream=False):
+                message = await agent.ainvoke(call.pr.messages)
+        except Exception as exc:
+            verdict = classify_gateway_error(exc)
+            if verdict is not None:
+                # The gateway said no: tell the client so with a 429 it can
+                # act on (the type/code pair is what tells the two apart).
+                # The verdict only in the log: the gateway's own text may
+                # name the end user and the spend.
+                _log.warning(
+                    f"{adapter.name}: agent '{agent.name}' refused by the "
+                    f"gateway ({verdict.__name__}); answered HTTP 429"
+                )
+                text, err_type, err_code = self._gateway_refusal(verdict)
+                return JSONResponse(
+                    {"error": {"message": text, "type": err_type, "code": err_code}},
+                    status_code=429,
+                    # The openai SDK retries a 429 unless told not to, and
+                    # each retry would run the whole tree again.
+                    headers={"x-should-retry": "false"},
+                )
+            _log.error(f"{adapter.name}: agent '{agent.name}' failed: {exc}")
+            return JSONResponse(
+                {"error": {"message": "The agent failed to process the request.",
+                          "type": "server_error"}},
+                status_code=500,
+            )
+        # Usage real do provedor, senão a estimativa do tiktoken (usage_for).
+        # O stream segue só com a estimativa da sessão.
+        usage = usage_for(call.model, call.pr.messages, message)
+        payload = adapter.format_response(
+            model=call.model, message=message, usage=usage, params=call.pr.params
+        )
+        if call.tap:
+            self._write_tap(call, stream=False, response=payload)
+        return payload
 
     # --- lifecycle -------------------------------------------------------
     def serve(self, host: str = "0.0.0.0", port: int = 8000):
@@ -541,4 +617,5 @@ class Server:
 
     @classmethod
     def _reset(cls):
-        cls._instance = None
+        with cls._lock:
+            cls._instance = None

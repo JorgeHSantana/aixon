@@ -107,3 +107,20 @@ def usage_scope() -> Iterator[UsageAccumulator]:
         yield acc
     finally:
         _current.reset(token)
+
+
+def usage_for(model: str, messages, message) -> dict:
+    """O ``usage`` de uma resposta não stream: o real do provedor
+    (``message.usage``, já no formato OpenAI) quando existe, senão a
+    estimativa do tiktoken sobre o texto do prompt (conteúdos unidos por
+    "\\n") e da resposta (com o reasoning anexado após "\\n")."""
+    if message.usage:
+        return message.usage
+    # Import tardio: aixon.usage é núcleo e não deve puxar aixon.server.
+    from aixon.server.usage import build_usage
+
+    prompt_text = "\n".join(m.content for m in messages)
+    completion_text = message.content
+    if message.reasoning:
+        completion_text += "\n" + message.reasoning
+    return build_usage(model, prompt_text, completion_text)
