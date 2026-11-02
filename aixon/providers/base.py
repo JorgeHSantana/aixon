@@ -250,7 +250,12 @@ class OpenAICompatProvider(Provider):
         # O campo `api_key` do ChatOpenAI é SecretStr | Callable | None, não
         # str. Sem chave (só no openai) nada vai: o SDK lê OPENAI_API_KEY.
         kwargs: dict[str, Any] = {"model": model}
-        if api_key:
+        if api_key and not self.require_key:
+            # openai (0.1.28): a chave da env sobrescreve um api_key do chamador.
+            params["api_key"] = SecretStr(api_key)
+        elif api_key:
+            # Os demais passam a chave ao lado de **params: um api_key do
+            # chamador dá TypeError, como antes.
             kwargs["api_key"] = SecretStr(api_key)
         if base_url is not None:
             kwargs["base_url"] = base_url

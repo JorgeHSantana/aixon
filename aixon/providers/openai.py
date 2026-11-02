@@ -7,7 +7,6 @@ langchain-openai is not installed; only build() will fail in that case.
 """
 from __future__ import annotations
 
-
 from aixon.providers.base import OpenAICompatProvider, register_provider
 
 

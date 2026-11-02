@@ -142,3 +142,22 @@ def test_gateway_finish_zera_organizacao_e_projeto(fake_chat):
     assert chat.openai_organization is None
     for client in (chat.root_client, chat.root_async_client):
         assert client.organization is None and client.project is None
+
+
+def test_openai_api_key_do_chamador_e_sobrescrito_pela_env(fake_chat):
+    kwargs = _kwargs(OpenAIProvider(), {"api_key": "do-chamador"})
+    assert kwargs["api_key"] == ("SecretStr", "sk-openai")
+
+
+def _org_intacta(chat) -> None:
+    assert chat.openai_organization == "org"
+    for client in (chat.root_client, chat.root_async_client):
+        assert (client.organization, client.project) == ("o", "p")
+
+
+def test_xai_nao_toca_org(fake_chat):
+    _org_intacta(XAIProvider().build("grok-4"))
+
+
+def test_openai_nao_toca_org(fake_chat):
+    _org_intacta(OpenAIProvider().build("gpt-4o"))
