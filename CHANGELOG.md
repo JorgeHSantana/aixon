@@ -5,6 +5,78 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.31] - 2026-11-15
+
+Entra o `Decider`: uma pergunta fechada sobre um contexto, respondida por um
+motor de decisão (não de conversa) com a opção escolhida, a certeza e a chance
+de cada opção. Dois motores desde o primeiro dia, Jev (hospedado, sem treino) e
+Laya (local, pesos abertos), mais um `LLM` qualquer como comparação. No
+`ToolAgent`, duas listas declarativas encaixam decisores antes e depois do
+modelo. Quem não declara nada roda como na 0.1.30. Issue #33 (consolida #30 e
+#31).
+
+### Added
+- **`aixon.Decider`**: recurso declarativo (classe com atributos, sufixo
+  `Decider`). `instruction` e `options` (`{opção: critério}`, `{"yes", "no"}`
+  para sim ou não) ou `scale` (nota ordinal); `provider`, `model`, `certainty`
+  (padrão 0,8), `timeout` (3 s), `switch` (variável de ambiente que desliga só
+  aquele decisor), `redact`, `name`. Erro de declaração levanta `AixonError`
+  na definição da classe.
+- **`Decider.decide(context)` / `adecide`** devolvem `Decision` ou `None`.
+  Três desfechos: `sure` (certeza no limiar ou acima), não `sure` (dúvida) e
+  `None` (desligado, sem chave, timeout, erro, resposta malformada). Nunca
+  levantam em tempo de chamada.
+- **`aixon.Decision`**: `choice`, `certainty`, `chances`, `sure`,
+  `chance(opção)`, `score` (escala), `decider`, `provider`, `model`,
+  `latency_ms`, `usage`.
+- **`aixon.decide_many(context, [A, B])`** e `aixon.decider.adecide_many`:
+  decisores com o mesmo provider, modelo e `redact` vão numa requisição só.
+- **`aixon.Doubt`** e **`aixon.Check`**, e os atributos `doubts`, `checks` e
+  `check_redo_label` do `ToolAgent`. `doubts` lê a última mensagem do usuário
+  antes do modelo e anexa uma diretriz a ela (`applies` acha o caso em código
+  puro, `on_sure` e `on_unsure` devolvem a diretriz). `checks` lê a resposta e,
+  se ela falha, dispara UMA segunda tentativa com a instrução do `redo`; se a
+  segunda falha ou vem vazia, vale a primeira. Cobrem `invoke`, `ainvoke`,
+  `stream` e `astream`.
+- **Funções soltas em `aixon.decider`**: `resolve_doubts`, `apply_doubts`,
+  `failed_checks`, `redo_messages` e os gêmeos assíncronos.
+- **`aixon.deciders`**: `DeciderProvider`, `register_decider_provider`,
+  `get_decider_provider`, os tipos neutros `Question`, `RawAnswer`,
+  `ProviderReply`, e os providers `JevProvider` (`"jev"`, HTTP puro, sem extra;
+  `TYPESAFE_API_KEY`, `JEV_MODEL`, `JEV_BASE_URL`), `LayaProvider` (`"laya"`,
+  extra novo `aixon[laya]`; `LAYA_MODEL`, `LAYA_DEVICE`, `LAYA_MAX_LEN`),
+  `LLMDeciderProvider(llm)` e `FakeDeciderProvider` (testes e exemplos).
+- **`redact` obrigatório em provider hospedado**: decisor em provider
+  `hosted` sem `redact` declarado não define a classe; `redact = None` declara
+  que não há o que mascarar. O contexto é mascarado antes de sair do processo e
+  é o mascarado que vai para o trace.
+- **`AIXON_DECIDER_PROVIDER`**: motor dos decisores que não declaram
+  `provider`; trocar de motor não exige mudar código.
+- **`aixon decide eval pacote.modulo:Classe exemplos.jsonl`**: calibra o
+  limiar com exemplos rotulados; por limiar, quantas certas, quantas ERRADAS
+  com certeza, quantas dúvidas certas e quantas dúvidas desnecessárias. Sai com
+  1 quando nenhum exemplo foi respondido. Em código:
+  `aixon.deciders.evaluation.evaluate`.
+- **Observabilidade**: `aixon.observability.record_decision`; com o Langfuse
+  ligado, cada decisão vira um span `decider:<nome>` (falha em nível `WARNING`).
+- `docs/deciders.md`, seção no README, `aixon decide eval` em `docs/cli.md`,
+  `examples/decider/` (roda offline; com `AIXON_DECIDER_PROVIDER=jev` ou `laya`
+  usa o motor real).
+
+### Changed
+- `ToolAgent.invoke`, `ainvoke` e `stream` passam a delegar para
+  `_invoke_once`, `_ainvoke_once` e `_stream_once` (o corpo de antes, sem
+  mudança). `astream` mantém o próprio corpo e ganha um desvio inicial quando há
+  `doubts` ou `checks`. Agente sem as duas listas: mesmo comportamento, mesma
+  suíte.
+
+### Notes
+- O extra `laya` não entra em `aixon[all]` (traz o torch).
+- Tokens de decisão ficam em `Decision.usage` e no span; não somam em
+  `Message.usage`, que continua sendo a conta do modelo de conversa.
+- Para o que um decisor não serve, medido: conferir número ou cálculo, e
+  pergunta aberta sem as opções na mesa ("esta mensagem é ambígua?").
+
 ## [0.1.30] - 2026-11-02
 
 O `request_hook` ganha forma de classe. A aplicação herda de `RequestHook` e

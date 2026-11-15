@@ -143,6 +143,7 @@ Everything below is importable directly from `aixon`, for example `from aixon im
 | Orchestration | `Orchestrator`, `ReflectiveAgent`, `GraphState`, `END` (last two also in `aixon.state`) |
 | Retrieval / connectors / embeddings | `Connector`, `HttpToolConnector`, `MCPConnector`, `Embedding`, `OpenAIEmbedding`, `Retriever`, `TypeAccess`, `TavilyRetriever`, `RagieRetriever`, `WeaviateRetriever` |
 | Server (requires `aixon[server]`) | `Server`, `ProtocolAdapter`, `OpenAIAdapter`, `AnthropicAdapter`, `ParsedRequest` |
+| Deciders (0.1.31; section 30) | `Decider`, `Decision`, `Doubt`, `Check`, `decide_many`, `DeciderProvider`, `get_decider_provider`, `register_decider_provider`; more in `aixon.decider` and `aixon.deciders` |
 | Usage tracking (in `aixon.usage`, not re-exported from top-level `aixon`) | `merge_usage`, `UsageAccumulator`, `usage_scope`, `add_usage`, `current_usage_accumulator`, `usage_for` (0.1.29) |
 | Request context (0.1.29; module paths, not re-exported from top-level `aixon`) | `aixon.exceptions.RequestRejected`; `aixon.server.context.RequestContext`, `RequestDecision`, `RequestHookLike` (the callable alias; named `RequestHook` in 0.1.29), `make_context` (pure types, no fastapi); `aixon.server.compat.open_webui_request_hook` (the deprecated default hook). Section 18.10 |
 | Request hook classes (0.1.30; exported from `aixon.server`, not from top-level `aixon`) | `RequestHook` (base class), `Identity`, `HeaderIdentityHook`, `ChainRequestHook`, `RequestHookLike`; `aixon.server.compat.OpenWebUIRequestHook` (the default hook as a class). `build_usage`/`count_tokens` now live in `aixon.usage` (re-exported by `aixon.server.usage`). Section 18.10 |
@@ -2666,3 +2667,102 @@ Server().serve(host="0.0.0.0", port=8000)   # OpenAI-compatible at /v1
 ---
 
 End of the aixon technical reference, framework version 0.1.29.
+
+---
+
+## 30. Deciders: closed questions with a measured certainty (0.1.31)
+
+A `Decider` answers a CLOSED question about a context and reports how sure it is. It does not generate text and does not call tools. It is backed by a decision engine (not a chat model) that answers in roughly 250 ms. Use it for language decisions around an agent: which of two things the user means, whether the user is upset, whether an answer addresses what was asked. Full guide: `docs/deciders.md`. Runnable example: `examples/decider`.
+
+### 30.1 Declaring and asking
+
+```python
+from aixon import Decider
+
+class StoreOrProductDecider(Decider):
+    provider = "jev"
+    instruction = "Decide what the word in 'word' refers to in the user's 'message'."
+    options = {
+        "store":   "a store of the chain: a place, 'the' + name, the store's revenue",
+        "product": "an item for sale, a category or an ingredient",
+    }
+    redact = None
+
+decision = StoreOrProductDecider.decide({"message": text, "word": "olive"})
+```
+
+A decider is a class with attributes; it is never instantiated. The class name must end with `Decider` (otherwise `NamingError`).
+
+| Attribute | Default | Meaning |
+|---|---|---|
+| `instruction` | required | the question |
+| `options` | required unless `scale` | `{option: criterion}`, or a list of names; `{"yes", "no"}` is a yes/no question |
+| `scale` | required unless `options` | ordered level labels, lowest first |
+| `provider` | `None` | `"jev"`, `"laya"`, a `DeciderProvider` instance, or `None` to read the `AIXON_DECIDER_PROVIDER` environment variable at call time |
+| `model` | provider default | engine model or local checkpoint path |
+| `certainty` | `0.8` | threshold of `Decision.sure` |
+| `timeout` | `3.0` | seconds for a hosted engine |
+| `switch` | `None` | environment variable name; `0`, `off`, `false` or `no` turns this decider off |
+| `redact` | required on hosted providers | `(context) -> context` applied before the context leaves the process; `None` declares that nothing needs masking |
+| `name` | snake_case class name without the suffix | identifier in logs and traces |
+
+### 30.2 The three outcomes
+
+`decide(context)` (async: `adecide`) returns a `Decision` or `None`. It never raises at call time.
+
+- `None`: no decision. The decider is switched off, the provider has no key or is not installed, the call timed out or failed, or the reply was malformed. The caller carries on as if the decider did not exist.
+- `decision.sure` is `True`: `decision.certainty >= <Decider>.certainty`. Act on `decision.choice`.
+- `decision.sure` is `False`: the engine would be guessing. Take the fallback, typically asking the user back.
+
+`Decision` fields: `choice`, `certainty` (0 to 1; the engine's calibrated confidence when it reports one, otherwise the chance of the choice), `chances` (chance of every option), `sure`, `score` (scale deciders only), `decider`, `provider`, `model`, `latency_ms`, `usage`. Method `chance(option)`.
+
+Declaration mistakes raise `AixonError` when the class is defined: missing `instruction`, both or neither of `options` and `scale`, fewer than two options or levels, `certainty` outside (0, 1], non-positive `timeout`, an unknown provider name, a question kind the provider does not answer, more options than the provider accepts, and a hosted provider without `redact` declared.
+
+`decide_many(context, [A, B])` asks several deciders about one context; deciders that share provider, model and `redact` go in a single request. It returns `{DeciderClass: Decision | None}`. Async twin: `aixon.decider.adecide_many`.
+
+### 30.3 What a decider is for
+
+Measured on a production agent: it is good at language (irony 30 of 30; "is this a question back to the user?" 34 of 34 where a regex got 13; choosing a tool 98.8%) and bad at numbers (69% as a judge of a numeric answer). An open question without options ("is this message ambiguous?") flagged 32 of 39 clear messages. Rules: use it for language, never for numbers or arithmetic; ask concrete questions with the candidates in `options`; detect the case in code first; measure before turning one on.
+
+### 30.4 `doubts` and `checks` on a ToolAgent
+
+```python
+from aixon import Check, Doubt, LLM, ToolAgent
+
+class GroceryAgent(ToolAgent):
+    llm = LLM("gpt-4o-mini")
+    tools = [sales, stock]
+    doubts = [Doubt(StoreOrProductDecider, applies=find_store_word,
+                    on_sure=store_is_meant, on_unsure=ask_store_or_product)]
+    checks = [Check(AnswersTheQuestionDecider, redo=redo)]
+```
+
+Both lists are empty by default; an agent that leaves them empty runs exactly as before. Both cover `invoke`, `ainvoke`, `stream` and `astream`.
+
+`Doubt(decider, applies=None, context=None, on_sure=None, on_unsure=None)` is a decision about the user's LAST message, taken before the model runs. `applies(message)` is cheap pure code returning the concrete case (a dict) or `None`; on `None` the engine is not called. `context(message, case)` builds what the engine receives (default `{"message": message, **case}`). `on_sure(decision, case)` and `on_unsure(decision, case)` return a directive string or `None`. The directive is appended to the user's last message as `"<message>\n\n<directive>"`. A doubt with no decision adds nothing.
+
+`Check(decider, redo, fails=None, fails_below=0.3, context=None)` is a decision about the ANSWER. With a yes/no decider, "yes" means the answer is fine, and the default failure rule is: the chance of "yes" is below `fails_below`. A failed check triggers exactly ONE second attempt: the model receives the conversation, its failed answer, and the instruction returned by `redo(decision, answer)`. The second answer is not checked again. If the second attempt raises or is empty, the first answer stands. `Message.usage` covers both attempts. The reasoning line `check_redo_label` (default `"Reviewing the answer..."`) marks the redo. A decider that is not yes/no needs an explicit `fails=`.
+
+The same logic is available as functions in `aixon.decider`: `resolve_doubts`, `apply_doubts`, `failed_checks`, `redo_messages`, and async twins `aresolve_doubts`, `aapply_doubts`, `afailed_checks`.
+
+### 30.5 Engines (decision providers)
+
+| Provider | Where it runs | Requires | Notes |
+|---|---|---|---|
+| `"jev"` | hosted (TypeSafe AI), one HTTP request | `TYPESAFE_API_KEY`; no extra | zero-shot, about 250 ms, up to 255 options, reports calibrated confidence; `redact` required |
+| `"laya"` | local, in-process | `pip install aixon[laya]` | about 40 ms after the checkpoint loads; fine-tunable; nothing leaves the machine; not part of `aixon[all]` |
+| `LLMDeciderProvider(llm)` | wherever the `LLM` runs | the LLM's key | for comparison; its chances are the model's own estimate, not calibrated |
+| `FakeDeciderProvider(script)` | memory | nothing | tests and offline examples |
+
+Without its key, the `jev` provider is unavailable: nothing is sent and deciders on it return `None`. A custom engine subclasses `aixon.deciders.DeciderProvider` (attributes `name`, `hosted`, `capabilities`, `max_options`, `default_model`; methods `unavailable()` and `decide(context, questions, *, model, timeout) -> ProviderReply`) and is registered with `register_decider_provider`.
+
+Environment variables: `AIXON_DECIDER_PROVIDER`, `TYPESAFE_API_KEY`, `JEV_MODEL` (default `jev-latest`), `JEV_BASE_URL`, `LAYA_MODEL`, `LAYA_DEVICE` (default `cpu`), `LAYA_MAX_LEN` (default 1024).
+
+### 30.6 Redaction, calibration and tracing
+
+A hosted provider receives the context, so a decider on one must declare `redact`. The function receives a copy of the context and returns what may leave the process (for example, every amount replaced by `#`). If `redact` raises there is no decision and nothing is sent. The trace records the context after redaction.
+
+`aixon decide eval package.module:ClassName examples.jsonl [--thresholds 0.7,0.8,0.9]` calibrates the threshold. Each line of the file is `{"context": {...}, "expected": "<option>"}`, or `"expected": null` when the right behaviour is to be unsure. Per threshold it prints: `right` (sure and correct), `WRONG, sure` (sure and wrong, or sure where doubt was expected), `right doubt`, and `needless doubt`. Exit status 1 when no example was answered. In code: `aixon.deciders.evaluation.evaluate(decider, examples)`.
+
+With the Langfuse integration on, each decision is one span named `decider:<name>` with the redacted context, the choice, certainty and chances, and the provider, model, latency and usage. A failed call is a span at WARNING level. Decision tokens are in `Decision.usage`; they are not added to `Message.usage`.
+

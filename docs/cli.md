@@ -215,6 +215,39 @@ It starts `uvicorn` and mounts the `OpenAIAdapter` at `/v1`. See
 
 ---
 
+## aixon decide eval
+
+Calibrate a [`Decider`](deciders.md) against labelled examples: for each
+certainty threshold, how many answers were right, **wrong with certainty**, and
+in doubt.
+
+```bash
+aixon decide eval deciders:StoreOrProductDecider examples.jsonl
+aixon decide eval deciders:StoreOrProductDecider examples.jsonl --thresholds 0.7,0.8,0.9
+```
+
+| Argument / option | Meaning |
+|---|---|
+| `DECIDER` | `package.module:ClassName`, imported from the current directory |
+| `EXAMPLES` | JSON Lines file: `{"context": {...}, "expected": "<option>"}` per line, or `"expected": null` when the right behaviour is to be unsure |
+| `--thresholds`, `-t` | comma-separated thresholds (default `0.5,0.6,0.7,0.8,0.9,0.95`) |
+
+```
+decider: store_or_product    provider: jev
+examples: 12    answered: 12    no decision: 0
+choice accuracy (ignoring certainty): 100.0%
+median latency: 220 ms
+
+certainty   right  WRONG, sure  right doubt  needless doubt
+     0.80       8            2            2               0  <- current
+     0.95       8            1            3               0
+```
+
+The line marked `<- current` is the decider's own `certainty`. Exit status: `0`
+on a report, `1` when no example was answered (missing key, decider switched
+off) or the examples file is invalid, `2` on a bad argument. How to read the
+table: [Calibrating the threshold](deciders.md#calibrating-the-threshold-aixon-decide-eval).
+
 ## Environment variables
 
 | Variable | Description |

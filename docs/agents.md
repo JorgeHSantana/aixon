@@ -728,6 +728,33 @@ class RedatorAgent(ToolAgent):
   fiquem em turno próprio, ANTES de qualquer tool interna que
   grave/exporte/notifique.
 
+### Deciders: `doubts` and `checks` (0.1.31)
+
+A `ToolAgent` can declare decisions around its run. Both lists are empty by
+default, and an agent that leaves them empty behaves exactly as before.
+
+```python
+from aixon import Check, Doubt
+
+class GroceryAgent(ToolAgent):
+    llm = LLM("gpt-4o-mini")
+    tools = [sales, stock]
+    doubts = [Doubt(StoreOrProductDecider, applies=find_store_word,
+                    on_sure=store_is_meant, on_unsure=ask_store_or_product)]
+    checks = [Check(AnswersTheQuestionDecider, redo=redo)]
+    check_redo_label = "Reviewing the answer..."   # reasoning line on a redo; "" silences it
+```
+
+| Attribute | When | Effect |
+|---|---|---|
+| `doubts` | before the model, on the user's last message | each resolved doubt may append a directive to that message — e.g. "the user means the store", or "ask which one and wait" when the engine is unsure |
+| `checks` | after the model, on the answer | a failed check triggers **one** second attempt with the check's instruction; if that attempt fails or is empty, the first answer stands |
+
+Both apply to `invoke`, `ainvoke`, `stream` and `astream`. A decider that gives
+no decision (no key, switched off, timeout) changes nothing. An entry that is
+not a `Doubt(...)` / `Check(...)` is refused when the class is defined. Full
+guide: [deciders.md](deciders.md#in-a-toolagent-doubts-and-checks).
+
 ### Nesting agents as tools
 
 Any `Agent` exposes itself as a tool via `as_tool()`. The result is a neutral
@@ -1183,6 +1210,8 @@ the `aixon chat` selection menu.
 ---
 
 ## See also
+
+- [deciders.md](deciders.md) — `Decider`, `Doubt`, `Check`: closed questions with a measured certainty
 
 - [Architecture overview](architecture.md) — how agents, retrievers, and the server compose
 - [Retrieval](retrieval.md) — `Retriever.as_tool()` and the same `AgentTool` contract
