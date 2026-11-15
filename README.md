@@ -72,7 +72,8 @@ pip install "aixon[tavily]"            # Tavily web-search Retriever
 pip install "aixon[rerank]"            # flashrank reranking (for Weaviate)
 pip install "aixon[tiktoken]"          # token counting for the server `usage` field
 pip install "aixon[langfuse]"          # Langfuse observability (per-agent/user/model traces)
-pip install "aixon[all]"               # everything above
+pip install "aixon[laya]"              # local decision engine for `Decider` (pulls torch)
+pip install "aixon[all]"               # everything above except `laya`
 ```
 
 ---
@@ -253,6 +254,48 @@ limited): it ends the request, so the shield and the judge re-raise it for the
 
 ---
 
+## Decider — closed questions with a measured certainty
+
+A `Decider` does not generate text: it chooses between options you declare and
+reports how sure it is, in ~250 ms. Use it for the language decisions around an
+agent — which of two things the user means, whether the user is upset, whether
+an answer talks about what was asked.
+
+```python
+from aixon import Check, Decider, Doubt, LLM, ToolAgent
+
+class StoreOrProductDecider(Decider):
+    provider = "jev"                      # hosted, zero-shot; or "laya" (local, open weights)
+    instruction = "Decide what the word in 'word' refers to in the user's 'message'."
+    options = {
+        "store":   "a store of the chain: a place, 'the' + name, the store's revenue",
+        "product": "an item for sale, a category or an ingredient",
+    }
+    redact = None                         # hosted engines require you to say what gets masked
+
+decision = StoreOrProductDecider.decide({"message": text, "word": "olive"})
+if decision is None:      ...             # engine off, no key, timeout: carry on without it
+elif decision.sure:       ...             # decision.choice, decision.certainty, decision.chances
+else:                     ...             # unsure: ask the user back
+```
+
+`decide` never raises. On a `ToolAgent`, two declarative lists plug deciders
+in — `doubts` read the user's message before the model runs, `checks` read the
+answer and trigger one second attempt when it fails:
+
+```python
+class GroceryAgent(ToolAgent):
+    llm = LLM("gpt-4o-mini")
+    tools = [sales, stock]
+    doubts = [Doubt(StoreOrProductDecider, applies=find_store_word,
+                    on_sure=store_is_meant, on_unsure=ask_store_or_product)]
+    checks = [Check(AnswersTheQuestionDecider, redo=redo)]
+```
+
+`aixon decide eval module:MyDecider examples.jsonl` calibrates the certainty
+threshold against labelled examples. See [docs/deciders.md](docs/deciders.md)
+and the runnable [examples/decider](examples/decider).
+
 ## Retrieval — Retriever, Connector, Embedding
 
 `Retriever` is the base class for any agent that fetches context. Name it with a
@@ -366,6 +409,8 @@ generic server error: a chat message on a stream, an HTTP `429` without one.
 | `XAI_API_KEY` | _(required for xAI)_ | API key for the xAI provider (Grok models). `XAI_BASE_URL` overrides the default `https://api.x.ai/v1`. |
 | `AIXON_GATEWAY_BASE_URL` | _(required for the gateway)_ | URL of the OpenAI-compatible gateway, e.g. `http://gateway.example/v1`. |
 | `AIXON_GATEWAY_API_KEY` | _(required for the gateway)_ | API key for the gateway. The gateway provider never falls back to `OPENAI_API_KEY`. |
+| `TYPESAFE_API_KEY` | _(required for `provider = "jev"`)_ | API key of the Jev decision engine. Unset = deciders on it return `None`; nothing is sent. |
+| `AIXON_DECIDER_PROVIDER` | _(unset)_ | Decision engine of every `Decider` that declares no `provider` (`jev`, `laya`, or a registered name). Full list in [docs/deciders.md](docs/deciders.md#environment-variables). |
 | `AIXON_GATEWAY_USER_HEADER` | `X-OpenWebUI-User-Email` | Header that carries the end user's e-mail to the gateway (stripped; it must be a valid HTTP header name). Empty turns the forwarding off. |
 
 ---
@@ -405,6 +450,8 @@ never registered.
 - [Example: Reflective Review](examples/reflective_review) — the `ReflectiveAgent` loop, runnable offline
 - [Example: Tracing](examples/tracing) — the execution tree a tracer captures, runnable offline
 - [Example: Langfuse](examples/langfuse) — the first-class integration, offline demo or real traces
+- [Deciders](docs/deciders.md) — closed questions with a measured certainty: `Decider`, `Doubt`, `Check`, engines, calibration
+- [Example: Decider](examples/decider) — the three outcomes, an agent with doubts and checks, runnable offline
 - [Example: request_hook](examples/request_hook) — per-request model, identity and refusal from headers, the hook as a `HeaderIdentityHook` subclass
 
 ---

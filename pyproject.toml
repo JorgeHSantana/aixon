@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aixon"
-version = "0.1.30"
+version = "0.1.31"
 description = "Declarative AI-agent framework — composable agents, multi-agent orchestration, and a protocol-decoupled server"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -81,6 +81,9 @@ ragie = ["ragie>=2"]
 weaviate = ["weaviate-client>=4", "langchain-weaviate>=0.0.7", "langchain-text-splitters>=1"]
 rerank = ["flashrank>=0.2"]
 langfuse = ["langfuse>=3"]
+# Local decision engine for `Decider` (provider = "laya"). Pulls torch, so it is
+# NOT part of `all`; the hosted engine (provider = "jev") needs no extra.
+laya = ["laya>=0.3"]
 all = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",

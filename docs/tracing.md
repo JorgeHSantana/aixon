@@ -95,6 +95,11 @@ SDK quando você controla a invocação diretamente.
 - Tool calls com argumentos e resultados (o `TOOL ERROR` do shield aparece
   como resultado da tool — dá para medir taxa de falha de cada serviço).
 
+- Decisões dos `Decider` (0.1.31): um span `decider:<nome>` por decisão, com o
+  contexto já mascarado pelo `redact`, a opção, a certeza, a chance de cada
+  opção, a latência e os tokens; uma falha (timeout, erro HTTP) vira span em
+  nível `WARNING`. Detalhes em [deciders.md](deciders.md#tracing-and-logs).
+
 ## O que NÃO vem pronto (camada sua)
 
 Análises de negócio — assuntos, sentimento, satisfação por conversa — não

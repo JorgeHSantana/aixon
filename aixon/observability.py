@@ -218,3 +218,46 @@ def observe_request(agent_name: str, *, user_id: str | None = None,
                 client.flush()
             except Exception as exc:
                 _log.warning(f"Langfuse: flush falhou (spans podem atrasar): {exc}")
+
+
+def record_decision(name: str, *, input: Any, output: Any,
+                    metadata: dict | None = None, failed: bool = False,
+                    model: str | None = None, usage: dict | None = None,
+                    cost: float | None = None) -> None:
+    """One Langfuse observation per ``Decider`` call (``decider:<name>``),
+    nested under the request's trace when one is open. No-op when the
+    integration is off. Never raises: a decision must not fail because tracing
+    did.
+
+    With token ``usage`` the observation is a GENERATION carrying ``model``
+    and the usage, so it adds to the trace's token and cost totals next to the
+    chat model's. ``cost`` (US dollars, when the provider knows its price) is
+    sent as the cost; without it Langfuse prices the generation itself if the
+    project has a model definition matching ``model``. Without usage it is a
+    plain span.
+
+    The decision already happened when this runs, so the observation is opened
+    and closed at once; the real latency travels in ``metadata["latency_ms"]``."""
+    if _ensure_handler() is None:
+        return
+    try:
+        from langfuse import get_client
+
+        extra: dict[str, Any] = {}
+        if usage:
+            prompt = int(usage.get("prompt_tokens", 0))
+            completion = int(usage.get("completion_tokens", 0))
+            extra = {"as_type": "generation", "model": model,
+                     "usage_details": {"input": prompt, "output": completion,
+                                       "total": prompt + completion}}
+            if cost is not None:
+                extra["cost_details"] = {"total": float(cost)}
+        else:
+            extra = {"as_type": "span"}
+        with get_client().start_as_current_observation(
+            name=f"decider:{name}", input=input, output=output,
+            metadata=metadata, level="WARNING" if failed else None, **extra,
+        ):
+            pass
+    except Exception as exc:
+        _log.warning(f"Langfuse: falha ao registrar a decisão '{name}': {exc}")

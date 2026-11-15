@@ -1,0 +1,12 @@
+{"context": {"message": "How much did the Olive store make in August?", "word": "olive"}, "expected": "store"}
+{"context": {"message": "Who is the manager at Olive?", "word": "olive"}, "expected": "store"}
+{"context": {"message": "Revenue at Harbor last week?", "word": "harbor"}, "expected": "store"}
+{"context": {"message": "Is Harbor open on Sunday?", "word": "harbor"}, "expected": "store"}
+{"context": {"message": "How many jars of olive did we sell in August?", "word": "olive"}, "expected": "product"}
+{"context": {"message": "What is the margin on olive oil?", "word": "olive"}, "expected": "product"}
+{"context": {"message": "Do we have olive in stock?", "word": "olive"}, "expected": "product"}
+{"context": {"message": "Price of the green olive 200g?", "word": "olive"}, "expected": "product"}
+{"context": {"message": "How much did olive sell in August?", "word": "olive"}, "expected": null}
+{"context": {"message": "olive, last month?", "word": "olive"}, "expected": null}
+{"context": {"message": "Compare olive with last year.", "word": "olive"}, "expected": null}
+{"context": {"message": "How is olive doing?", "word": "olive"}, "expected": null}
