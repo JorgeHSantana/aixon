@@ -218,3 +218,25 @@ def observe_request(agent_name: str, *, user_id: str | None = None,
                 client.flush()
             except Exception as exc:
                 _log.warning(f"Langfuse: flush falhou (spans podem atrasar): {exc}")
+
+
+def record_decision(name: str, *, input: Any, output: Any,
+                    metadata: dict | None = None, failed: bool = False) -> None:
+    """One Langfuse span per ``Decider`` call (``decider:<name>``), nested
+    under the request's trace when one is open. No-op when the integration is
+    off. Never raises: a decision must not fail because tracing did.
+
+    The decision already happened when this runs, so the span is opened and
+    closed at once; the real latency travels in ``metadata["latency_ms"]``."""
+    if _ensure_handler() is None:
+        return
+    try:
+        from langfuse import get_client
+
+        with get_client().start_as_current_observation(
+            name=f"decider:{name}", as_type="span", input=input, output=output,
+            metadata=metadata, level="WARNING" if failed else None,
+        ):
+            pass
+    except Exception as exc:
+        _log.warning(f"Langfuse: falha ao registrar a decisão '{name}': {exc}")

@@ -13,6 +13,8 @@ from aixon.agents.orchestrator import Orchestrator
 from aixon.agents.reflective import ReflectiveAgent
 from aixon.agents.tool_agent import ToolAgent
 from aixon.connector import Connector, HttpToolConnector
+from aixon.decider import Check, Decider, Decision, Doubt, decide_many
+from aixon.deciders import DeciderProvider, get_decider_provider, register_decider_provider
 from aixon.discovery import autodiscover
 from aixon.mcp import MCPConnector, MCPToolset
 from aixon.embedding import Embedding, OpenAIEmbedding
@@ -88,6 +90,15 @@ __all__ = [
     "GatewayRateLimited",
     "classify_gateway_error",
     "ImposedModelViolation",
+    # 0.1.31 — deciders (closed questions with a measured certainty)
+    "Check",
+    "Decider",
+    "DeciderProvider",
+    "Decision",
+    "Doubt",
+    "decide_many",
+    "get_decider_provider",
+    "register_decider_provider",
 ]
 
 # Plan 5 — server surface. aixon.server.server, protocol, and both adapters

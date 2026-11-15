@@ -132,6 +132,18 @@ class ToolAgent(Agent, abstract=True):
     # answer.
     client_system: Literal["replace", "append"] = "replace"
 
+    # Deciders (0.1.31, see docs/deciders.md). Both lists are empty by default
+    # and an agent that leaves them empty runs exactly as before.
+    # ``doubts``: decisions about the user's LAST message, taken before the
+    # model runs; each may append a directive to that message (or tell the
+    # model to ask the user back). ``checks``: decisions about the ANSWER; a
+    # failed check triggers ONE second attempt carrying the check's
+    # instruction. Both cover invoke, ainvoke, stream and astream.
+    doubts: list = []
+    checks: list = []
+    # Reasoning line emitted when a check sends the answer back ("" = silent).
+    check_redo_label: str = "Reviewing the answer..."
+
     def _timeout_chunk(self) -> Chunk:
         """The pass-through timeout-content chunk (#19 sweep #3): built once so
         ``stream``/``astream`` emit byte-identical text, and so a wrapper
@@ -221,6 +233,17 @@ class ToolAgent(Agent, abstract=True):
                 f"'{cls.__name__}' has client_system={client_system!r}; "
                 f"use 'replace' or 'append'."
             )
+        # 0.1.31: a class or a bare Decider in these lists is a declaration
+        # mistake that would otherwise only surface on the first request.
+        from aixon.decider import Check, Doubt
+
+        for attr, kind in (("doubts", Doubt), ("checks", Check)):
+            for item in getattr(cls, attr, None) or []:
+                if not isinstance(item, kind):
+                    raise AixonError(
+                        f"'{cls.__name__}'.{attr} takes {kind.__name__}(...) entries; "
+                        f"got {item!r}."
+                    )
 
     # ---- internal: build the langgraph agent + neutral message prep -------
 
@@ -567,7 +590,7 @@ class ToolAgent(Agent, abstract=True):
 
     # ---- neutral boundary: invoke ---------------------------------------
 
-    def invoke(self, messages: list[Message]) -> Message:
+    def _invoke_once(self, messages: list[Message]) -> Message:
         """Run the tool-calling graph to completion; return a neutral Message.
 
         Reasoning collected during the run (tool-step labels, plus reasoning a
@@ -612,7 +635,7 @@ class ToolAgent(Agent, abstract=True):
 
     # ---- neutral boundary: stream ---------------------------------------
 
-    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+    def _stream_once(self, messages: list[Message]) -> Iterator[Chunk]:
         """Stream the run: Chunk(reasoning=...) for tool-step labels (parent +
         nested) and Chunk(content=...) for the final answer; final
         Chunk(done=True)."""
@@ -656,7 +679,7 @@ class ToolAgent(Agent, abstract=True):
 
     # ---- async neutral boundary -----------------------------------------
 
-    async def ainvoke(self, messages: list[Message]) -> Message:
+    async def _ainvoke_once(self, messages: list[Message]) -> Message:
         """Async invoke over LangGraph's native ``ainvoke``. ``max_execution_time``
         becomes a REAL deadline here: the run is wrapped in ``asyncio.wait_for``
         and cancelled at the next await point if it overruns (unlike sync
@@ -695,6 +718,14 @@ class ToolAgent(Agent, abstract=True):
     async def astream(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """Async stream mirroring ``stream`` over the graph's ``astream``.
 
+        With ``doubts``/``checks`` declared (0.1.31) the run is driven by
+        ``_astream_decided``, which re-enters this method once per attempt
+        with the messages wrapped in ``_DecidedPass``. An agent without them
+        skips the first ``if`` and runs the body below exactly as before:
+        the body stays HERE, in the public async generator, because a
+        delegating generator does not forward ``athrow``/cancellation to an
+        inner one the way this teardown needs (see the ``finally``).
+
         ``max_execution_time`` is a HARD wall here, not just a between-update
         check: each step is awaited under a poll loop (below) with the time
         remaining until the deadline as the outer bound, so a step that stalls
@@ -728,6 +759,14 @@ class ToolAgent(Agent, abstract=True):
 
         from langgraph.errors import GraphRecursionError
 
+        if self._decides() and not isinstance(messages, _DecidedPass):
+            decided = self._astream_decided(messages)
+            try:
+                async for chunk in decided:
+                    yield chunk
+            finally:
+                await decided.aclose()  # type: ignore[attr-defined]
+            return
 
         agent, lc_messages, config, client_tool_names = self._build_agent(messages)
         deadline = time.monotonic() + self.max_execution_time
@@ -824,3 +863,197 @@ class ToolAgent(Agent, abstract=True):
         for chunk in self._tail_chunks(seen_messages, client_tool_names,
                                        final_content, timed_out):
             yield chunk
+
+
+    # ---- neutral boundary with deciders (0.1.31) ---------------------------
+    #
+    # The four public entry points. With no ``doubts`` and no ``checks`` they
+    # are a straight pass to the ``_*_once`` runs above. Otherwise: doubts are
+    # resolved against the user's last message, the run happens, and a failed
+    # check triggers ONE more run. Content only ever leaves a run at its tail
+    # (see ``_tail_chunks``), so holding it back until the checks pass costs no
+    # liveness: reasoning chunks keep flowing as they are produced.
+
+    def _decides(self) -> bool:
+        return bool(self.doubts or self.checks)
+
+    def _checkable(self, content: str, has_tool_calls: bool) -> bool:
+        """An answer goes through the checks only when it IS an answer: not a
+        client tool call, not empty, not the pass-through timeout text."""
+        return bool(self.checks) and not has_tool_calls and bool(content.strip()) \
+            and content not in self.timeout_texts()
+
+    def _log_redo(self, failures: list) -> None:
+        names = ", ".join(f.check.decider.name for f in failures)
+        _log.info(f"agent '{self.name}': answer failed check(s) [{names}]; second attempt")
+
+    def _merged(self, first: Message, second: Message | None) -> Message:
+        """The answer after a second attempt: the second one when it produced
+        something, else the first. Usage covers both runs."""
+        from aixon.usage import merge_usage
+
+        if second is None or not (second.content.strip() or second.tool_calls):
+            return first
+        second.usage = merge_usage(first.usage, second.usage)
+        lines = [first.reasoning, self.check_redo_label, second.reasoning]
+        second.reasoning = "\n".join(line for line in lines if line) or None
+        return second
+
+    def invoke(self, messages: list[Message]) -> Message:
+        """Run to completion and return a neutral ``Message``. See
+        ``_invoke_once`` for the run itself; ``doubts`` and ``checks`` are
+        applied around it."""
+        if not self._decides():
+            return self._invoke_once(messages)
+        from aixon.decider import apply_doubts, failed_checks, redo_messages
+
+        question = _last_user_text(messages)
+        messages = apply_doubts(messages, self.doubts)
+        first = self._invoke_once(messages)
+        if not self._checkable(first.content, bool(first.tool_calls)):
+            return first
+        failures = failed_checks(question, first.content, self.checks)
+        if not failures:
+            return first
+        self._log_redo(failures)
+        try:
+            second: Message | None = self._invoke_once(
+                redo_messages(messages, first.content, failures))
+        except Exception as exc:  # the first answer stands
+            _log.warning(f"agent '{self.name}': second attempt failed ({exc!r}); keeping the first answer")
+            second = None
+        return self._merged(first, second)
+
+    async def ainvoke(self, messages: list[Message]) -> Message:
+        """Async ``invoke``. See ``_ainvoke_once`` for the run itself."""
+        if not self._decides():
+            return await self._ainvoke_once(messages)
+        from aixon.decider import aapply_doubts, afailed_checks, redo_messages
+
+        question = _last_user_text(messages)
+        messages = await aapply_doubts(messages, self.doubts)
+        first = await self._ainvoke_once(messages)
+        if not self._checkable(first.content, bool(first.tool_calls)):
+            return first
+        failures = await afailed_checks(question, first.content, self.checks)
+        if not failures:
+            return first
+        self._log_redo(failures)
+        try:
+            second: Message | None = await self._ainvoke_once(
+                redo_messages(messages, first.content, failures))
+        except Exception as exc:  # the first answer stands
+            _log.warning(f"agent '{self.name}': second attempt failed ({exc!r}); keeping the first answer")
+            second = None
+        return self._merged(first, second)
+
+    def stream(self, messages: list[Message]) -> Iterator[Chunk]:
+        """Stream the run. See ``_stream_once`` for the run itself."""
+        if not self._decides():
+            yield from self._stream_once(messages)
+            return
+        from aixon.decider import apply_doubts, failed_checks, redo_messages
+
+        question = _last_user_text(messages)
+        messages = apply_doubts(messages, self.doubts)
+        if not self.checks:
+            yield from self._stream_once(messages)
+            return
+        held: list[Chunk] = []
+        for chunk in self._stream_once(messages):
+            if _is_reasoning_only(chunk):
+                yield chunk
+            else:
+                held.append(chunk)
+        answer = "".join(c.content for c in held)
+        failures = []
+        if self._checkable(answer, any(c.tool_calls for c in held)):
+            failures = failed_checks(question, answer, self.checks)
+        if not failures:
+            yield from held
+            return
+        self._log_redo(failures)
+        if self.check_redo_label:
+            yield Chunk(reasoning=self.check_redo_label + "\n")
+        again: list[Chunk] = []
+        try:
+            for chunk in self._stream_once(redo_messages(messages, answer, failures)):
+                if _is_reasoning_only(chunk):
+                    yield chunk
+                else:
+                    again.append(chunk)
+        except Exception as exc:  # the first answer stands
+            _log.warning(f"agent '{self.name}': second attempt failed ({exc!r}); keeping the first answer")
+            again = []
+        yield from (again if _has_answer(again) else held)
+
+    def _astream_once(self, messages: list[Message]) -> AsyncIterator[Chunk]:
+        """One attempt of the async stream: ``ToolAgent.astream``'s own body,
+        entered with the marker that skips the decider prologue."""
+        return ToolAgent.astream(self, _DecidedPass(messages))
+
+    async def _astream_decided(self, messages: list[Message]) -> AsyncIterator[Chunk]:
+        from aixon.decider import aapply_doubts, afailed_checks, redo_messages
+
+        question = _last_user_text(messages)
+        messages = await aapply_doubts(messages, self.doubts)
+        held: list[Chunk] = []
+        first = self._astream_once(messages)
+        try:
+            async for chunk in first:
+                if not self.checks or _is_reasoning_only(chunk):
+                    yield chunk
+                else:
+                    held.append(chunk)
+        finally:
+            await first.aclose()  # type: ignore[attr-defined]
+        if not self.checks:
+            return
+        answer = "".join(c.content for c in held)
+        failures = []
+        if self._checkable(answer, any(c.tool_calls for c in held)):
+            failures = await afailed_checks(question, answer, self.checks)
+        if not failures:
+            for chunk in held:
+                yield chunk
+            return
+        self._log_redo(failures)
+        if self.check_redo_label:
+            yield Chunk(reasoning=self.check_redo_label + "\n")
+        again: list[Chunk] = []
+        second = self._astream_once(redo_messages(messages, answer, failures))
+        try:
+            async for chunk in second:
+                if _is_reasoning_only(chunk):
+                    yield chunk
+                else:
+                    again.append(chunk)
+        except Exception as exc:  # the first answer stands
+            _log.warning(f"agent '{self.name}': second attempt failed ({exc!r}); keeping the first answer")
+            again = []
+        finally:
+            await second.aclose()  # type: ignore[attr-defined]
+        for chunk in (again if _has_answer(again) else held):
+            yield chunk
+
+
+class _DecidedPass(list):
+    """Marks the messages of ONE attempt inside a decided ``astream`` run, so
+    re-entering ``astream`` runs the graph instead of deciding again. A list
+    subclass (not a context variable) so a nested agent's own run, which gets
+    its own plain list, is never mistaken for an attempt of the outer one."""
+
+
+def _last_user_text(messages: list[Message]) -> str:
+    """The user's turn the run answers: the last message when it is a user
+    message, else "" (a run resuming after a tool result has no new question)."""
+    return messages[-1].content if messages and messages[-1].role == "user" else ""
+
+
+def _is_reasoning_only(chunk: Chunk) -> bool:
+    return not (chunk.content or chunk.tool_calls or chunk.done)
+
+
+def _has_answer(chunks: list[Chunk]) -> bool:
+    return any(c.content.strip() or c.tool_calls for c in chunks)
+

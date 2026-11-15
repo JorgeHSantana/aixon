@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -508,3 +508,62 @@ def serve_command(host: str, port: int, package: str, anthropic: bool) -> None:
     dialects = "OpenAI + Anthropic" if anthropic else "OpenAI"
     click.echo(f"Starting aixon server ({dialects}) on {host}:{port} ...")
     server.serve(host=host, port=port)
+
+
+# ---------------------------------------------------------------------------
+# decide
+# ---------------------------------------------------------------------------
+@app.group(name="decide")
+def decide_group() -> None:
+    """Tools for deciders (closed questions with a measured certainty)."""
+
+
+def _load_decider(target: str) -> Any:
+    """Resolve ``package.module:ClassName`` to a Decider subclass."""
+    import importlib
+
+    from aixon.decider import Decider
+
+    module_name, _, class_name = target.partition(":")
+    if not module_name or not class_name:
+        raise click.UsageError(f"'{target}' is not in the form package.module:ClassName.")
+    try:
+        loaded = getattr(importlib.import_module(module_name), class_name)
+    except ModuleNotFoundError as exc:
+        raise click.UsageError(f"cannot import '{module_name}': {exc}")
+    except AttributeError:
+        raise click.UsageError(f"'{module_name}' has no '{class_name}'.")
+    if not (isinstance(loaded, type) and issubclass(loaded, Decider)):
+        raise click.UsageError(f"'{target}' is not a Decider subclass.")
+    return loaded
+
+
+@decide_group.command(name="eval")
+@click.argument("decider")
+@click.argument("examples", type=click.Path(exists=True, dir_okay=False))
+@click.option("--thresholds", "-t", default=None,
+              help="Comma-separated certainty thresholds (default 0.5,0.6,0.7,0.8,0.9,0.95).")
+def decide_eval_command(decider: str, examples: str, thresholds: str | None) -> None:
+    """Calibrate DECIDER (package.module:ClassName) against EXAMPLES (JSON Lines).
+
+    Each line: {"context": {...}, "expected": "<option>"} or "expected": null
+    when the right behaviour is to be unsure. Prints, per certainty threshold,
+    how many answers were right, WRONG with certainty, and in doubt.
+    """
+    from aixon.deciders.evaluation import DEFAULT_THRESHOLDS, evaluate, load_examples, render
+    from aixon.exceptions import AixonError
+
+    _ensure_cwd_on_path()
+    cls = _load_decider(decider)
+    try:
+        levels = (tuple(float(t) for t in thresholds.split(",")) if thresholds
+                  else DEFAULT_THRESHOLDS)
+    except ValueError:
+        raise click.UsageError("--thresholds takes numbers separated by commas, e.g. 0.7,0.8,0.9.")
+    try:
+        report = evaluate(cls, load_examples(examples), levels)
+    except AixonError as exc:
+        raise click.ClickException(exc.message)
+    click.echo(render(report, current=float(cls.certainty)))
+    if not report.answered:
+        raise click.exceptions.Exit(1)
