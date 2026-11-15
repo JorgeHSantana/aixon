@@ -112,6 +112,11 @@ class DeciderProvider(ABC):
         call so a missing key costs nothing and never raises."""
         return None
 
+    def price_per_mtok(self) -> tuple[float, float] | None:
+        """US dollars per million (input, output) tokens, or None when unknown.
+        Known = ``Decision.cost`` is filled and the trace carries the cost."""
+        return None
+
     @abstractmethod
     def decide(
         self,

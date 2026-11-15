@@ -40,11 +40,12 @@ sense? redo once).
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, ClassVar, Iterable, Mapping, Sequence, Union
 
 from aixon.deciders.base import (
@@ -81,6 +82,8 @@ class Decision:
       and "I would be guessing".
     - ``score``: fractional position on a scale (0 = first level); scale
       deciders only.
+    - ``usage`` / ``cost``: tokens the engine reported, and what they cost in
+      US dollars when the provider knows its price (``None`` otherwise).
     """
 
     choice: str
@@ -93,6 +96,7 @@ class Decision:
     latency_ms: float = 0.0
     score: float | None = None
     usage: dict[str, int] | None = None
+    cost: float | None = None
 
     def chance(self, option: str) -> float:
         """Chance of *option* (0.0 when the engine did not report it)."""
@@ -254,7 +258,10 @@ class Decider:
             return None, "no_provider"
         if cls._misfit(provider):
             return provider, "misconfigured"
-        return provider, provider.unavailable()
+        try:
+            return provider, provider.unavailable()
+        except Exception as exc:  # noqa: BLE001 — a custom provider's own bug
+            return provider, type(exc).__name__
 
     # ---- asking ----------------------------------------------------------
 
@@ -285,10 +292,32 @@ class Decider:
             latency_ms=round(latency_ms, 1),
             score=raw.score,
             usage=reply.usage,
+            cost=_cost(provider, reply.usage),
         )
 
 
 DeciderType = type[Decider]
+
+
+def _cost(provider: DeciderProvider, usage: dict[str, int] | None) -> float | None:
+    """US dollars for one request, from the provider's price per million tokens."""
+    try:
+        price = provider.price_per_mtok()
+        if price is None or not usage:
+            return None
+        return round((usage.get("prompt_tokens", 0) * price[0]
+                      + usage.get("completion_tokens", 0) * price[1]) / 1_000_000, 10)
+    except Exception:  # noqa: BLE001 — a bad price never costs a decision
+        return None
+
+
+def _context_key(context: Mapping[str, Any]) -> str:
+    """Stable text for "these two contexts are the same request". A context
+    that cannot be serialized gets a key of its own (it is simply not batched)."""
+    try:
+        return json.dumps(context, sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001
+        return f"unserializable:{id(context)}"
 
 
 def _record(decider: DeciderType, context: Mapping[str, Any] | None,
@@ -309,7 +338,8 @@ def _record(decider: DeciderType, context: Mapping[str, Any] | None,
                     "sure": decision.sure, "chances": decision.chances},
             metadata={"provider": decision.provider, "model": decision.model,
                       "latency_ms": decision.latency_ms, "usage": decision.usage,
-                      "threshold": float(decider.certainty)},
+                      "cost_usd": decision.cost, "threshold": float(decider.certainty)},
+            model=decision.model, usage=decision.usage, cost=decision.cost,
         )
         return
     quiet = reason in ("switched_off", "no_key", "no_provider", "not_installed")
@@ -344,21 +374,33 @@ def decide_many(context: Mapping[str, Any],
     ``None``; one group failing does not affect another. Never raises."""
     deciders = list(dict.fromkeys(deciders))
     results: dict[DeciderType, Decision | None] = {d: None for d in deciders}
-    groups: dict[tuple[int, str | None, int], list[DeciderType]] = {}
-    providers: dict[int, DeciderProvider] = {}
+    # Grouped by the provider and redactor OBJECTS (never their id(): a bound
+    # method is a temporary, and two temporaries can share an address — which
+    # would send one decider's context through another's redactor).
+    groups: dict[tuple[DeciderProvider, str | None, Any], list[DeciderType]] = {}
     for decider in deciders:
-        provider, reason = decider._why_not()
-        if reason or provider is None:
+        provider: DeciderProvider | None = None
+        reason: str | None = None
+        group_key: tuple[DeciderProvider, str | None, Any] | None = None
+        try:
+            provider, reason = decider._why_not()
+            if provider is not None:
+                redactor = decider._redactor()
+                group_key = (provider, decider.model, getattr(redactor, "__func__", redactor))
+                hash(group_key)
+        except Exception as exc:  # noqa: BLE001 — never raises
+            reason = type(exc).__name__
+        if reason or provider is None or group_key is None:
             _record(decider, None, None, reason or "no_provider", provider)
             continue
-        providers[id(provider)] = provider
-        groups.setdefault((id(provider), decider.model, id(decider._redactor())), []).append(decider)
-    for (provider_id, model, _), group in groups.items():
-        provider = providers[provider_id]
+        groups.setdefault(group_key, []).append(decider)
+    for (provider, model, _), group in groups.items():
         sent: Mapping[str, Any] | None = None
         try:
             redactor = group[0]._redactor()
-            sent = redactor(dict(context)) if redactor else dict(context)
+            # A deep copy: a redactor that masks a nested value in place must
+            # not reach into the caller's own context.
+            sent = redactor(copy.deepcopy(dict(context))) if redactor else dict(context)
             names: dict[str, DeciderType] = {}
             for decider in group:
                 key = decider.name if decider.name not in names else f"{decider.name}_{len(names)}"
@@ -367,8 +409,14 @@ def decide_many(context: Mapping[str, Any],
             reply = _ask(provider, sent, {key: d.question() for key, d in names.items()},
                          model=model, timeout=min(float(d.timeout) for d in group))
             latency_ms = (time.monotonic() - started) * 1000
-            for key, decider in names.items():
-                results[decider] = decider._decision(reply.answers[key], reply, provider, latency_ms)
+            for position, (key, decider) in enumerate(names.items()):
+                decision = decider._decision(reply.answers[key], reply, provider, latency_ms)
+                if position:
+                    # One request, one bill: the tokens and the cost are
+                    # reported once, on the first decision of the group, so
+                    # summing decisions (or trace spans) never double-counts.
+                    decision = replace(decision, usage=None, cost=None)
+                results[decider] = decision
         except Exception as exc:  # noqa: BLE001 — a decision never breaks the caller
             for decider in group:
                 results[decider] = None
@@ -456,6 +504,7 @@ def _outcomes(found: list[tuple[Doubt, Case, Mapping[str, Any]]],
         hook = doubt.on_sure if decision.sure else doubt.on_unsure
         try:
             directive = hook(decision, case) if hook else None
+            directive = None if directive is None else str(directive)
         except Exception as exc:  # noqa: BLE001
             _log.warning(f"doubt '{doubt.decider.name}' hook failed: {type(exc).__name__}: {exc}")
             directive = None
@@ -469,7 +518,7 @@ def _decide_cases(found: list[tuple[Doubt, Case, Mapping[str, Any]]]) -> list[De
     decisions: list[Decision | None] = [None] * len(found)
     by_context: dict[str, list[int]] = {}
     for i, (_, _, context) in enumerate(found):
-        by_context.setdefault(json.dumps(context, sort_keys=True, default=str), []).append(i)
+        by_context.setdefault(_context_key(context), []).append(i)
     for indexes in by_context.values():
         answered = decide_many(found[indexes[0]][2], [found[i][0].decider for i in indexes])
         for i in indexes:
@@ -497,8 +546,7 @@ def _with_directives(messages: list[Message], outcomes: list[DoubtOutcome]) -> l
     index = _last_user(messages)
     assert index is not None
     last = messages[index]
-    patched = Message(role=last.role, content=last.content + "\n\n" + "\n".join(directives),
-                      name=last.name)
+    patched = replace(last, content=last.content + "\n\n" + "\n".join(directives))
     return [*messages[:index], patched, *messages[index + 1:]]
 
 
@@ -592,8 +640,7 @@ def failed_checks(message: str, answer: str, checks: Sequence[Check]) -> list[Ch
         except Exception as exc:  # noqa: BLE001
             _log.warning(f"check '{check.decider.name}' skipped: {type(exc).__name__}: {exc}")
             continue
-        by_context.setdefault(json.dumps(context, sort_keys=True, default=str),
-                              (context, []))[1].append(check)
+        by_context.setdefault(_context_key(context), (context, []))[1].append(check)
     for context, group in by_context.values():
         answered = decide_many(context, [check.decider for check in group])
         for check in group:
@@ -601,7 +648,7 @@ def failed_checks(message: str, answer: str, checks: Sequence[Check]) -> list[Ch
             try:
                 if decision is None or not check.failed(decision):
                     continue
-                failures.append(CheckFailure(check, decision, check.redo(decision, answer)))
+                failures.append(CheckFailure(check, decision, str(check.redo(decision, answer))))
             except Exception as exc:  # noqa: BLE001
                 _log.warning(f"check '{check.decider.name}' hook failed: {type(exc).__name__}: {exc}")
     return failures

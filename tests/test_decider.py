@@ -283,3 +283,72 @@ def test_name_defaults_to_snake_case_and_can_be_set():
 
     assert StoreOrProductDecider.name == "store_or_product"
     assert make(FakeDeciderProvider(), name="custom").name == "custom"
+
+
+# ---- review round (2026-11-15): holes in "never raises", isolation, cost -----
+
+def test_a_provider_whose_unavailable_raises_is_no_decision():
+    provider = FakeDeciderProvider()
+    provider.unavailable = lambda: (_ for _ in ()).throw(RuntimeError("bug in a custom provider"))
+    assert make(provider).decide({"message": "x"}) is None
+
+
+def test_redact_gets_a_deep_copy():
+    def mask_nested(context):
+        context["user"]["id"] = "###"      # masks in place, on a nested value
+        return context
+
+    provider = FakeDeciderProvider(hosted=True)
+    original = {"user": {"id": "123"}}
+    make(provider, redact=mask_nested).decide(original)
+    assert provider.calls[0][0] == {"user": {"id": "###"}} and original == {"user": {"id": "123"}}
+
+
+def test_deciders_with_different_classmethod_redactors_never_share_a_request():
+    provider = FakeDeciderProvider(hosted=True)
+
+    class ADecider(Decider):
+        instruction = "a?"
+        options = ["yes", "no"]
+
+        @classmethod
+        def redact(cls, context):
+            return {"seen_by": "A"}
+
+    class BDecider(Decider):
+        instruction = "b?"
+        options = ["yes", "no"]
+
+        @classmethod
+        def redact(cls, context):
+            return {"seen_by": "B"}
+
+    ADecider.provider = BDecider.provider = provider
+    decide_many({"secret": 1}, [ADecider, BDecider])
+    assert sorted((ctx["seen_by"], names) for ctx, names in provider.calls) == [("A", ("a",)), ("B", ("b",))]
+
+
+def test_cost_comes_from_the_provider_price_and_is_reported_once_per_request():
+    from aixon.deciders import ProviderReply
+
+    class Priced(FakeDeciderProvider):
+        def price_per_mtok(self):
+            return (0.05, 0.10)
+
+        def decide(self, context, questions, *, model, timeout):
+            reply = super().decide(context, questions, model=model, timeout=timeout)
+            return ProviderReply(reply.answers, {"prompt_tokens": 400, "completion_tokens": 50,
+                                                 "total_tokens": 450}, "priced-1")
+
+    Tone, Irony = _pair(Priced())
+    out = decide_many({"message": "x"}, [Tone, Irony])
+    assert out[Tone].cost == pytest.approx((400 * 0.05 + 50 * 0.10) / 1e6)
+    assert out[Tone].usage["total_tokens"] == 450
+    assert out[Irony].cost is None and out[Irony].usage is None   # same request: billed once
+
+
+def test_unknown_price_means_no_cost_and_a_broken_price_never_breaks_a_decision():
+    assert make(FakeDeciderProvider()).decide({"message": "x"}).cost is None
+    provider = FakeDeciderProvider()
+    provider.price_per_mtok = lambda: (_ for _ in ()).throw(ValueError("bad env"))
+    assert make(provider).decide({"message": "x"}).choice == "neutral"

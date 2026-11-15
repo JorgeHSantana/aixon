@@ -291,3 +291,51 @@ def test_a_provider_needs_a_name():
 
     with pytest.raises(AixonError, match="non-empty `name`"):
         register_decider_provider(Nameless())
+
+
+# ---- review round (2026-11-15) -------------------------------------------------
+
+def test_jev_price_from_the_environment(monkeypatch):
+    provider, _ = _jev()
+    monkeypatch.delenv("JEV_PRICE_PER_MTOK", raising=False)
+    assert provider.price_per_mtok() is None            # no price hard-coded in the library
+    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "0.042")
+    assert provider.price_per_mtok() == (0.042, 0.042)
+    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "0.042, 0.084")
+    assert provider.price_per_mtok() == (0.042, 0.084)
+
+
+def test_jev_decision_carries_the_cost(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "0.042")
+    provider, _ = _jev()
+
+    class ToneDecider(Decider):
+        instruction = "Tone?"
+        options = {"neutral": "plain", "upset": "complaint"}
+        redact = None
+
+    ToneDecider.provider = provider
+    assert ToneDecider.decide({"message": "x"}).cost == pytest.approx(479 * 0.042 / 1e6)
+    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "cheap")   # a typo in the env: no cost, still a decision
+    decision = ToneDecider.decide({"message": "x"})
+    assert decision.choice == "upset" and decision.cost is None
+
+
+def test_laya_is_free_and_does_not_retry_a_failed_load_on_every_decision():
+    loads = []
+
+    def loader(model, device):
+        loads.append(model)
+        raise OSError("checkpoint not found")
+
+    provider = LayaProvider(loader)
+    assert provider.price_per_mtok() == (0.0, 0.0)
+    for _ in range(3):
+        with pytest.raises(OSError):
+            provider.decide({}, {"tone": CHOICE}, model="/missing", timeout=3)
+    assert loads == ["/missing"]
+    provider.RETRY_LOAD_AFTER_S = 0
+    with pytest.raises(OSError):
+        provider.decide({}, {"tone": CHOICE}, model="/missing", timeout=3)
+    assert loads == ["/missing", "/missing"]

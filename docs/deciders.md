@@ -32,7 +32,7 @@ Runnable, offline: [examples/decider](../examples/decider).
 - [Engines](#engines)
 - [Data that leaves the process: `redact`](#data-that-leaves-the-process-redact)
 - [Calibrating the threshold: `aixon decide eval`](#calibrating-the-threshold-aixon-decide-eval)
-- [Tracing and logs](#tracing-and-logs)
+- [Tracing, logs and cost](#tracing-and-logs)
 - [Testing your deciders](#testing-your-deciders)
 - [Writing a provider](#writing-a-provider)
 - [Environment variables](#environment-variables)
@@ -80,7 +80,7 @@ rest of aixon.
 | `chance(option)` | chance of one option; `0.0` if the engine did not report it |
 | `score` | fractional position on a scale (`0` = first level); scale deciders only |
 | `decider`, `provider`, `model` | who answered |
-| `latency_ms`, `usage` | what it cost (`usage` in the OpenAI shape, when the engine reports tokens) |
+| `latency_ms`, `usage`, `cost` | what it cost: tokens in the OpenAI shape when the engine reports them, and US dollars when the provider knows its price (see [Cost](#cost)) |
 
 `certainty` is not always the chance of the choice. An engine that reports its
 own confidence may return `choice="product"`, `chances={"store": 0.38,
@@ -168,7 +168,9 @@ out[UrgencyDecider]    # Decision | None
 ```
 
 `aixon.decider.adecide_many` is the async twin. One group failing does not
-affect another.
+affect another. A shared request is billed once: its `usage` and `cost` are on
+the first decision of the group and `None` on the others, so adding decisions
+up never counts the same tokens twice.
 
 ---
 
@@ -305,11 +307,16 @@ checks = [Check(AnswersTheQuestionDecider, redo=redo)]
 
 Rules of the second attempt:
 
-- At most **one**. The second answer is not checked again.
+- At most **one**. The second answer is not checked again. Each attempt has
+  the agent's full `max_execution_time`, so a redo can double the worst-case
+  duration of a request.
 - Only a real answer is checked: not a client tool call, not empty, not the
   timeout text.
-- If the second attempt raises or comes back empty, **the first answer
-  stands**. A check never makes things worse.
+- If the second attempt raises, times out or comes back empty, **the first
+  answer stands**. A check never makes things worse.
+- The answer is judged against the **last user message of the conversation**,
+  also when the run resumes after a tool result. With no user message at all
+  there is nothing to judge against and the checks are skipped.
 - `Message.usage` covers both attempts. A reasoning line (`check_redo_label`,
   default `"Reviewing the answer..."`, `""` to silence) marks the redo.
 - In `stream` / `astream`, reasoning chunks flow live; the answer is held until
@@ -445,7 +452,8 @@ class AnswersTheQuestionDecider(Decider):
     ...
 ```
 
-- `redact` receives a copy; your context is not modified.
+- `redact` receives a deep copy; your context is not modified, even by a
+  redactor that masks a nested value in place.
 - If `redact` raises, there is **no decision** and nothing is sent.
 - The trace span records the context **after** redaction — what actually left.
 - A local provider (`laya`) does not require it.
@@ -519,7 +527,11 @@ named `decider:<name>` under the request's trace:
 
 - **input**: the context after `redact`;
 - **output**: `choice`, `certainty`, `sure`, `chances` — or `{"no_decision": "<reason>"}`;
-- **metadata**: provider, model, `latency_ms`, `usage`, the decider's threshold.
+- **metadata**: provider, model, `latency_ms`, `usage`, `cost_usd`, the decider's threshold.
+
+When the engine reports tokens, the observation is a **generation** carrying
+the model and the usage, so it adds to the trace's token and cost totals right
+next to the chat model's.
 
 A failed call (timeout, HTTP error, malformed reply) is a span at `WARNING`
 level. A decider that is switched off or has no key leaves no span: that is
@@ -533,8 +545,28 @@ WARNING decider 'upset' -> no decision (TimeoutError)
 INFO    agent 'grocery': answer failed check(s) [answers_the_question]; second attempt
 ```
 
-Decision tokens are reported on `Decision.usage` and in the span. They are not
+Decision tokens are reported on `Decision.usage` and in the trace. They are not
 added to `Message.usage`, which stays the chat model's bill.
+
+### Cost
+
+`Decision.cost` is the request's price in US dollars, and the same number goes
+to the trace, when the provider knows its price per million tokens:
+
+| Provider | Price |
+|---|---|
+| `jev` | `JEV_PRICE_PER_MTOK`: one number (`0.042`) or `input,output` (`0.042,0.084`). **No default** — a vendor's price hard-coded in a library goes stale. Unset: `cost` is `None` |
+| `laya` | `0` (local) |
+| `LLMDeciderProvider` | not priced by aixon |
+| your own | override `price_per_mtok()` |
+
+Without a price from aixon, Langfuse still prices the generation by itself if
+the project has a model definition matching the engine's model name
+(Settings → Models). An unreadable price (a typo in the variable) yields
+`cost = None`; it never costs you the decision.
+
+For scale: a Jev decision is about 400 tokens, so at US$ 0.042 per million a
+thousand answers with three decisions each cost about five cents.
 
 ---
 
@@ -601,6 +633,9 @@ register_decider_provider(MyEngineProvider())
   refused when a decider on your provider is defined.
 - Leave `RawAnswer.certainty` as `None` unless your engine reports a calibrated
   confidence; the chance of the choice is used instead.
+- Return token `usage` in the `ProviderReply` and override `price_per_mtok()`
+  (US dollars per million `(input, output)` tokens) to get `Decision.cost` and
+  the cost in the trace.
 - Import your SDK inside `decide`, never at module level.
 
 Engines that speak the "System One" format (`choice` / `noul` / `score`
@@ -617,6 +652,7 @@ Jev and Laya providers do.
 | `TYPESAFE_API_KEY` | `jev` | API key; absent = provider unavailable, deciders return `None` |
 | `JEV_MODEL` | `jev` | model when the decider declares none (default `jev-latest`) |
 | `JEV_BASE_URL` | `jev` | endpoint base (default `https://api.typesafe.ai/v1`) |
+| `JEV_PRICE_PER_MTOK` | `jev` | US dollars per million tokens, `price` or `input,output`; unset = no cost reported |
 | `LAYA_MODEL` | `laya` | Hugging Face id or checkpoint path when the decider declares none |
 | `LAYA_DEVICE` | `laya` | `cpu` (default), `cuda`, `mps` |
 | `LAYA_MAX_LEN` | `laya` | context truncation in tokens (default `1024`) |

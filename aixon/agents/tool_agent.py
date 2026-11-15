@@ -883,6 +883,19 @@ class ToolAgent(Agent, abstract=True):
         return bool(self.checks) and not has_tool_calls and bool(content.strip()) \
             and content not in self.timeout_texts()
 
+    def _checked(self, question: str, content: str, has_tool_calls: bool) -> bool:
+        """Checkable AND there is a question to judge the answer against."""
+        return bool(question.strip()) and self._checkable(content, has_tool_calls)
+
+    def _has_answer(self, chunks: list[Chunk]) -> bool:
+        """Did a (second) streamed attempt produce a real answer? The
+        pass-through timeout text is not one: a second attempt that ran out
+        of time must not replace a first answer that was merely imperfect."""
+        if any(c.tool_calls for c in chunks):
+            return True
+        content = "".join(c.content for c in chunks)
+        return bool(content.strip()) and content not in self.timeout_texts()
+
     def _log_redo(self, failures: list) -> None:
         names = ", ".join(f.check.decider.name for f in failures)
         _log.info(f"agent '{self.name}': answer failed check(s) [{names}]; second attempt")
@@ -892,7 +905,10 @@ class ToolAgent(Agent, abstract=True):
         something, else the first. Usage covers both runs."""
         from aixon.usage import merge_usage
 
-        if second is None or not (second.content.strip() or second.tool_calls):
+        if second is None:
+            return first
+        if not (second.content.strip() or second.tool_calls):
+            first.usage = merge_usage(first.usage, second.usage)  # the discarded run was paid for too
             return first
         second.usage = merge_usage(first.usage, second.usage)
         lines = [first.reasoning, self.check_redo_label, second.reasoning]
@@ -910,7 +926,7 @@ class ToolAgent(Agent, abstract=True):
         question = _last_user_text(messages)
         messages = apply_doubts(messages, self.doubts)
         first = self._invoke_once(messages)
-        if not self._checkable(first.content, bool(first.tool_calls)):
+        if not self._checked(question, first.content, bool(first.tool_calls)):
             return first
         failures = failed_checks(question, first.content, self.checks)
         if not failures:
@@ -933,7 +949,7 @@ class ToolAgent(Agent, abstract=True):
         question = _last_user_text(messages)
         messages = await aapply_doubts(messages, self.doubts)
         first = await self._ainvoke_once(messages)
-        if not self._checkable(first.content, bool(first.tool_calls)):
+        if not self._checked(question, first.content, bool(first.tool_calls)):
             return first
         failures = await afailed_checks(question, first.content, self.checks)
         if not failures:
@@ -967,7 +983,7 @@ class ToolAgent(Agent, abstract=True):
                 held.append(chunk)
         answer = "".join(c.content for c in held)
         failures = []
-        if self._checkable(answer, any(c.tool_calls for c in held)):
+        if self._checked(question, answer, any(c.tool_calls for c in held)):
             failures = failed_checks(question, answer, self.checks)
         if not failures:
             yield from held
@@ -985,7 +1001,7 @@ class ToolAgent(Agent, abstract=True):
         except Exception as exc:  # the first answer stands
             _log.warning(f"agent '{self.name}': second attempt failed ({exc!r}); keeping the first answer")
             again = []
-        yield from (again if _has_answer(again) else held)
+        yield from (again if self._has_answer(again) else held)
 
     def _astream_once(self, messages: list[Message]) -> AsyncIterator[Chunk]:
         """One attempt of the async stream: ``ToolAgent.astream``'s own body,
@@ -1011,7 +1027,7 @@ class ToolAgent(Agent, abstract=True):
             return
         answer = "".join(c.content for c in held)
         failures = []
-        if self._checkable(answer, any(c.tool_calls for c in held)):
+        if self._checked(question, answer, any(c.tool_calls for c in held)):
             failures = await afailed_checks(question, answer, self.checks)
         if not failures:
             for chunk in held:
@@ -1033,7 +1049,7 @@ class ToolAgent(Agent, abstract=True):
             again = []
         finally:
             await second.aclose()  # type: ignore[attr-defined]
-        for chunk in (again if _has_answer(again) else held):
+        for chunk in (again if self._has_answer(again) else held):
             yield chunk
 
 
@@ -1045,15 +1061,13 @@ class _DecidedPass(list):
 
 
 def _last_user_text(messages: list[Message]) -> str:
-    """The user's turn the run answers: the last message when it is a user
-    message, else "" (a run resuming after a tool result has no new question)."""
-    return messages[-1].content if messages and messages[-1].role == "user" else ""
+    """The question the run answers: the LAST user message of the conversation
+    — also when the run resumes after a tool result, where the user's turn is
+    a few messages back. "" when there is none (the checks are then skipped)."""
+    return next((m.content for m in reversed(messages) if m.role == "user"), "")
 
 
 def _is_reasoning_only(chunk: Chunk) -> bool:
     return not (chunk.content or chunk.tool_calls or chunk.done)
 
-
-def _has_answer(chunks: list[Chunk]) -> bool:
-    return any(c.content.strip() or c.tool_calls for c in chunks)
 

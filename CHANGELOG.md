@@ -58,7 +58,13 @@ modelo. Quem não declara nada roda como na 0.1.30. Issue #33 (consolida #30 e
   1 quando nenhum exemplo foi respondido. Em código:
   `aixon.deciders.evaluation.evaluate`.
 - **Observabilidade**: `aixon.observability.record_decision`; com o Langfuse
-  ligado, cada decisão vira um span `decider:<nome>` (falha em nível `WARNING`).
+  ligado, cada decisão vira uma observação `decider:<nome>` (falha em nível
+  `WARNING`). Quando o motor informa tokens, ela é uma *generation* com modelo
+  e uso, e soma nos totais de tokens e de custo do trace.
+- **Custo**: `Decision.cost` (US$) e `DeciderProvider.price_per_mtok()`. O Jev
+  lê `JEV_PRICE_PER_MTOK` (`0.042` ou `entrada,saída`), sem valor padrão; o
+  Laya custa zero. Requisição compartilhada por vários decisores é cobrada uma
+  vez: uso e custo ficam na primeira decisão do grupo.
 - `docs/deciders.md`, seção no README, `aixon decide eval` em `docs/cli.md`,
   `examples/decider/` (roda offline; com `AIXON_DECIDER_PROVIDER=jev` ou `laya`
   usa o motor real).

@@ -357,3 +357,73 @@ def test_check_hooks_that_raise_do_not_fail_the_answer():
     base = sense_check({"makes_sense": ("no", 0.95)})
     assert failed_checks("q", "a", [Check(base.decider, redo=boom)]) == []
     assert failed_checks("q", "a", [Check(base.decider, redo=base.redo, context=boom)]) == []
+
+
+# ---- review round (2026-11-15) -------------------------------------------------
+
+def test_hooks_returning_a_non_string_do_not_break_the_request():
+    out = apply_doubts(user("acerola?"), [Doubt(store_decider("store"), on_sure=lambda d, c: 42)])
+    assert out[-1].content == "acerola?\n\n42"
+
+
+def test_contexts_that_cannot_be_serialized_do_not_raise():
+    loop: dict = {}
+    loop["self"] = loop
+    doubt = Doubt(store_decider("store"), context=lambda m, c: {1: "a", "b": loop},
+                  on_sure=lambda d, c: "[ok]")
+    assert apply_doubts(user("acerola?"), [doubt])[-1].content.endswith("[ok]")
+    check = Check(sense_check({"makes_sense": ("no", 0.95)}).decider, redo=lambda d, a: "redo",
+                  context=lambda m, a: {1: "a", "b": loop})
+    assert len(failed_checks("q", "a", [check])) == 1
+
+
+def test_directive_keeps_the_other_fields_of_the_user_message():
+    message = Message(role="user", content="acerola?", name="ana")
+    assert apply_doubts([message], [store_doubt("store")])[-1].name == "ana"
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_a_run_resuming_after_a_tool_result_is_checked_against_the_users_question(monkeypatch, path):
+    check = sense_check({"makes_sense": ("yes", 0.95)})
+    agent, _ = build(monkeypatch, ["August was 10."], checks=[check])
+    history = [Message(role="user", content="revenue in august?"),
+               Message(role="assistant", content="", tool_calls=[
+                   {"id": "c1", "name": "sales", "args": {}}]),
+               Message(role="tool", content="10", tool_call_id="c1")]
+    assert run(agent, path, history)[0] == "August was 10."
+    assert check.decider.provider.calls[0][0]["message"] == "revenue in august?"
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_no_user_message_means_no_check(monkeypatch, path):
+    check = sense_check({"makes_sense": ("no", 0.95)})
+    agent, model = build(monkeypatch, ["hello"], checks=[check])
+    assert run(agent, path, [Message(role="assistant", content="hi")])[0] == "hello"
+    assert check.decider.provider.calls == [] and len(model.calls) == 1
+
+
+@pytest.mark.parametrize("path", ["stream", "astream"])
+def test_a_second_attempt_that_times_out_keeps_the_first_answer(monkeypatch, path):
+    import time
+
+    class SlowSecond(RecordingChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if self.calls:
+                time.sleep(0.6)
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    agent, _ = build(monkeypatch, [], checks=[sense_check({"makes_sense": ("no", 0.95)})],
+                     max_execution_time=0.3)
+    model = SlowSecond(script=[AIMessage(content="FIRST ANSWER"), AIMessage(content="")])
+    model.calls = []
+    monkeypatch.setattr(type(agent).llm.__class__, "chat_model", property(lambda self: model))
+    assert run(agent, path, user("q"))[0] == "FIRST ANSWER"
+
+
+def test_usage_of_a_discarded_second_attempt_still_counts(monkeypatch):
+    agent, model = build(monkeypatch, [], checks=[sense_check({"makes_sense": ("no", 0.95)})])
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    model.script = [AIMessage(content="first", usage_metadata=usage),
+                    AIMessage(content="", usage_metadata=usage)]
+    answer = agent.invoke(user("q"))
+    assert answer.content == "first" and answer.usage["total_tokens"] == 30

@@ -7,6 +7,9 @@ SDK: the call is plain ``urllib`` so this provider adds no dependency.
   every ``Decider`` on it returns ``None`` — nothing is sent, nothing raises.
 - Endpoint: ``JEV_BASE_URL`` (default ``https://api.typesafe.ai/v1``).
 - Model: the ``Decider``'s ``model``, else ``JEV_MODEL``, else ``jev-latest``.
+- Price: ``JEV_PRICE_PER_MTOK``, US dollars per million tokens — one number
+  (``0.042``) or ``input,output`` (``0.042,0.084``). No default: a vendor price
+  hard-coded in a library goes stale. Unset = ``Decision.cost`` is ``None``.
 
 Hosted: the context leaves your process, so a ``Decider`` here must declare
 ``redact`` (see ``aixon.decider``).
@@ -49,6 +52,13 @@ class JevProvider(DeciderProvider):
 
     def unavailable(self) -> str | None:
         return None if os.getenv("TYPESAFE_API_KEY") else "no_key"
+
+    def price_per_mtok(self) -> tuple[float, float] | None:
+        raw = (os.getenv("JEV_PRICE_PER_MTOK") or "").strip()
+        if not raw:
+            return None
+        parts = [float(part) for part in raw.split(",")]
+        return (parts[0], parts[-1])
 
     def decide(
         self,

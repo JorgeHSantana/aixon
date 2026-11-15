@@ -11,6 +11,8 @@ decision, never at ``import aixon``.
 - Each (model, device) is loaded once per process and reused; loading and
   inference are serialized by a lock because a checkpoint is not safe to run
   from two threads at once.
+- A checkpoint that fails to load is not retried for 60 seconds: retrying on
+  every decision would keep every Laya decider queued behind a slow failure.
 
 ``timeout`` is not enforced: a local forward pass cannot be interrupted. Keep
 the context short instead (the engine truncates at ``LAYA_MAX_LEN`` tokens,
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Any, Callable, Mapping
 
 from aixon.deciders.base import DeciderProvider, ProviderReply, Question, register_decider_provider
@@ -47,7 +50,13 @@ class LayaProvider(DeciderProvider):
     def __init__(self, loader: Loader | None = None) -> None:
         self._loader = loader
         self._engines: dict[tuple[str | None, str], Any] = {}
+        self._failed: dict[tuple[str | None, str], tuple[float, Exception]] = {}
         self._lock = threading.Lock()
+
+    RETRY_LOAD_AFTER_S = 60.0
+
+    def price_per_mtok(self) -> tuple[float, float] | None:
+        return (0.0, 0.0)  # local: no per-token bill
 
     def unavailable(self) -> str | None:
         if self._loader is not None:
@@ -59,7 +68,15 @@ class LayaProvider(DeciderProvider):
     def _engine(self, model: str | None, device: str) -> Any:
         key = (model, device)
         if key not in self._engines:
-            self._engines[key] = (self._loader or _load)(model, device)
+            failed = self._failed.get(key)
+            if failed and time.monotonic() - failed[0] < self.RETRY_LOAD_AFTER_S:
+                raise failed[1]
+            try:
+                self._engines[key] = (self._loader or _load)(model, device)
+            except Exception as exc:
+                self._failed[key] = (time.monotonic(), exc)
+                raise
+            self._failed.pop(key, None)
         return self._engines[key]
 
     def decide(

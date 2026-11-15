@@ -2756,7 +2756,7 @@ The same logic is available as functions in `aixon.decider`: `resolve_doubts`, `
 
 Without its key, the `jev` provider is unavailable: nothing is sent and deciders on it return `None`. A custom engine subclasses `aixon.deciders.DeciderProvider` (attributes `name`, `hosted`, `capabilities`, `max_options`, `default_model`; methods `unavailable()` and `decide(context, questions, *, model, timeout) -> ProviderReply`) and is registered with `register_decider_provider`.
 
-Environment variables: `AIXON_DECIDER_PROVIDER`, `TYPESAFE_API_KEY`, `JEV_MODEL` (default `jev-latest`), `JEV_BASE_URL`, `LAYA_MODEL`, `LAYA_DEVICE` (default `cpu`), `LAYA_MAX_LEN` (default 1024).
+Environment variables: `AIXON_DECIDER_PROVIDER`, `TYPESAFE_API_KEY`, `JEV_MODEL` (default `jev-latest`), `JEV_BASE_URL`, `JEV_PRICE_PER_MTOK`, `LAYA_MODEL`, `LAYA_DEVICE` (default `cpu`), `LAYA_MAX_LEN` (default 1024).
 
 ### 30.6 Redaction, calibration and tracing
 
@@ -2764,5 +2764,5 @@ A hosted provider receives the context, so a decider on one must declare `redact
 
 `aixon decide eval package.module:ClassName examples.jsonl [--thresholds 0.7,0.8,0.9]` calibrates the threshold. Each line of the file is `{"context": {...}, "expected": "<option>"}`, or `"expected": null` when the right behaviour is to be unsure. Per threshold it prints: `right` (sure and correct), `WRONG, sure` (sure and wrong, or sure where doubt was expected), `right doubt`, and `needless doubt`. Exit status 1 when no example was answered. In code: `aixon.deciders.evaluation.evaluate(decider, examples)`.
 
-With the Langfuse integration on, each decision is one span named `decider:<name>` with the redacted context, the choice, certainty and chances, and the provider, model, latency and usage. A failed call is a span at WARNING level. Decision tokens are in `Decision.usage`; they are not added to `Message.usage`.
+With the Langfuse integration on, each decision is one span named `decider:<name>` with the redacted context, the choice, certainty and chances, and the provider, model, latency and usage. A failed call is a span at WARNING level. When the engine reports tokens the observation is a generation with model and usage, so it adds to the trace's token and cost totals. `Decision.cost` is the request's price in US dollars when the provider knows its price per million tokens: `jev` reads the `JEV_PRICE_PER_MTOK` environment variable (`0.042`, or `input,output`; no default, unset means `cost` is `None`), `laya` costs 0, a custom provider overrides `price_per_mtok()`. A request shared by several deciders is billed once: `usage` and `cost` are on the first decision of the group and `None` on the others. Decision tokens are never added to `Message.usage`.
 
